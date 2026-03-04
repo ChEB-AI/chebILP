@@ -11,8 +11,10 @@ import re
 import argparse
 from typing import Literal
 
+import networkx as nx
+
 from chebILP.ilp_path_manager import get_bias_path, get_bk_path
-from chemlog.preprocessing.chebi_data import ChEBIData
+from chebi_utils import build_chebi_graph, download_chebi_obo
 
 def load_bias_predicates(bias_path: str) -> list[tuple[str, int]]:
     """
@@ -34,19 +36,20 @@ def load_bias_predicates(bias_path: str) -> list[tuple[str, int]]:
     return predicates
 
 
-def get_chebi_class_info(chebi_data: ChEBIData, chebi_id: int) -> dict:
+def get_chebi_class_info(chebi_graph: nx.DiGraph, chebi_id: int) -> dict:
     """
-    Get information about a ChEBI class.
-    
+    Get information about a ChEBI class from the ontology graph.
+
     Args:
-        chebi_data: ChEBIData instance.
+        chebi_graph: ChEBI ontology graph built by ``build_chebi_graph``.
         chebi_id: The ChEBI ID (integer).
-        
+
     Returns:
         Dictionary with 'name', 'definition', and other properties.
     """
-    if chebi_id in chebi_data.chebi:
-        return chebi_data.chebi[chebi_id]
+    node_id = str(chebi_id)
+    if node_id in chebi_graph.nodes:
+        return dict(chebi_graph.nodes[node_id])
     return {"name": f"CHEBI:{chebi_id}", "definition": None}
 
 
@@ -197,7 +200,7 @@ def write_bias_file(
 
 def select_predicates_for_class(
     chebi_id: int,
-    chebi_data: ChEBIData,
+    chebi_graph: nx.DiGraph,
     problem_dir: str,
     predicate_set: Literal["atoms", "chembl_fgs"] = "atoms",
     selection_mode: Literal["claude", "random", "top_k"] = "claude",
@@ -208,7 +211,7 @@ def select_predicates_for_class(
     
     Args:
         chebi_id: ChEBI ID of the target class.
-        chebi_data: ChEBIData instance.
+        chebi_graph: ChEBI ontology graph built by ``build_chebi_graph``.
         problem_dir: Base directory for ILP problems.
         predicate_set: Which predicate set to use ("atoms" or "chembl_fgs").
         selection_mode: How to select predicates ("claude", "random", or "top_k").
@@ -225,7 +228,7 @@ def select_predicates_for_class(
     print(f"Loaded {len(predicates)} predicates from {bias_path_before}")
     
     # Get ChEBI class info
-    class_info = get_chebi_class_info(chebi_data, chebi_id)
+    class_info = get_chebi_class_info(chebi_graph, chebi_id)
     chebi_name = class_info.get("name", f"CHEBI:{chebi_id}")
     chebi_definition = class_info.get("definition")
     
@@ -288,14 +291,19 @@ def select_predicates_for_classes(
     
     # Load ChEBI data
     print(f"Loading ChEBI data (version {chebi_version})...")
-    chebi_data = ChEBIData(chebi_version=chebi_version)
+    data_dir = os.path.join("data", f"chebi_v{chebi_version}")
+    os.makedirs(data_dir, exist_ok=True)
+    obo_path = os.path.join(data_dir, "chebi.obo")
+    if not os.path.exists(obo_path):
+        download_chebi_obo(chebi_version, dest_dir=data_dir)
+    chebi_graph = build_chebi_graph(obo_path)
     
     results = {}
     for chebi_id in chebi_ids:
         try:
             output_path = select_predicates_for_class(
                 chebi_id=chebi_id,
-                chebi_data=chebi_data,
+                chebi_graph=chebi_graph,
                 problem_dir=problem_dir,
                 predicate_set=predicate_set,
                 selection_mode=selection_mode,

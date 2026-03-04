@@ -9,8 +9,15 @@ import networkx as nx
 
 import tqdm
 from chebILP.ilp_classifier import PopperWrapper, run_ilp_training_subprocess, run_ilp_validation_subprocess
-from chemlog.preprocessing.chebi_data import ChEBIData
-from chemlog.preprocessing.mol_to_fol import mol_to_fol_atoms
+from chebILP.mol_to_fol import mol_to_fol_atoms
+from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
+from chebi_utils import (
+    build_chebi_graph,
+    download_chebi_obo,
+    download_chebi_sdf,
+    extract_molecules,
+    get_hierarchy_subgraph,
+)
 import pandas as pd
 import time
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
@@ -81,12 +88,40 @@ class ILPProblemBuilder:
         self.max_body = max_body
         self.max_clauses = max_clauses
 
-        self.chebi_data = ChEBIData(chebi_version=self.chebi_version)
-        # we need 2 versions of the graph: one with directed transitive edges (e.g. to find all subclasses of x)
-        # and one with undirected non-transitive edges (e.g. to find closest neighbors of x for sampling negatives)
-        self.hierarchy_graph = self.chebi_data.get_trans_hierarchy()
-        nontrans_hierarchy = self.chebi_data.build_hierarchy_graph()
+        # --- Load ChEBI data via chebi_utils --------------------------------
+        data_dir = os.path.join("data", f"chebi_v{chebi_version}")
+        os.makedirs(data_dir, exist_ok=True)
+        obo_path = os.path.join(data_dir, "chebi.obo")
+        sdf_path = os.path.join(data_dir, "chebi.sdf.gz")
+        if not os.path.exists(obo_path):
+            download_chebi_obo(chebi_version, dest_dir=data_dir)
+        if not os.path.exists(sdf_path):
+            download_chebi_sdf(chebi_version, dest_dir=data_dir)
+
+        self.chebi_graph = build_chebi_graph(obo_path)
+
+        # Build merged processed DataFrame (molecules + subset from OBO)
+        molecules_df = extract_molecules(sdf_path)
+        subset_map = {
+            nid: attrs.get("subset")
+            for nid, attrs in self.chebi_graph.nodes(data=True)
+        }
+        molecules_df["subset"] = molecules_df["chebi_id"].map(subset_map)
+        molecules_df.index = molecules_df["chebi_id"].astype(int)
+        molecules_df.index.name = None
+        self.processed = molecules_df
+
+        # Hierarchy graphs. chebi_utils edges go child→parent (is_a), so
+        # reverse to get parent→child (used by chebILP: successors = descendants).
+        hierarchy_child_to_parent = get_hierarchy_subgraph(self.chebi_graph)
+        nontrans_hierarchy = hierarchy_child_to_parent.reverse(copy=True)
+        # Convert node IDs to int for consistency with DataFrame index
+        nontrans_hierarchy = nx.relabel_nodes(
+            nontrans_hierarchy, {n: int(n) for n in nontrans_hierarchy.nodes}
+        )
+        self.hierarchy_graph = nx.transitive_closure_dag(nontrans_hierarchy)
         self.undirected_graph = nontrans_hierarchy.to_undirected()
+
         self.samples_df = self.load_samples(kwargs["dataset_path"] if "dataset_path" in kwargs else None)
 
         # load splits from csv file
@@ -113,7 +148,7 @@ class ILPProblemBuilder:
         return self._problem_dir if self._problem_dir else os.path.join("ilp", f"chebi_v{self.chebi_version}")
             
     def load_samples(self, dataset_path):
-        return self.chebi_data.processed[self.chebi_data.processed["subset"] == "3_STAR"]
+        return self.processed[self.processed["subset"] == "3_STAR"]
         
     def build_examples(self, target_ids, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
         min_n_pos = max_pos_samples + 1
@@ -165,7 +200,12 @@ class ILPProblemBuilder:
                 body_predicates.update(body_predicates_atoms)
                 if self.predicate_set in ["chembl_fgs", "chebi_fgs"]:
                     # add fgs as samples
-                    prolog_lines_fgs, body_predicates_fgs = build_background_fg_data(self.chebi_data, selected_rows, source=self.predicate_set)
+                    if not hasattr(self, "_fg_data"):
+                        if self.predicate_set == "chembl_fgs":
+                            self._fg_data = get_chembl_fgs(self.samples_df)
+                        else:
+                            self._fg_data = get_chebi_fgs(self.samples_df)
+                    prolog_lines_fgs, body_predicates_fgs = build_background_fg_data(self._fg_data, selected_rows, source=self.predicate_set)
                     prolog_lines += prolog_lines_fgs
                     body_predicates.update(body_predicates_fgs)
                 prolog_lines_by_split[split] = prolog_lines
@@ -369,14 +409,8 @@ def build_background_chebi_fg_rules(rules_path=None):
     return prolog_lines, body_predicates
 
 
-def build_background_fg_data(chebi_data, rows, source: Literal["chembl_fgs", "chebi_fgs"]):
+def build_background_fg_data(fg_data: dict[int, list[str]], rows, source: Literal["chembl_fgs", "chebi_fgs"]):
     lines_by_predicate = dict()
-    if source == "chembl_fgs":
-        fg_data = chebi_data.get_chembl_fgs()
-    elif source == "chebi_fgs":
-        fg_data = chebi_data.get_chebi_fgs()
-    else:
-        raise ValueError(f"Unknown source {source}")
 
     for row in rows.itertuples():
         if row.Index not in fg_data:

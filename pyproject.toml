@@ -1,29 +1,19 @@
-[build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "chebILP"
+name = "chebilp"
 version = "0.1.0"
 description = "An Inductive Logic Programming framework for classifying chemical compounds into ChEBI classes."
-requires-python = ">=3.10"
-license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.12"
 dependencies = [
-    "pandas",
-    "networkx",
-    "tqdm",
-    "bitarray",
-    "clingo",
-    "janus_swi",
-    "python-dotenv",
-    "anthropic",
-    "popper",
+    "chebi-utils",
+    "clingo>=5.8.0",
+    "networkx>=3.6.1",
+    "numpy>=1.24",
+    "pandas>=3.0.1",
+    "rdkit>=2022.09",
+    "tqdm>=4.67.3",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest",
-]
 
 [project.scripts]
 chebILP = "chebILP.cli:main"
