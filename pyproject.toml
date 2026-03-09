@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "chebi-utils",
-    "popper",
+    "popper@git+https://github.com/logic-and-learning-lab/Popper#egg=main",
     "clingo>=5.8.0",
     "networkx>=3.6.1",
     "numpy>=1.24",
