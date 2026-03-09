@@ -111,7 +111,7 @@ def _make_ilp_builder(args) -> ILPProblemBuilder:
 
 def _make_results_dir(fg_mode: bool) -> str:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join("ilp", "results", f"run_fgs_{timestamp}" if fg_mode else f"run_{timestamp}")
+    results_dir = os.path.join("data", "results", f"run_fgs_{timestamp}" if fg_mode else f"run_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, "results.json"), "w+") as f:
         f.write("")
