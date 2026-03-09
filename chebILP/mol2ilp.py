@@ -335,8 +335,9 @@ def build_background_chemlog(rows):
             # replace cip_code_s and cip_code_r with cip_code_S and cip_code_R
             if predicate.startswith("cip_code_"):
                 predicate = "cip_code_" + predicate[-1].upper()
-            if predicate == "EQ" or predicate == "atom" or predicate == "*":
-                continue  # skip equality predicate (implicit in Prolog)
+            forbidden_predicates = ["EQ", "atom", "*", "r", "r#"]
+            if predicate in forbidden_predicates:
+                continue  # skip equality predicate (implicit in Prolog) and other predicates not refering to an atom
             if predicate not in lines_by_predicate:
                 lines_by_predicate[predicate] = []
             if predicate not in arities:
