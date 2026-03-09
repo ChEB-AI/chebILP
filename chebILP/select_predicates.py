@@ -267,7 +267,7 @@ def select_predicates_for_class(
 
 def select_predicates_for_classes(
     chebi_ids: list[int],
-    chebi_version: int = 244,
+    chebi_version: int = 248,
     problem_dir: str | None = None,
     predicate_set: Literal["atoms", "chembl_fgs"] = "atoms",
     selection_mode: Literal["claude", "random", "top_k"] = "claude",
@@ -315,68 +315,3 @@ def select_predicates_for_classes(
             results[chebi_id] = None
     
     return results
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Select predicates for ChEBI classes using Claude."
-    )
-    parser.add_argument(
-        "--labels_file",
-        type=str,
-        required=True,
-        help="Path to file with ChEBI IDs (one per line)."
-    )
-    parser.add_argument(
-        "--chebi_version",
-        type=int,
-        default=244,
-        help="ChEBI version to use."
-    )
-    parser.add_argument(
-        "--problem_dir",
-        type=str,
-        default=None,
-        help="Base directory for ILP problems."
-    )
-    parser.add_argument(
-        "--predicate_set",
-        type=str,
-        default="atoms",
-        choices=["atoms", "chembl_fgs"],
-        help="Which predicate set to use."
-    )
-    parser.add_argument(
-        "--selection_mode",
-        type=str,
-        default="claude",
-        choices=["claude", "random", "top_k"],
-        help="How to select predicates."
-    )
-    parser.add_argument(
-        "--top_k",
-        type=int,
-        default=10,
-        help="Number of predicates to select."
-    )
-    
-    args = parser.parse_args()
-    
-    # Load ChEBI IDs from labels file
-    with open(args.labels_file, "r") as f:
-        chebi_ids = [int(line.strip()) for line in f if line.strip()]
-    
-    print(f"Processing {len(chebi_ids)} ChEBI classes...")
-    
-    results = select_predicates_for_classes(
-        chebi_ids=chebi_ids,
-        chebi_version=args.chebi_version,
-        problem_dir=args.problem_dir,
-        predicate_set=args.predicate_set,
-        selection_mode=args.selection_mode,
-        top_k=args.top_k,
-    )
-    
-    # Print summary
-    successful = sum(1 for v in results.values() if v is not None)
-    print(f"\nCompleted: {successful}/{len(chebi_ids)} classes processed successfully")

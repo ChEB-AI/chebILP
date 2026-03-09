@@ -229,7 +229,7 @@ def _add_common_args(parser: argparse.ArgumentParser):
     parser.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
     parser.add_argument("--chebi_split", type=str, required=True, help="Path to the ChEBI split file.")
     parser.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
-    parser.add_argument("--chebi_version", type=int, default=244, help="ChEBI version to use.")
+    parser.add_argument("--chebi_version", type=int, default=248, help="ChEBI version to use.")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=["atoms", "chembl_fgs", "chebi_fgs", "chebi_fg_rules", "chebi_fg_learned_rules"], help="Which predicate set to use for background knowledge.")
     parser.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
     parser.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")
@@ -282,7 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Select predicates for ChEBI classes (via Claude, random, or top-k frequency).",
     )
     sp_select.add_argument("--labels_file", type=str, required=True, help="Path to file with ChEBI IDs (one per line).")
-    sp_select.add_argument("--chebi_version", type=int, default=244, help="ChEBI version to use.")
+    sp_select.add_argument("--chebi_version", type=int, default=248, help="ChEBI version to use.")
     sp_select.add_argument("--problem_dir", type=str, default=None, help="Base directory for ILP problems.")
     sp_select.add_argument("--predicate_set", type=str, default="atoms", choices=["atoms", "chembl_fgs"], help="Which predicate set to use.")
     sp_select.add_argument("--selection_mode", type=str, default="claude", choices=["claude", "random", "top_k"], help="How to select predicates.")

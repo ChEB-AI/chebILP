@@ -3,7 +3,7 @@ from typing import Literal
 
 def get_problem_dir(chebi_id, split:Literal["train", "validation", "test"], base_dir=None):
     if base_dir is None:
-        base_dir = os.path.join("ilp", "chebi_v244")
+        base_dir = os.path.join("ilp", "chebi_v248")
     problem_dir = os.path.join(base_dir, f"chebi_{chebi_id}", split)
     os.makedirs(problem_dir, exist_ok=True)
     return problem_dir

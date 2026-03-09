@@ -130,7 +130,7 @@ class ILPProblemBuilder:
     def problem_dir(self):
         return self._problem_dir if self._problem_dir else os.path.join("data", f"ilp_problems")
             
-    def build_examples(self, target_ids, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
+    def build_examples(self, target_ids: list[str], min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
         min_n_pos = max_pos_samples + 1
         min_n_pos_id = None
         min_n_neg = max_neg_samples + 1
@@ -251,11 +251,11 @@ class ILPProblemBuilder:
                 f.write(bias_content)
 
 
-    def get_closest_negatives(self, samples: pd.DataFrame, target_id, min_samples=25, max_samples=None):
+    def get_closest_negatives(self, samples: pd.DataFrame, target_id: str, min_samples=25, max_samples=None):
         # goal: reach min_samples, but continue collecting samples (until max_samples) if they are siblings
         import queue 
         q = queue.Queue()
-        q.put(int(target_id))
+        q.put(target_id)
         visited = set() # visit closest labels
         selected = set() # select samples that are subclasses of closest labels until we have enough samples
         samples_index = list(str(id) for id in samples.index)
@@ -266,7 +266,7 @@ class ILPProblemBuilder:
                 if neighbor not in visited:
                     visited.add(neighbor)
                     q.put(neighbor)
-                    for neighbor_sub in self.hierarchy_graph.successors(neighbor):
+                    for neighbor_sub in self.hierarchy_graph.predecessors(neighbor):
                         if str(neighbor_sub) in samples_index:
                             selected.add(str(neighbor_sub))
                         if (max_samples and len(selected) >= max_samples) or (len(selected) >= min_samples and not siblings):
@@ -276,15 +276,15 @@ class ILPProblemBuilder:
                 break
             siblings = False
 
-        return self.samples_df.loc[[str(id) in selected for id in self.samples_df.index]]
+        return self.molecules.loc[[str(id) in selected for id in self.molecules.index]]
 
 
-    def gather_samples_for_chebi_cls(self, target_id, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
-        descendants = list(self.hierarchy_graph.successors(int(target_id)))
+    def gather_samples_for_chebi_cls(self, target_id: str, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
+        descendants = list(self.hierarchy_graph.predecessors(target_id))
         # not all descendants are molecules (i.e., have a SMILES annotation) -> only take the ones that are in the samples_df (i.e. have a SMILES annotation and are in the 3_STAR subset)
 
-        df_pos = self.samples_df[[id in descendants for id in self.samples_df.index]]
-        df_neg = self.samples_df[[id not in df_pos.index for id in self.samples_df.index]]
+        df_pos = self.molecules[[id in descendants for id in self.molecules.index]]
+        df_neg = self.molecules[[id not in df_pos.index for id in self.molecules.index]]
         assert len(df_pos) >= min_pos_samples, f"ChEBI class {target_id} does not have enough positive samples (found {len(df_pos)}, required are at least {min_pos_samples}). Got samples {df_pos.index.tolist()}"
         assert len(df_neg) >= min_neg_samples, f"ChEBI class {target_id} does not have enough negative samples (found {len(df_neg)}, required are at least {min_neg_samples}). Got samples {df_neg.index.tolist()}"
         
@@ -323,7 +323,7 @@ def build_background_chemlog(rows):
     lines_by_predicate = {"has_atom" : []}
     arities = {"has_atom" : 2}  # hardcode has_atom predicate
     for row in rows.itertuples():
-        comments.append(f"% CHEBI:{row.Index}, name: {row.name}, SMILES: {row.smiles}")
+        #comments.append(f"% CHEBI:{row.Index}, SMILES: {row.smiles}")
         # has atom predicates
         for atom in row.mol.GetAtoms():
             atom_id = get_atom_id(atom.GetIdx(), row.Index)

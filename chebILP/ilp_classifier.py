@@ -273,25 +273,3 @@ print(json.dumps(res))
     except json.decoder.JSONDecodeError:
         output = {"error": "Failed to parse JSON output"}
     return output
-
-
-if __name__ == "__main__":
-    import json
-    import pickle
-    import base64
-    from popper.loop import learn_solution
-    from popper.util import Settings, format_prog
-
-    settings_parameters = {
-        "noisy": True,
-        "anytime_solver": "nuwls",
-    }
-    ex_file = os.path.join("ilp", "chebi_v244", "chebi_73754", "train", "exs.pl")
-    bk_file = os.path.join("ilp", "chebi_v244", "chebi_73754", "train", "chebi_fg_learned_rules", "bk.pl")
-    bias_file = os.path.join("ilp", "chebi_v244", "chebi_73754", "train", "chebi_fg_learned_rules", "bias_max_vars=6_max_body=8_max_clauses=2.pl")
-    settings = Settings(ex_file=f"{ex_file}", bk_file=f"{bk_file}", bias_file=f"{bias_file}", **settings_parameters)
-    prog, score, stats = learn_solution(settings)
-    prog_str = format_prog(prog) if prog else None
-
-    result = {"prog_str": prog_str, "score": list(score) if score else None}
-    print(result)
