@@ -91,38 +91,21 @@ class ILPProblemBuilder:
         # --- Load ChEBI data via chebi_utils --------------------------------
         data_dir = os.path.join("data", f"chebi_v{chebi_version}")
         os.makedirs(data_dir, exist_ok=True)
-        obo_path = os.path.join(data_dir, "chebi.obo")
-        sdf_path = os.path.join(data_dir, "chebi.sdf.gz")
+        obo_path = os.path.join(data_dir, "raw", "chebi.obo")
+        sdf_path = os.path.join(data_dir, "raw", "chebi.sdf.gz")
         if not os.path.exists(obo_path):
             download_chebi_obo(chebi_version, dest_dir=data_dir)
         if not os.path.exists(sdf_path):
             download_chebi_sdf(chebi_version, dest_dir=data_dir)
 
-        self.chebi_graph = build_chebi_graph(obo_path)
+        self.chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
 
-        # Build merged processed DataFrame (molecules + subset from OBO)
         molecules_df = extract_molecules(sdf_path)
-        subset_map = {
-            nid: attrs.get("subset")
-            for nid, attrs in self.chebi_graph.nodes(data=True)
-        }
-        molecules_df["subset"] = molecules_df["chebi_id"].map(subset_map)
-        molecules_df.index = molecules_df["chebi_id"].astype(int)
+        molecules_df.index = molecules_df["chebi_id"].astype(str)
         molecules_df.index.name = None
-        self.processed = molecules_df
-
-        # Hierarchy graphs. chebi_utils edges go child→parent (is_a), so
-        # reverse to get parent→child (used by chebILP: successors = descendants).
-        hierarchy_child_to_parent = get_hierarchy_subgraph(self.chebi_graph)
-        nontrans_hierarchy = hierarchy_child_to_parent.reverse(copy=True)
-        # Convert node IDs to int for consistency with DataFrame index
-        nontrans_hierarchy = nx.relabel_nodes(
-            nontrans_hierarchy, {n: int(n) for n in nontrans_hierarchy.nodes}
-        )
-        self.hierarchy_graph = nx.transitive_closure_dag(nontrans_hierarchy)
-        self.undirected_graph = nontrans_hierarchy.to_undirected()
-
-        self.samples_df = self.load_samples(kwargs["dataset_path"] if "dataset_path" in kwargs else None)
+        self.molecules = molecules_df
+        self.hierarchy_graph = nx.transitive_closure_dag(self.chebi_graph)
+        self.undirected_graph = self.chebi_graph.to_undirected()
 
         # load splits from csv file
         with open(chebi_split, "r") as f:
@@ -145,11 +128,8 @@ class ILPProblemBuilder:
             
     @property
     def problem_dir(self):
-        return self._problem_dir if self._problem_dir else os.path.join("ilp", f"chebi_v{self.chebi_version}")
+        return self._problem_dir if self._problem_dir else os.path.join("data", f"ilp_problems")
             
-    def load_samples(self, dataset_path):
-        return self.processed[self.processed["subset"] == "3_STAR"]
-        
     def build_examples(self, target_ids, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
         min_n_pos = max_pos_samples + 1
         min_n_pos_id = None
@@ -190,7 +170,7 @@ class ILPProblemBuilder:
                 with open(exs_path, "r") as f:
                     # for each line get id between inner parentheses (e.g. pos(chebi_123(456)). -> 456) and select corresponding rows from samples_df
                     selected_ids = [line.strip().split("(")[-1].split(")")[0] for line in f.readlines() if line.strip() and not line.startswith("%")]
-                selected_rows = self.samples_df[[str(id) in selected_ids for id in self.samples_df.index]]
+                selected_rows = self.molecules[[id in selected_ids for id in self.molecules.index]]
                 selected_ids_by_split[split] = selected_ids
 
                 # standard bk is always added
@@ -202,9 +182,9 @@ class ILPProblemBuilder:
                     # add fgs as samples
                     if not hasattr(self, "_fg_data"):
                         if self.predicate_set == "chembl_fgs":
-                            self._fg_data = get_chembl_fgs(self.samples_df)
+                            self._fg_data = get_chembl_fgs(self.molecules)
                         else:
-                            self._fg_data = get_chebi_fgs(self.samples_df)
+                            self._fg_data = get_chebi_fgs(self.molecules)
                     prolog_lines_fgs, body_predicates_fgs = build_background_fg_data(self._fg_data, selected_rows, source=self.predicate_set)
                     prolog_lines += prolog_lines_fgs
                     body_predicates.update(body_predicates_fgs)
@@ -290,7 +270,7 @@ class ILPProblemBuilder:
                         if str(neighbor_sub) in samples_index:
                             selected.add(str(neighbor_sub))
                         if (max_samples and len(selected) >= max_samples) or (len(selected) >= min_samples and not siblings):
-                            return self.samples_df.loc[[str(id) in selected for id in self.samples_df.index]]
+                            return self.molecules.loc[[id in selected for id in self.molecules.index]]
             
             if len(selected) >= min_samples:
                 break
