@@ -260,6 +260,15 @@ def select_predicates_for_class(
         head_predicate=f"chebi_{chebi_id}",
         body_predicates=selected_predicates,
     )
+
+    # filter bk.pl file to only include selected predicates
+    bk_path_before = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set)
+    bk_path_after = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=top_k)
+    with open(bk_path_before, "r") as f_in, open(bk_path_after, "w+") as f_out:
+        for line in f_in:
+            line = line.strip()
+            if any(line.startswith(f"{pred}(") for pred, _ in selected_predicates):
+                f_out.write(line + "\n")
     
     print(f"Wrote selected predicates to {output_path}")
     return output_path
