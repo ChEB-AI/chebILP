@@ -8,12 +8,12 @@ for defining each ChEBI class.
 
 import os
 import re
-import argparse
 from typing import Literal
 
 import networkx as nx
 
 from chebILP.ilp_path_manager import get_bias_path, get_bk_path
+from chebILP.mol2ilp import AVAILABLE_PREDICATE_SETS
 from chebi_utils import build_chebi_graph, download_chebi_obo
 
 def load_bias_predicates(bias_path: str) -> list[tuple[str, int]]:
@@ -202,7 +202,7 @@ def select_predicates_for_class(
     chebi_id: int,
     chebi_graph: nx.DiGraph,
     problem_dir: str,
-    predicate_set: Literal["atoms", "chembl_fgs"] = "atoms",
+    predicate_set: AVAILABLE_PREDICATE_SETS = "atoms",
     selection_mode: Literal["claude", "random", "top_k"] = "claude",
     top_k: int = 10,
 ) -> str:
@@ -278,7 +278,7 @@ def select_predicates_for_classes(
     chebi_ids: list[int],
     chebi_version: int = 248,
     problem_dir: str | None = None,
-    predicate_set: Literal["atoms", "chembl_fgs"] = "atoms",
+    predicate_set: AVAILABLE_PREDICATE_SETS = "atoms",
     selection_mode: Literal["claude", "random", "top_k"] = "claude",
     top_k: int = 10,
 ) -> dict[int, str]:
@@ -289,7 +289,7 @@ def select_predicates_for_classes(
         chebi_ids: List of ChEBI IDs to process.
         chebi_version: ChEBI version to use.
         problem_dir: Base directory for ILP problems (default: data/ilp_problems/chebi_v{version}).
-        predicate_set: Which predicate set to use ("atoms" or "chembl_fgs").
+        predicate_set: Which predicate set to use.
         selection_mode: How to select predicates ("claude", "random", or "top_k").
         top_k: Number of predicates to select.
     Returns:

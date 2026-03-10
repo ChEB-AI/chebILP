@@ -1,11 +1,12 @@
 import os
 import traceback
 from typing import Literal
+import typing
 import json
 import time
 import argparse
 
-from chebILP.mol2ilp import ILPProblemBuilder, tee_output
+from chebILP.mol2ilp import ILPProblemBuilder, tee_output, AVAILABLE_PREDICATE_SETS
 from chebILP.learn_fgs import FGILPProblemBuilder
 from chebILP.ilp_classifier import run_ilp_training_subprocess, run_ilp_validation_subprocess
 from chebILP.ilp_path_manager import get_exs_path, get_bk_path, get_bias_path
@@ -60,7 +61,7 @@ def learn_chebi_classes(classes_list, ilp_builder: ILPProblemBuilder, results_di
                     conf_matrix = run_ilp_validation_clingo(
                         chebi_id, prog_str,
                         exs_file=get_exs_path(chebi_id, split="validation", base_dir=ilp_builder.problem_dir),
-                        bk_file=get_bk_path(chebi_id, predicate_set=ilp_builder.predicate_set, split="validation", base_dir=ilp_builder.problem_dir, selection_mode=selection_mode, selection_k=selection_k),
+                        bk_file=get_bk_path(chebi_id, predicate_set=ilp_builder.predicate_set, split="validation", base_dir=ilp_builder.problem_dir),
                     )
                     f1 = (2*conf_matrix["TP"] / (2*conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"])) if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0 else 0.0
                     print(f"    Validation F1: {f1:.2f} (TP: {conf_matrix['TP']}, FP: {conf_matrix['FP']}, TN: {conf_matrix['TN']}, FN: {conf_matrix['FN']})")
@@ -230,7 +231,7 @@ def _add_common_args(parser: argparse.ArgumentParser):
     parser.add_argument("--chebi_split", type=str, required=True, help="Path to the ChEBI split file.")
     parser.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
     parser.add_argument("--chebi_version", type=int, default=248, help="ChEBI version to use.")
-    parser.add_argument("--predicate_set", type=str, default="atoms", choices=["atoms", "chembl_fgs", "chebi_fgs", "chebi_fg_rules", "chebi_fg_learned_rules"], help="Which predicate set to use for background knowledge.")
+    parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
     parser.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
     parser.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")
     parser.add_argument("--max_clauses", type=int, default=2, help="Maximum number of clauses in the learned program.")
@@ -284,7 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_select.add_argument("--labels_file", type=str, required=True, help="Path to file with ChEBI IDs (one per line).")
     sp_select.add_argument("--chebi_version", type=int, default=248, help="ChEBI version to use.")
     sp_select.add_argument("--problem_dir", type=str, default=None, help="Base directory for ILP problems.")
-    sp_select.add_argument("--predicate_set", type=str, default="atoms", choices=["atoms", "chembl_fgs"], help="Which predicate set to use.")
+    sp_select.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use.")
     sp_select.add_argument("--selection_mode", type=str, default="claude", choices=["claude", "random", "top_k"], help="How to select predicates.")
     sp_select.add_argument("--top_k", type=int, default=10, help="Number of predicates to select.")
     sp_select.set_defaults(func=_handle_select_predicates)
