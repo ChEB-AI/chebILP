@@ -219,7 +219,7 @@ def select_predicates_for_class(
     Returns:
         Path to the output bias file.
     """
-    bias_path_before = get_bias_path(chebi_id, base_dir=problem_dir, predicate_set=predicate_set)
+    bias_path_before = get_bias_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set)
     if not os.path.exists(bias_path_before):
         raise FileNotFoundError(f"Bias file not found: {bias_path_before}. Try to build the ILP problem for this class first to generate the bias file with all predicates.")
     
@@ -238,7 +238,7 @@ def select_predicates_for_class(
         import random
         selected_predicates = random.sample(predicates, min(top_k, len(predicates)))
     elif selection_mode == "top_k":
-        bk_path = get_bk_path(chebi_id, base_dir=problem_dir, predicate_set=predicate_set)
+        bk_path = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set)
         selected_predicates =select_most_common_predicates(bk_path, predicates, top_k)
     elif selection_mode == "claude":
         # Ask Claude for predicate selection
@@ -253,7 +253,7 @@ def select_predicates_for_class(
     print(f"{selection_mode} selected {len(selected_predicates)} predicates out of {len(predicates)}")
     
     # Write output bias file
-    output_path = get_bias_path(chebi_id, base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode)
+    output_path = get_bias_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=top_k)
     write_bias_file(
         output_path=output_path,
         chebi_id=chebi_id,
@@ -279,7 +279,7 @@ def select_predicates_for_classes(
     Args:
         chebi_ids: List of ChEBI IDs to process.
         chebi_version: ChEBI version to use.
-        problem_dir: Base directory for ILP problems (default: ilp/chebi_v{version}).
+        problem_dir: Base directory for ILP problems (default: data/ilp_problems/chebi_v{version}).
         predicate_set: Which predicate set to use ("atoms" or "chembl_fgs").
         selection_mode: How to select predicates ("claude", "random", or "top_k").
         top_k: Number of predicates to select.
@@ -287,13 +287,13 @@ def select_predicates_for_classes(
         Dictionary mapping ChEBI IDs to output bias file paths.
     """
     if problem_dir is None:
-        problem_dir = os.path.join("ilp", f"chebi_v{chebi_version}")
+        problem_dir = os.path.join("data", "ilp_problems")
     
     # Load ChEBI data
     print(f"Loading ChEBI data (version {chebi_version})...")
     data_dir = os.path.join("data", f"chebi_v{chebi_version}")
     os.makedirs(data_dir, exist_ok=True)
-    obo_path = os.path.join(data_dir, "chebi.obo")
+    obo_path = os.path.join(data_dir, "raw", "chebi.obo")
     if not os.path.exists(obo_path):
         download_chebi_obo(chebi_version, dest_dir=data_dir)
     chebi_graph = build_chebi_graph(obo_path)
