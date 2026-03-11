@@ -45,8 +45,9 @@ def learn_chebi_classes(classes_list, ilp_builder: ILPProblemBuilder, results_di
             prog_str = train_result["prog_str"]  # string representation for display/storage
             score = train_result["score"]
             if score:
-                f1 = (2*score[0] / (2*score[0] + score[1] + score[3])) if (score[0] + score[1] + score[3]) > 0 else 0.0
-                print(f"ChEBI:{chebi_id} - F1: {f1:.2f} (TP: {score[0]}, FP: {score[1]}, TN: {score[2]}, FN: {score[3]})")
+                tp, fn, tn, fp = score[0], score[1], score[2], score[3]
+                f1 = (2*tp / (2*tp + fn + fp)) if (tp + fn + fp) > 0 else 0.0
+                print(f"ChEBI:{chebi_id} - F1: {f1:.2f} (TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn})")
             if prog_str:
                 print(f"    Learned program:\n    {prog_str}")
             else:
@@ -73,7 +74,7 @@ def learn_chebi_classes(classes_list, ilp_builder: ILPProblemBuilder, results_di
             with open(os.path.join(results_dir, "results.json"), "a+") as f:
                 result_entry = {
                     "chebi_id": chebi_id,
-                    "train_score": {"TP": score[0], "FP": score[1], "TN": score[2], "FN": score[3]} if score else None,
+                    "train_score": {"TP": tp, "FP": fp, "TN": tn, "FN": fn} if score else None,
                     "time_taken": time.perf_counter() - start_time,
                     "program": prog_str,
                     "validation_score": conf_matrix,
