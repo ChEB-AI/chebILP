@@ -280,7 +280,7 @@ def select_predicates_for_classes(
     problem_dir: str | None = None,
     predicate_set: AVAILABLE_PREDICATE_SETS = "atoms",
     selection_mode: Literal["claude", "random", "top_k"] = "claude",
-    top_k: int = 10,
+    selection_k: int = 10,
 ) -> dict[int, str]:
     """
     Select predicates for multiple ChEBI classes.
@@ -291,7 +291,7 @@ def select_predicates_for_classes(
         problem_dir: Base directory for ILP problems (default: data/ilp_problems/chebi_v{version}).
         predicate_set: Which predicate set to use.
         selection_mode: How to select predicates ("claude", "random", or "top_k").
-        top_k: Number of predicates to select.
+        selection_k: Number of predicates to select.
     Returns:
         Dictionary mapping ChEBI IDs to output bias file paths.
     """
@@ -316,7 +316,7 @@ def select_predicates_for_classes(
                 problem_dir=problem_dir,
                 predicate_set=predicate_set,
                 selection_mode=selection_mode,
-                top_k=top_k
+                top_k=selection_k
             )
             results[chebi_id] = output_path
         except Exception as e:
