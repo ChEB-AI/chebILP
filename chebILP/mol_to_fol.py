@@ -6,26 +6,37 @@ conversion (``mol_to_fol_atoms``) is included here.
 
 import logging
 
-import numpy as np
 from rdkit import Chem
+
+# Gonane core SMARTS (C1–C17, IUPAC steroid numbering) compiled once at import.
+# [#6] matches any carbon; ~ matches any bond — handles unsaturated steroids
+# (Δ4, Δ5), ketones, and estrogens (aromatic ring A) without modification.
+# C18/C19 methyls and side chains are intentionally excluded so the pattern
+# matches all steroid sub-classes, not just fully-saturated ones.
+_GONANE_PATTERN = Chem.MolFromSmarts(
+    "[#6:13]12~[#6:12]~[#6:11]~[#6:9]3~[#6:10]4~"
+    "[#6:1]~[#6:2]~[#6:3]~[#6:4]~[#6:5]4~"
+    "[#6:6]~[#6:7]~[#6:8]3~[#6:14]2~"
+    "[#6:15]~[#6:16]~[#6:17]1"
+)
+_GONANE_IDX_TO_IUPAC: dict[int, int] = {
+    atom.GetIdx(): atom.GetAtomMapNum()
+    for atom in _GONANE_PATTERN.GetAtoms()
+    if atom.GetAtomMapNum() > 0
+}
 
 
 def mol_to_fol_atoms(mol: Chem.Mol):
     """Convert an RDKit ``Mol`` into a first-order logic model at the atom level.
 
-    Returns ``(universe_size, extensions)`` where *universe_size* is the number
-    of atoms plus one (for a *global* pseudo-element) and *extensions* is a
-    ``dict[str, np.ndarray]``.  Unary predicates are stored as 1-D boolean
-    arrays; binary predicates as 2-D boolean arrays.
+    Returns ``(atom_extensions, mol_extensions)`` where:
+    - ``atom_extensions`` is a ``dict[str, list]``: unary predicates map to
+      ``list[int]`` of atom indices; binary predicates map to
+      ``list[tuple[int, int]]`` of (left, right) index pairs.
+    - ``mol_extensions`` is a ``set[str]`` of molecule-level predicate names
+      that hold for this molecule (e.g. ``net_charge_positive``).
     """
-    universe = mol.GetNumAtoms() + 1
-    extensions: dict[str, np.ndarray] = {
-        "EQ": np.array(
-            [[i == j for i in range(universe)] for j in range(universe)]
-        ),
-        "atom": np.ones(universe, dtype=np.bool_),
-    }
-    extensions["atom"][-1] = False  # last position is global, not an atom
+    atom_extensions: dict[str, list] = {}
 
     try:
         Chem.rdCIPLabeler.AssignCIPLabels(mol)
@@ -40,90 +51,60 @@ def mol_to_fol_atoms(mol: Chem.Mol):
     for atom in mol.GetAtoms():
         atom_idx = atom.GetIdx()
         atom_symbol = atom.GetSymbol().lower()
-        if atom_symbol not in extensions:
-            extensions[atom_symbol] = np.zeros(universe, dtype=np.bool_)
-        extensions[atom_symbol][atom_idx] = True
+        atom_extensions.setdefault(atom_symbol, []).append(atom_idx)
 
         charge = atom.GetFormalCharge()
         if charge != 0:
-            for predicate_symbol_charge in [
+            for pred in [
                 f"charge_{'n' if charge < 0 else 'p'}",
-                f"charge{'_m' + str(-1 * charge) if charge < 0 else str(charge)}",
+                f"charge{'_m' + str(-charge) if charge < 0 else str(charge)}",
             ]:
-                if predicate_symbol_charge not in extensions:
-                    extensions[predicate_symbol_charge] = np.zeros(
-                        universe, dtype=np.bool_
-                    )
-                extensions[predicate_symbol_charge][atom_idx] = True
+                atom_extensions.setdefault(pred, []).append(atom_idx)
         else:
-            predicate_symbol_charge = "charge0"
-            if predicate_symbol_charge not in extensions:
-                extensions[predicate_symbol_charge] = np.zeros(
-                    universe, dtype=np.bool_
-                )
-            extensions[predicate_symbol_charge][atom_idx] = True
+            atom_extensions.setdefault("charge0", []).append(atom_idx)
 
-        # Hydrogen count predicates
-        if universe != 1 or atom.GetAtomicNum() != 1:
-            num_hs = atom.GetTotalNumHs(includeNeighbors=True)
-            predicate_symbols = [f"has_{num_hs}_hs"] + [
-                f"has_at_least_{n}_hs" for n in range(1, num_hs + 1)
-            ]
-            for predicate_symbol in predicate_symbols:
-                if predicate_symbol not in extensions:
-                    extensions[predicate_symbol] = np.zeros(
-                        universe, dtype=np.bool_
-                    )
-                extensions[predicate_symbol][atom_idx] = True
+        num_hs = atom.GetTotalNumHs(includeNeighbors=True)
+        for pred in [f"has_{num_hs}_hs"] + [f"has_at_least_{n}_hs" for n in range(1, num_hs + 1)]:
+            atom_extensions.setdefault(pred, []).append(atom_idx)
 
-        # CIP chirality
         if atom.HasProp("_CIPCode"):
             chiral_code = f'cip_code_{atom.GetProp("_CIPCode")}'
-            if chiral_code not in extensions:
-                extensions[chiral_code] = np.zeros(universe, dtype=np.bool_)
-            extensions[chiral_code][atom_idx] = True
+            atom_extensions.setdefault(chiral_code, []).append(atom_idx)
 
     # Bond predicates (symmetric)
     for bond in mol.GetBonds():
-        predicate_symbol = f"b{bond.GetBondType()}"
         left = bond.GetBeginAtomIdx()
         right = bond.GetEndAtomIdx()
 
-        if predicate_symbol not in extensions:
-            extensions[predicate_symbol] = np.zeros(
-                (universe, universe), dtype=np.bool_
-            )
-        extensions[predicate_symbol][left][right] = True
-        extensions[predicate_symbol][right][left] = True
+        bond_pred = f"b{bond.GetBondType()}"
+        atom_extensions.setdefault(bond_pred, []).extend([(left, right), (right, left)])
+        atom_extensions.setdefault("has_bond_to", []).extend([(left, right), (right, left)])
 
-        # generic has_bond_to
-        predicate_symbol = "has_bond_to"
-        if predicate_symbol not in extensions:
-            extensions[predicate_symbol] = np.zeros(
-                (universe, universe), dtype=np.bool_
-            )
-        extensions[predicate_symbol][left][right] = True
-        extensions[predicate_symbol][right][left] = True
-
-        # stereo
         if bond.GetStereo() != Chem.BondStereo.STEREONONE:
             stereo_pred = f"b{bond.GetStereo().name}"
-            if stereo_pred not in extensions:
-                extensions[stereo_pred] = np.zeros(
-                    (universe, universe), dtype=np.bool_
-                )
-            extensions[stereo_pred][left][right] = True
-            extensions[stereo_pred][right][left] = True
+            atom_extensions.setdefault(stereo_pred, []).extend([(left, right), (right, left)])
 
-    # Global properties (last element in universe)
-    extensions["net_charge_positive"] = np.zeros(universe, dtype=np.bool_)
-    extensions["net_charge_negative"] = np.zeros(universe, dtype=np.bool_)
-    extensions["net_charge_neutral"] = np.zeros(universe, dtype=np.bool_)
-    extensions["global"] = np.zeros(universe, dtype=np.bool_)
+    # Steroid nucleus positions (steroid_1 … steroid_17)
+    steroid_match = mol.GetSubstructMatch(_GONANE_PATTERN, useChirality=False)
+    if steroid_match:
+        for pat_idx, atom_idx in enumerate(steroid_match):
+            iupac = _GONANE_IDX_TO_IUPAC.get(pat_idx)
+            if iupac is not None:
+                atom_extensions.setdefault(f"steroid_{iupac}", []).append(atom_idx)
 
-    extensions["net_charge_positive"][-1] = Chem.GetFormalCharge(mol) > 0
-    extensions["net_charge_negative"][-1] = Chem.GetFormalCharge(mol) < 0
-    extensions["net_charge_neutral"][-1] = Chem.GetFormalCharge(mol) == 0
-    extensions["global"][-1] = True
+    # Molecule-level (global) properties
+    mol_extensions: set[str] = set()
+    net_charge = Chem.GetFormalCharge(mol)
+    if net_charge > 0:
+        mol_extensions.add("net_charge_positive")
+    elif net_charge < 0:
+        mol_extensions.add("net_charge_negative")
+    else:
+        mol_extensions.add("net_charge_neutral")
+    # aliphatic vs aromatic (defined as having at least one aromatic atom)
+    if len(list(mol.GetAromaticAtoms())) > 0:
+        mol_extensions.add("aromatic")
+    else:        
+        mol_extensions.add("aliphatic")
 
-    return universe, extensions
+    return atom_extensions, mol_extensions

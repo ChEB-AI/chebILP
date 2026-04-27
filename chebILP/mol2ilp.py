@@ -251,9 +251,10 @@ class ILPProblemBuilder:
                 f.write(bias_content)
 
 
-    def get_closest_negatives(self, samples: pd.DataFrame, target_id: str, min_samples=25, max_samples=None):
-        # goal: reach min_samples, but continue collecting samples (until max_samples) if they are siblings
-        import queue 
+    def get_closest_negatives(self, samples: pd.DataFrame, target_id: str, min_samples=25, max_samples=None, direct_only=False):
+        # goal: reach min_samples, but continue collecting samples (until max_samples) if they are siblings.
+        # if direct_only=True, only collect from direct neighbors of target_id (first BFS ring) regardless of count.
+        import queue
         q = queue.Queue()
         q.put(target_id)
         visited = set() # visit closest labels
@@ -271,8 +272,7 @@ class ILPProblemBuilder:
                             selected.add(str(neighbor_sub))
                         if (max_samples and len(selected) >= max_samples) or (len(selected) >= min_samples and not siblings):
                             return self.molecules.loc[[id in selected for id in self.molecules.index]]
-            
-            if len(selected) >= min_samples:
+            if len(selected) >= min_samples or direct_only:
                 break
             siblings = False
 
@@ -300,9 +300,9 @@ class ILPProblemBuilder:
                 samples_by_split[(posneg, "validation")] = val_samples.sample(min(max_pos_samples, len(val_samples)), random_state=42)
                 samples_by_split[(posneg, "test")] = test_samples.sample(min(max_pos_samples, len(test_samples)), random_state=42)            
             else:
-                samples_by_split[(posneg, "train")] = self.get_closest_negatives(train_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples) # return up to max_neg_samples negatives (that are direct neighbors)
-                samples_by_split[(posneg, "validation")] = self.get_closest_negatives(val_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples)
-                samples_by_split[(posneg, "test")] = self.get_closest_negatives(test_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples)
+                samples_by_split[(posneg, "train")] = self.get_closest_negatives(train_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples)
+                samples_by_split[(posneg, "validation")] = self.get_closest_negatives(val_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples, direct_only=True)
+                samples_by_split[(posneg, "test")] = self.get_closest_negatives(test_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples, direct_only=True)
             
         for (posneg, split), df in samples_by_split.items():
             exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split=split)
@@ -320,43 +320,41 @@ def get_atom_id(atom: int, molecule_id):
 
 def build_background_chemlog(rows):
     comments = []
-    lines_by_predicate = {"has_atom" : []}
-    arities = {"has_atom" : 2}  # hardcode has_atom predicate
+    lines_by_predicate = {"has_atom": []}
+    arities = {"has_atom": 2}  # hardcode has_atom predicate
     for row in rows.itertuples():
-        #comments.append(f"% CHEBI:{row.Index}, SMILES: {row.smiles}")
-        # has atom predicates
         for atom in row.mol.GetAtoms():
             atom_id = get_atom_id(atom.GetIdx(), row.Index)
             lines_by_predicate["has_atom"].append(f"has_atom({row.Index},{atom_id}).")
 
-        # predicates from FOL structure
-        universe, extensions = mol_to_fol_atoms(row.mol)
-        for predicate, sparse_extension in extensions.items():
-            # replace cip_code_s and cip_code_r with cip_code_S and cip_code_R
+        atom_extensions, mol_extensions = mol_to_fol_atoms(row.mol)
+
+        forbidden_predicates = {"EQ", "atom", "*", "r", "r#", "r1"}
+        for predicate, indices in atom_extensions.items():
             if predicate.startswith("cip_code_"):
                 predicate = "cip_code_" + predicate[-1].upper()
-            forbidden_predicates = ["EQ", "atom", "*", "r", "r#", "r1"]
-            if predicate in forbidden_predicates:
-                continue  # skip equality predicate (implicit in Prolog) and other predicates not refering to an atom
+            if predicate in forbidden_predicates or not indices:
+                continue
+            is_binary = isinstance(indices[0], tuple)
             if predicate not in lines_by_predicate:
                 lines_by_predicate[predicate] = []
             if predicate not in arities:
-                arities[predicate] = len(sparse_extension.shape)
-            if len(sparse_extension.shape) == 1:
-                for idx in range(len(sparse_extension)):
-                    if sparse_extension[idx]:
-                        lines_by_predicate[predicate].append(f"{predicate}({get_atom_id(idx, row.Index)}).")
-            elif len(sparse_extension.shape) == 2:
-                for i in range(sparse_extension.shape[0]):
-                    for j in range(sparse_extension.shape[1]):
-                        if sparse_extension[i, j]:
-                            lines_by_predicate[predicate].append(
-                                f"{predicate}({get_atom_id(i, row.Index)},{get_atom_id(j, row.Index)})."
-                            )
+                arities[predicate] = 2 if is_binary else 1
+            if is_binary:
+                for i, j in indices:
+                    lines_by_predicate[predicate].append(
+                        f"{predicate}({get_atom_id(i, row.Index)},{get_atom_id(j, row.Index)})."
+                    )
             else:
-                raise ValueError(f"Unsupported sparse extension shape (>2D) for predicate {predicate}")
-    
-    
+                for idx in indices:
+                    lines_by_predicate[predicate].append(f"{predicate}({get_atom_id(idx, row.Index)}).")
+
+        for predicate in mol_extensions:
+            if predicate not in lines_by_predicate:
+                lines_by_predicate[predicate] = []
+            if predicate not in arities:
+                arities[predicate] = 1
+            lines_by_predicate[predicate].append(f"{predicate}({row.Index}).")
 
     return comments + [line for lines in lines_by_predicate.values() for line in lines], [(pred, arities[pred]) for pred in arities.keys()]
 
@@ -442,3 +440,9 @@ def mol_to_prolog_muggleton(mol, molecule_id="mol1"):
         )  # undirected 
 
     return prolog_atoms, prolog_bonds
+
+
+if __name__ == "__main__":
+    builder = ILPProblemBuilder(chebi_version="248", chebi_split=os.path.join("data", "chebi_v248", "splits_chebi248.csv"), predicate_set="atoms")
+    target_ids = ["134362"]
+    builder.build_examples(target_ids)
