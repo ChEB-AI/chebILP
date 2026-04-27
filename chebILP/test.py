@@ -43,11 +43,11 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
             balanced_acc = 0.5 * (conf_matrix["TP"] / (conf_matrix["TP"] + conf_matrix["FN"]) if (conf_matrix["TP"] + conf_matrix["FN"]) > 0 else 0) + 0.5 * (conf_matrix["TN"] / (conf_matrix["TN"] + conf_matrix["FP"]) if (conf_matrix["TN"] + conf_matrix["FP"]) > 0 else 0)
             f1_score = conf_matrix["TP"] / (conf_matrix["TP"] + 0.5 * (conf_matrix["FP"] + conf_matrix["FN"])) if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0 else 0.0
             print(f"  F1: {f1_score:.2f}, BA: {balanced_acc:.2f} TPs: {conf_matrix['TP']}, FPs: {conf_matrix['FP']}, TNs: {conf_matrix['TN']}, FNs: {conf_matrix['FN']}")
-            for true_label in ("pos", "neg"):
-                subset = [d for d in details if d["true_label"] == true_label][:10]
-                print(f"  {'Positive' if true_label == 'pos' else 'Negative'} samples (showing up to 10):")
+            for outcome in ("FP", "FN"):
+                subset = [d for d in details if d["outcome"] == outcome][:10]
+                print(f"  {'False Positive' if outcome == 'FP' else 'False Negative'} samples (showing up to 10):")
                 for d in subset:
-                    print(f"    {d['id']}: {d['outcome']}")
+                    print(f"    {d['id']} (true label: {d['true_label']})")
         else:
             conf_matrix = result
         #except Exception as e:
