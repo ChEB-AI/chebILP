@@ -38,7 +38,7 @@ def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_l
     return positives
 
 
-def run_ilp_validation_clingo(chebi_id: str, prog_str: str, exs_file: str, bk_file: str):
+def run_ilp_validation_clingo(chebi_id: str, prog_str: str, exs_file: str, bk_file: str, return_details: bool = False):
     with open(exs_file, "r") as f:
         # each line is of the form "pos(molecule_id)." or "neg(molecule_id)."
         # extract molecule_id as an integer and ignore pos/neg for now (we'll compute confusion matrix later)
@@ -47,37 +47,44 @@ def run_ilp_validation_clingo(chebi_id: str, prog_str: str, exs_file: str, bk_fi
         examples_ids = [line.strip().split("(")[-1].split(")")[0].strip() for line in examples]
     with open(bk_file, "r") as f:
         background_facts = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("%")]
-    
+
     target_labels = set()
     for line in prog_str.split("\n"):
         if ":-" in line:
             head = line.split(":-")[0].strip()
             if "(" in head:
                 target_labels.add(head.split("(")[0].strip())
-    
+
     positives = evaluate_with_clingo(prog_str.split("\n"), background_facts, list(target_labels), examples_ids)
     if f"chebi_{chebi_id}" not in positives:
         positives = []
     else:
         positives = [ex for ex in examples_ids if ex in positives[f"chebi_{chebi_id}"]]
     tps, fps, tns, fns = 0, 0, 0, 0
+    details = []
     for ex_id, posneg in zip(examples_ids, examples_posneg):
-        if ex_id in positives:
-            if posneg.startswith("pos"):
+        predicted_pos = ex_id in positives
+        true_pos = posneg.startswith("pos")
+        if predicted_pos:
+            if true_pos:
                 tps += 1
+                outcome = "TP"
             else:
                 fps += 1
+                outcome = "FP"
         else:
-            if posneg.startswith("neg"):
-                tns += 1
-            else:
+            if true_pos:
                 fns += 1
-    return {
-        "TP": tps,
-        "FP": fps,
-        "TN": tns,
-        "FN": fns
-    }
+                outcome = "FN"
+            else:
+                tns += 1
+                outcome = "TN"
+        details.append({"id": ex_id, "true_label": "pos" if true_pos else "neg", "outcome": outcome})
+
+    conf_matrix = {"TP": tps, "FP": fps, "TN": tns, "FN": fns}
+    if return_details:
+        return conf_matrix, details
+    return conf_matrix
 
 if __name__ == "__main__":
     # Example usage

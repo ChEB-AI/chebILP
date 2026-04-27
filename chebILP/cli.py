@@ -90,24 +90,41 @@ def _load_classes(labels_file: str) -> list[str]:
 
 
 def _make_ilp_builder(args) -> ILPProblemBuilder:
-    if args.fg_mode:
+    if isinstance(args, dict):
+        fg_mode = args["fg_mode"]
+        chebi_version = int(args["chebi_version"])
+        chebi_split = args["chebi_split"]
+        predicate_set = args["predicate_set"]
+        max_vars = int(args.get("max_vars", 6))
+        max_body = int(args.get("max_body", 8))
+        max_clauses = int(args.get("max_clauses", 2))
+    else:
+        fg_mode = args.fg_mode
+        chebi_version = args.chebi_version
+        chebi_split = args.chebi_split
+        predicate_set = args.predicate_set
+        max_vars = args.max_vars
+        max_body = args.max_body
+        max_clauses = args.max_clauses
+
+    if fg_mode:
         return FGILPProblemBuilder(
-            chebi_version=args.chebi_version,
-            chebi_split=args.chebi_split,
+            chebi_version=chebi_version,
+            chebi_split=chebi_split,
             dataset_path=os.path.join("data", "chebi_fgs_dataset.pkl"),
-            predicate_set=args.predicate_set,
-            max_vars=args.max_vars,
-            max_body=args.max_body,
-            max_clauses=args.max_clauses,
+            predicate_set=predicate_set,
+            max_vars=max_vars,
+            max_body=max_body,
+            max_clauses=max_clauses,
         )
     return ILPProblemBuilder(
-        chebi_version=args.chebi_version,
-        chebi_split=args.chebi_split,
+        chebi_version=chebi_version,
+        chebi_split=chebi_split,
         muggleton=False,
-        predicate_set=args.predicate_set,
-        max_vars=args.max_vars,
-        max_body=args.max_body,
-        max_clauses=args.max_clauses,
+        predicate_set=predicate_set,
+        max_vars=max_vars,
+        max_body=max_body,
+        max_clauses=max_clauses,
     )
 
 
@@ -152,7 +169,7 @@ def _handle_learn(args):
             classes, ilp_builder, results_dir,
             timeout=args.timeout,
             selection_mode=args.selection_mode,
-            selection_k=args.top_k,
+            selection_k=args.selection_k,
         )
 
 
@@ -169,7 +186,7 @@ def _handle_select_predicates(args):
         problem_dir=args.problem_dir,
         predicate_set=args.predicate_set,
         selection_mode=args.selection_mode,
-        top_k=args.top_k,
+        selection_k=args.selection_k,
     )
     successful = sum(1 for v in results.values() if v is not None)
     print(f"\nCompleted: {successful}/{len(chebi_ids)} classes processed successfully")
@@ -185,42 +202,27 @@ def _handle_test(args):
             if ": " in line:
                 key, value = line.strip().split(": ", 1)
                 config[key] = value
-    assert "chebi_version" in config and "fg_mode" in config and "predicate_set" in config and "selection_mode" in config and "selection_k" in config and "chebi_split" in config, \
-        "Config file must contain chebi_version, fg_mode, predicate_set, selection_mode, selection_k, and chebi_split"
+    assert "predicate_set" in config and "selection_mode" in config and "selection_k" in config and "problem_dir" in config and "fg_mode" in config, \
+        "Config file must contain predicate_set, selection_mode, selection_k, problem_dir, and fg_mode"
 
-    fg_mode = config["fg_mode"] == "True"
+    config["fg_mode"] = config["fg_mode"] == "True"
+    config["selection_mode"] = config["selection_mode"] if config["selection_mode"] != "None" else None
+    config["selection_k"] = int(config["selection_k"]) if config["selection_k"] != "None" else None
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join("ilp", "results_test", f"run_fgs_{timestamp}" if fg_mode else f"run_{timestamp}")
+    results_dir = os.path.join("data", f"results_{args.test_on}", f"run_fgs_{timestamp}" if config["fg_mode"] else f"run_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, "results.json"), "w+") as f:
         f.write("")
 
     log_path = os.path.join(results_dir, "run.log")
 
-    # write config file
     with open(os.path.join(results_dir, "config.yml"), "w+") as f:
         f.write("args:\n")
         for arg in vars(args):
             f.write(f"  {arg}: {getattr(args, arg)}\n")
 
     with tee_output(log_path):
-        if fg_mode:
-            ilp_builder = FGILPProblemBuilder(
-                chebi_version=config["chebi_version"],
-                dataset_path=os.path.join("data", "chebi_fgs_dataset.pkl"),
-                predicate_set=config["predicate_set"],
-                chebi_split=config["chebi_split"]
-            )
-        else:
-            ilp_builder = ILPProblemBuilder(
-                chebi_version=config["chebi_version"],
-                muggleton=False,
-                predicate_set=config["predicate_set"],
-                selection_mode=config["selection_mode"],
-                selection_k=int(config["selection_k"]) if config["selection_k"] else None,
-                chebi_split=config["chebi_split"],
-            )
-        test_chebi_classes(args.run_to_evaluate, ilp_builder, results_dir, predicate_set=config["predicate_set"])
+        test_chebi_classes(args.run_to_evaluate, config["problem_dir"], config["predicate_set"], results_dir, selection_mode=config["selection_mode"], selection_k=config["selection_k"], test_on=args.test_on, verbose=args.verbose)
 
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
@@ -275,7 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive samples per class.")
     sp_learn.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
     sp_learn.add_argument("--selection_mode", type=str, default=None, choices=["claude", "random", "top_k"], help="Mode for selecting body predicates in bias file.")
-    sp_learn.add_argument("--top_k", type=int, default=10, help="Number of predicates selection with selection_mode (required if selection_mode is set).")
+    sp_learn.add_argument("--selection_k", type=int, default=10, help="Number of predicates selection with selection_mode (required if selection_mode is set).")
     sp_learn.set_defaults(func=_handle_learn)
 
     # ── select_predicates ────────────────────────────────────────────────
@@ -288,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_select.add_argument("--problem_dir", type=str, default=None, help="Base directory for ILP problems.")
     sp_select.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use.")
     sp_select.add_argument("--selection_mode", type=str, default="claude", choices=["claude", "random", "top_k"], help="How to select predicates.")
-    sp_select.add_argument("--top_k", type=int, default=10, help="Number of predicates to select.")
+    sp_select.add_argument("--selection_k", type=int, default=10, help="Number of predicates to select.")
     sp_select.set_defaults(func=_handle_select_predicates)
 
     # ── test ─────────────────────────────────────────────────────────────
@@ -297,6 +299,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Evaluate learned programs on the test set using results from a previous run.",
     )
     sp_test.add_argument("--run_to_evaluate", type=str, required=True, help="Path to a previous run directory (must contain results.json and config.yml).")
+    sp_test.add_argument("--test_on", type=str, default="test", choices=["val", "test"], help="Split to evaluate on: 'test' (default) or 'val' (validation).")
+    sp_test.add_argument("--verbose", action="store_true", help="Log classification result for up to 10 positive and negative samples per class.")
     sp_test.set_defaults(func=_handle_test)
 
     return parser

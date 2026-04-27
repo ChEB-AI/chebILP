@@ -17,7 +17,7 @@ def get_bk_path(chebi_id, split:Literal["train", "validation", "test"], predicat
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
     bk_dir = os.path.join(problem_dir, predicate_set)
     os.makedirs(bk_dir, exist_ok=True)
-    if selection_mode:
+    if selection_mode is not None and selection_k is not None:
         bk_dir = os.path.join(bk_dir, f"selection_{selection_mode}_k={selection_k}")
         os.makedirs(bk_dir, exist_ok=True)
     filename = "bk.pl"
@@ -27,7 +27,7 @@ def get_bias_path(chebi_id, split:Literal["train", "validation", "test"], base_d
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
     bk_dir = os.path.join(problem_dir, predicate_set)
     os.makedirs(bk_dir, exist_ok=True)
-    if selection_mode:
+    if selection_mode is not None and selection_k is not None:
         bk_dir = os.path.join(bk_dir, f"selection_{selection_mode}_k={selection_k}")
     bias_file = f"bias"
     if max_vars is not None:
