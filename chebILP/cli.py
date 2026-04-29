@@ -14,13 +14,16 @@ from chebILP.ilp_path_manager import get_exs_path, get_bk_path, get_bias_path
 
 
 
-def learn_chebi_classes(classes_list, ilp_builder: ILPProblemBuilder, results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None):
+def learn_chebi_classes(classes_list, ilp_builder: ILPProblemBuilder, results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1):
 
         # Build settings parameters for Popper
         settings_parameters = {
             "noisy": True,
             "anytime_solver": "nuwls",
             "timeout": timeout,
+            "mdl_weight_fn": mdl_weight_fn,
+            "mdl_weight_fp": mdl_weight_fp,
+            "mdl_weight_size": mdl_weight_size,
         }
 
         with open(os.path.join(results_dir, "config.yml"), "a+") as f:
@@ -170,6 +173,9 @@ def _handle_learn(args):
             timeout=args.timeout,
             selection_mode=args.selection_mode,
             selection_k=args.selection_k,
+            mdl_weight_fn=args.mdl_weight_fn,
+            mdl_weight_fp=args.mdl_weight_fp,
+            mdl_weight_size=args.mdl_weight_size,
         )
 
 
@@ -278,6 +284,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
     sp_learn.add_argument("--selection_mode", type=str, default=None, choices=["claude", "random", "top_k"], help="Mode for selecting body predicates in bias file.")
     sp_learn.add_argument("--selection_k", type=int, default=10, help="Number of predicates selection with selection_mode (required if selection_mode is set).")
+    sp_learn.add_argument("--mdl_weight_fn", type=int, default=1, help="Weight β for false negatives in MDL cost (default: 1).")
+    sp_learn.add_argument("--mdl_weight_fp", type=int, default=1, help="Weight γ for false positives in MDL cost (default: 1).")
+    sp_learn.add_argument("--mdl_weight_size", type=int, default=1, help="Weight α for program size in MDL cost (default: 1).")
     sp_learn.set_defaults(func=_handle_learn)
 
     # ── select_predicates ────────────────────────────────────────────────
