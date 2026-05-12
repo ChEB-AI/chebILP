@@ -1,4 +1,22 @@
-from chebILP.ilp_classifier import split_prolog_literals
+def split_prolog_literals(body):
+    """Split a Prolog rule body into literals, respecting parenthesis depth."""
+    literals, current, depth = [], [], 0
+    for char in body:
+        if char == '(':
+            depth += 1
+            current.append(char)
+        elif char == ')':
+            depth -= 1
+            current.append(char)
+        elif char == ',' and depth == 0:
+            literals.append(''.join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if current:
+        literals.append(''.join(current).strip())
+    return literals
+
 
 def filter_impossible_rules(rules: list[str], predicates_in_bk: list[str]):
     # for every predicate name in the rule body, check if it exists in background_facts
@@ -20,7 +38,14 @@ def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_l
         rules = filter_impossible_rules(rules, predicates_in_bk)
     ctl = clingo.Control()
     ctl.add("base", [], "\n".join(background_facts))
-    ctl.add("base", [], "\n".join(rules))
+    try:
+        ctl.add("base", [], "\n".join(rules))
+    except RuntimeError as e:
+        print(f"Error parsing rules: {e}")
+        print("Rules were:")
+        for rule in rules:
+            print(rule)
+        raise e
     ctl.ground([("base", [])])
 
     atoms = set()

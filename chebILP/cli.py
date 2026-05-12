@@ -198,6 +198,106 @@ def _handle_select_predicates(args):
     print(f"\nCompleted: {successful}/{len(chebi_ids)} classes processed successfully")
 
 
+def _handle_prepare_dl_preds(args):
+    from chebILP.prepare_dl_preds import extract_dl_preds
+
+    target_class_ids = []
+    with open(args.target_classes, "r") as f:
+        for line in f:
+            cls_id = line.strip()
+            if cls_id:
+                target_class_ids.append(cls_id)
+
+    extract_dl_preds(
+        preds_pt_path=args.preds_file,
+        checkpoint_path=args.checkpoint,
+        splits_csv_path=args.splits_csv,
+        target_class_ids=target_class_ids,
+        output_dir=args.output_dir,
+    )
+
+
+def _handle_eval_correct_val(args):
+    from chebILP.ensemble_eval import load_dl_preds, run_correct_val_eval
+
+    target_ids = _load_classes(args.labels_file)
+
+    dl_preds = load_dl_preds(args.dl_preds_npy, args.dl_preds_meta)
+    print(f"Loaded DL predictions: {dl_preds.shape[0]} molecules × {dl_preds.shape[1]} classes")
+
+    ilp_run_dirs = {}
+    for run_path in args.ilp_runs:
+        run_name = os.path.basename(run_path.rstrip("/\\"))
+        ilp_run_dirs[run_name] = run_path
+
+    ilp_builder = _make_ilp_builder(args)
+
+    run_correct_val_eval(
+        target_ids=target_ids,
+        ilp_run_dirs=ilp_run_dirs,
+        dl_preds=dl_preds,
+        chebi_graph=ilp_builder.chebi_graph,
+        hierarchy_graph=ilp_builder.hierarchy_graph,
+        molecules_df=ilp_builder.molecules,
+        validation_ids=ilp_builder.validation_ids,
+        output_path=args.output,
+        problem_dir=ilp_builder.problem_dir,
+        predicate_set=ilp_builder.predicate_set,
+    )
+
+
+def _handle_ensemble_predict(args):
+    from chebILP.ensemble_eval import EnsemblePredictor, load_dl_preds
+    from chebi_utils import build_chebi_graph, get_hierarchy_subgraph
+
+    with open(args.label_set) as f:
+        label_set = [l.strip() for l in f if l.strip()]
+    print(f"Label set: {len(label_set)} classes")
+
+    dl_preds = load_dl_preds(args.dl_preds_npy, args.dl_preds_meta)
+    print(f"DL predictions: {dl_preds.shape[0]} molecules x {dl_preds.shape[1]} classes")
+
+    ilp_run_dirs = {}
+    for run_path in args.ilp_runs:
+        ilp_run_dirs[os.path.basename(run_path.rstrip("/\\"))] = run_path
+
+    data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
+    obo_path = os.path.join(data_dir, "raw", "chebi.obo")
+    chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
+
+    predictor = EnsemblePredictor(
+        metrics_csv=args.metrics_csv,
+        ilp_run_dirs=ilp_run_dirs,
+        dl_preds=dl_preds,
+        chebi_graph=chebi_graph,
+        label_set=label_set,
+    )
+
+    mol_ids = []
+    with open(args.chebi_split) as f:
+        for line in f.readlines()[1:]:
+            mol_id, split = line.strip().split(",")
+            if split == args.predict_on:
+                mol_ids.append(mol_id)
+    print(f"Predicting on {len(mol_ids)} '{args.predict_on}' molecules...")
+
+    molecules_df = None
+    if args.load_molecules:
+        from chebi_utils import extract_molecules
+        sdf_path = os.path.join(data_dir, "raw", "chebi.sdf.gz")
+        molecules_df = extract_molecules(sdf_path)
+        molecules_df.index = molecules_df["chebi_id"].astype(str)
+        molecules_df.index.name = None
+        print(f"Loaded {len(molecules_df)} molecules for Clingo fallback")
+
+    predictions_df = predictor.predict_validation_set(mol_ids, molecules_df)
+
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    predictions_df.to_csv(args.output)
+    n_pos = predictions_df.sum().sum()
+    print(f"Saved predictions to {args.output} ({int(n_pos)} positive class assignments)")
+
+
 def _handle_test(args):
     from chebILP.test import test_chebi_classes
 
@@ -311,6 +411,73 @@ def build_parser() -> argparse.ArgumentParser:
     sp_test.add_argument("--test_on", type=str, default="test", choices=["val", "test"], help="Split to evaluate on: 'test' (default) or 'val' (validation).")
     sp_test.add_argument("--verbose", action="store_true", help="Log classification result for up to 10 positive and negative samples per class.")
     sp_test.set_defaults(func=_handle_test)
+
+    # ── prepare_dl_preds ─────────────────────────────────────────────────
+    sp_prep = subparsers.add_parser(
+        "prepare_dl_preds",
+        help="(EXP-006) Extract DL validation predictions to numpy format. Requires torch.",
+    )
+    sp_prep.add_argument("--preds_file", type=str, required=True, help="Path to the .pt predictions tensor.")
+    sp_prep.add_argument("--checkpoint", type=str, required=True, help="Path to the model checkpoint (.ckpt).")
+    sp_prep.add_argument("--splits_csv", type=str, required=True, help="Path to the splits CSV file.")
+    sp_prep.add_argument("--target_classes", type=str, required=True, help="Path to file with target ChEBI class IDs (one per line).")
+    sp_prep.add_argument("--output_dir", type=str, default=os.path.join("data", "preds"), help="Directory to save numpy array (val_preds_chebi25.npy) and metadata JSON.")
+    sp_prep.set_defaults(func=_handle_prepare_dl_preds)
+
+    # ── eval_correct_val ─────────────────────────────────────────────────
+    sp_ecv = subparsers.add_parser(
+        "eval_correct_val",
+        help="(EXP-006) Evaluate all models on the correct (parent-restricted) validation sets.",
+    )
+    _add_common_args(sp_ecv)
+    sp_ecv.add_argument(
+        "--ilp_runs", type=str, nargs="+", required=True,
+        help="One or more ILP run directories (each must contain results.json).",
+    )
+    sp_ecv.add_argument(
+        "--dl_preds_npy", type=str,
+        default=os.path.join("data", "preds", "val_preds_chebi25.npy"),
+        help="Path to the DL predictions numpy array (from prepare_dl_preds).",
+    )
+    sp_ecv.add_argument(
+        "--dl_preds_meta", type=str,
+        default=os.path.join("data", "preds", "val_preds_chebi25_metadata.json"),
+        help="Path to the DL predictions metadata JSON (from prepare_dl_preds).",
+    )
+    sp_ecv.add_argument(
+        "--output", type=str,
+        default=os.path.join("data", "results_correct_val", "metrics.csv"),
+        help="Output CSV path for per-class per-model metrics.",
+    )
+    sp_ecv.set_defaults(func=_handle_eval_correct_val)
+
+    # ── ensemble_predict ─────────────────────────────────────────────────
+    sp_ep = subparsers.add_parser(
+        "ensemble_predict",
+        help="(EXP-006) Run the hierarchical ensemble predictor on a data split.",
+    )
+    sp_ep.add_argument("--chebi_version", type=int, default=248)
+    sp_ep.add_argument("--chebi_split", type=str, required=True,
+                       help="Path to the splits CSV file.")
+    sp_ep.add_argument("--label_set", type=str, required=True,
+                       help="File with one ChEBI class ID per line (e.g. ChEBI25_3_STAR/processed/classes.txt).")
+    sp_ep.add_argument("--metrics_csv", type=str, required=True,
+                       help="Correct-val metrics CSV produced by eval_correct_val.")
+    sp_ep.add_argument("--ilp_runs", type=str, nargs="+", required=True,
+                       help="ILP run directories (same ones used in eval_correct_val).")
+    sp_ep.add_argument("--dl_preds_npy", type=str,
+                       default=os.path.join("data", "preds", "val_preds_chebi25.npy"))
+    sp_ep.add_argument("--dl_preds_meta", type=str,
+                       default=os.path.join("data", "preds", "val_preds_chebi25_metadata.json"))
+    sp_ep.add_argument("--predict_on", type=str, default="validation",
+                       choices=["train", "validation", "test"],
+                       help="Which split to predict on (default: validation).")
+    sp_ep.add_argument("--load_molecules", action="store_true",
+                       help="Load molecule structures for Clingo fallback on uncached molecules.")
+    sp_ep.add_argument("--output", type=str,
+                       default=os.path.join("data", "results_correct_val", "ensemble_predictions.csv"),
+                       help="Output CSV path (rows = mol_ids, columns = class_ids, values = bool).")
+    sp_ep.set_defaults(func=_handle_ensemble_predict)
 
     return parser
 
