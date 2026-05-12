@@ -28,31 +28,27 @@ from chebILP.clingo_eval import run_ilp_validation_clingo
 # Correct validation set computation
 # ---------------------------------------------------------------------------
 
-def get_correct_val_set(
+def get_pos_neg_samples_for_class(
     target_id: str,
     chebi_graph,
     hierarchy_graph,
     molecules_df: pd.DataFrame,
-    validation_ids: set,
 ) -> tuple[list[str], list[str]]:
     """
-    Return the correct (restricted) validation set for a target class.
+    Return the positive and negative samples for a target class, only considering descendants of its direct parents.
 
-    Sample space = all validation molecules that are descendants of any direct
-    parent of target_id.  Positives = descendants of target_id within that
-    space; negatives = the rest.
 
     Returns:
         pos_ids: list of positive validation molecule IDs
         neg_ids: list of negative validation molecule IDs
-                 (empty when target has no siblings in validation split)
+                 (empty when target has no siblings)
     """
     mol_index = set(molecules_df.index)
 
     pos_ids = [
         str(d)
         for d in hierarchy_graph.predecessors(target_id)
-        if str(d) in validation_ids and str(d) in mol_index
+        if str(d) in mol_index
     ]
     pos_set = set(pos_ids)
 
@@ -61,7 +57,7 @@ def get_correct_val_set(
         sample_space_by_parent[parent] = set()
         for desc in hierarchy_graph.predecessors(parent):
             s = str(desc)
-            if s in validation_ids and s in mol_index:
+            if s in mol_index:
                 sample_space_by_parent[parent].add(s)
     if len(sample_space_by_parent) == 0:
         return pos_ids, []
@@ -315,11 +311,13 @@ def run_correct_val_eval(
 
     rows = []
     for target_id in target_ids:
-        # correct val set and DL are always (re-)computed — both are fast
-        pos_ids, neg_ids = get_correct_val_set(
-            target_id, chebi_graph, hierarchy_graph, molecules_df, validation_ids
+        # compute pos/neg samples for this class (only considering descendants of direct parents)
+        pos_ids, neg_ids = get_pos_neg_samples_for_class(
+            target_id, chebi_graph, hierarchy_graph, molecules_df
         )
         has_negatives = len(neg_ids) > 0
+        pos_ids = [i for i in pos_ids if i in validation_ids]
+        neg_ids = [i for i in neg_ids if i in validation_ids]
 
         row = {
             "chebi_id": target_id,
@@ -404,11 +402,13 @@ class EnsemblePredictor:
         dl_preds: pd.DataFrame,
         chebi_graph,
         label_set: list[str],
+        classifier_chain_mode=True,
     ):
         import networkx as nx
 
         self.dl_preds = dl_preds
         self.label_set = set(str(l) for l in label_set)
+        self.classifier_chain_mode = classifier_chain_mode
 
         print("Loading ILP programs and validation cache...")
         self.ilp_programs: dict[str, dict[str, Optional[str]]] = {}
@@ -556,7 +556,7 @@ class EnsemblePredictor:
 
         for cls in self.topo_order:
             # hierarchical gate: all label parents must already be predicted positive
-            if not all(p in positive for p in self.label_parents.get(cls, set())):
+            if (self.classifier_chain_mode or self.trusted_model.get(cls) == "always_positive") and not all(p in positive for p in self.label_parents.get(cls, set())):
                 continue
 
             if self._eval_model_for_mol(cls, mol_id, molecules_df):

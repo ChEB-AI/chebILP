@@ -271,6 +271,7 @@ def _handle_ensemble_predict(args):
         dl_preds=dl_preds,
         chebi_graph=chebi_graph,
         label_set=label_set,
+        classifier_chain_mode=not args.native_mode,
     )
 
     mol_ids = []
@@ -292,10 +293,21 @@ def _handle_ensemble_predict(args):
 
     predictions_df = predictor.predict_validation_set(mol_ids, molecules_df)
 
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    predictions_df.to_csv(args.output)
-    n_pos = predictions_df.sum().sum()
-    print(f"Saved predictions to {args.output} ({int(n_pos)} positive class assignments)")
+    import numpy as np, json as _json
+    arr = predictions_df.to_numpy().astype("float32")
+    meta = {"mol_order": list(predictions_df.index), "class_labels": list(predictions_df.columns)}
+
+    npy_path = args.output if args.output.endswith(".npy") else args.output + ".npy"
+    meta_path = npy_path.replace(".npy", "_metadata.json")
+
+    os.makedirs(os.path.dirname(npy_path) or ".", exist_ok=True)
+    np.save(npy_path, arr)
+    with open(meta_path, "w") as f:
+        _json.dump(meta, f, indent=2)
+
+    n_pos = int(arr.sum())
+    print(f"Saved predictions: {npy_path}  (shape {arr.shape}, {n_pos} positive assignments)")
+    print(f"Saved metadata:    {meta_path}")
 
 
 def _handle_test(args):
@@ -463,7 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="File with one ChEBI class ID per line (e.g. ChEBI25_3_STAR/processed/classes.txt).")
     sp_ep.add_argument("--metrics_csv", type=str, required=True,
                        help="Correct-val metrics CSV produced by eval_correct_val.")
-    sp_ep.add_argument("--ilp_runs", type=str, nargs="+", required=True,
+    sp_ep.add_argument("--ilp_runs", type=str, nargs="+", default=[],
                        help="ILP run directories (same ones used in eval_correct_val).")
     sp_ep.add_argument("--dl_preds_npy", type=str,
                        default=os.path.join("data", "preds", "val_preds_chebi25.npy"))
@@ -475,8 +487,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_ep.add_argument("--load_molecules", action="store_true",
                        help="Load molecule structures for Clingo fallback on uncached molecules.")
     sp_ep.add_argument("--output", type=str,
-                       default=os.path.join("data", "results_correct_val", "ensemble_predictions.csv"),
-                       help="Output CSV path (rows = mol_ids, columns = class_ids, values = bool).")
+                       default=os.path.join("data", "results_correct_val", "ensemble_predictions.npy"),
+                       help="Output .npy path; a matching _metadata.json is written alongside.")
+    sp_ep.add_argument("--native_mode", "-n", action="store_true",
+                       help="Skips classifier chain mode (only predict a class if all parents are predicted positive, the default).")
     sp_ep.set_defaults(func=_handle_ensemble_predict)
 
     return parser
