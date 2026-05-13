@@ -21,10 +21,6 @@ from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 
-from chebILP.clingo_eval import run_ilp_validation_clingo
-from chebILP.mol2ilp import get_direct_neighbors
-
-
 
 # ---------------------------------------------------------------------------
 # DL evaluation on correct validation set
@@ -83,6 +79,28 @@ def eval_dl_on_ids(
 
     return {"TP": tp, "FP": fp, "TN": tn, "FN": fn}
 
+
+def get_dl_direct_neighbor_scores(dl_preds: pd.DataFrame, chebi_graph, hierarchy_graph, molecules_df, output_path: str):
+    """
+    Compute DL confusion matrices for all classes.
+
+    Returns a dict: {class_id: conf_matrix or None if not computable}.
+    """
+    from chebILP.mol2ilp import get_direct_neighbors
+
+    scores = {}
+    for cls_id in dl_preds.columns:
+        pos_ids, neg_ids = get_direct_neighbors(cls_id, chebi_graph, hierarchy_graph, molecules_df)
+        scores[cls_id] = eval_dl_on_ids(cls_id, pos_ids, neg_ids, dl_preds)
+    
+    # save to csv
+    with open(output_path, "w") as f:
+        f.write("class_id,TP,FP,TN,FN\n")
+        for cls_id, conf in scores.items():
+            if conf is not None:
+                f.write(f"{cls_id},{conf['TP']},{conf['FP']},{conf['TN']},{conf['FN']}\n")
+            else:
+                f.write(f"{cls_id},,,,\n")
 
 # ---------------------------------------------------------------------------
 # Loading ILP run results
@@ -144,8 +162,8 @@ class EnsemblePredictor:
         (a) every label parent of C is already predicted positive, AND
         (b) the trusted model for C predicts M positive.
     - DL predictions use self.dl_preds (O(1) lookup).
-    - ILP predictions use ilp_val_cache (from validation_details) for val
-      molecules; Clingo fallback for uncached molecules (requires molecules_df).
+    - ILP predictions use cache for known molecules; 
+      Clingo fallback for uncached molecules (requires molecules_df).
     """
 
     def __init__(
@@ -154,59 +172,45 @@ class EnsemblePredictor:
         ilp_runs: dict[str, str],
         dl_preds: pd.DataFrame,
         chebi_graph,
-        label_set: list[str],
+        label_stats: dict[str, dict[str, int]],
+        dl_val_scores: dict[str, dict[str, int]],
         classifier_chain_mode=True,
         model_selection_metric: Literal["balanced_acc", "f1", "weighted_f1"] = "f1",
-        dl_preds_val: Optional[pd.DataFrame] = None,
     ):
         import networkx as nx
 
         self.dl_preds = dl_preds
-        self.label_set = set(str(l) for l in label_set)
+        self.label_set = set(str(l) for l in label_stats.keys())
+        self.label_stats = label_stats
         self.classifier_chain_mode = classifier_chain_mode
         self.model_selection_metric = model_selection_metric
-        _dl_preds_val = dl_preds_val if dl_preds_val is not None else dl_preds
+        self.dl_val_scores = dl_val_scores
 
-        # ilp_val_cache[run_name][chebi_id][mol_id] = True/False (predicted positive)
-        self.ilp_val_cache: dict[str, dict[str, dict[str, bool]]] = {}
+        # cache[run_name][chebi_id][mol_id] = True/False (predicted positive)
+        self.cache: dict[str, dict[str, dict[str, bool]]] = {}
         # ilp_val_scores[run_name][cls_id] = conf matrix (for model selection)
         self.ilp_val_scores: dict[str, dict[str, Optional[dict]]] = {}
-        # dl_val_scores[cls_id] = conf matrix computed from validation_details + dl_preds_val
-        self.dl_val_scores: dict[str, Optional[dict]] = {}
 
         print("Loading validation runs (for model selection)...")
         for run_name, run_dir in ilp_val_runs.items():
             results = load_ilp_results(run_dir)
             self.ilp_val_scores[run_name] = {}
-            self.ilp_val_cache.setdefault(run_name, {})
-
+            
             for cls_id, entry in results.items():
                 self.ilp_val_scores[run_name][cls_id] = entry.get("validation_score")
-                details = entry.get("validation_details") or []
-                if details:
-                    self.ilp_val_cache[run_name][cls_id] = {
-                        d["id"]: d["outcome"] in ("TP", "FP")
-                        for d in details
-                    }
-                    if cls_id not in self.dl_val_scores:
-                        pos_ids = [d["id"] for d in details if d["true_label"] == "pos"]
-                        neg_ids = [d["id"] for d in details if d["true_label"] == "neg"]
-                        self.dl_val_scores[cls_id] = eval_dl_on_ids(cls_id, pos_ids, neg_ids, _dl_preds_val)
 
-            n_cached = sum(len(v) for v in self.ilp_val_cache[run_name].values())
-            print(f"  '{run_name}': {len(results)} classes, {n_cached} cached molecule results")
 
         print("Loading ILP runs (programs + cache)...")
         self.ilp_programs: dict[str, dict[str, Optional[str]]] = {}
         for run_name, run_dir in ilp_runs.items():
             results = load_ilp_results(run_dir)
             self.ilp_programs[run_name] = {cid: e.get("program") for cid, e in results.items()}
-            cache = self.ilp_val_cache.setdefault(run_name, {})
+            self.cache = self.cache.setdefault(run_name, {})
             for cls_id, entry in results.items():
-                if cls_id not in cache:
+                if cls_id not in self.cache:
                     details = entry.get("validation_details") or []
                     if details:
-                        cache[cls_id] = {
+                        self.cache[cls_id] = {
                             d["id"]: d["outcome"] in ("TP", "FP")
                             for d in details
                         }
@@ -292,14 +296,7 @@ class EnsemblePredictor:
         return self._f1_from_conf(conf)
 
     def _has_negatives(self, cls_id: str) -> bool:
-        dl_conf = self.dl_val_scores.get(cls_id)
-        if dl_conf is not None and (dl_conf.get("TN", 0) + dl_conf.get("FP", 0)) > 0:
-            return True
-        for run_scores in self.ilp_val_scores.values():
-            sc = run_scores.get(cls_id)
-            if sc is not None and (sc.get("TN", 0) + sc.get("FP", 0)) > 0:
-                return True
-        return False
+        return self.label_stats.get(cls_id, {}).get("has_negatives", True)
 
     def _select_trusted_models(self) -> dict[str, str]:
         """
@@ -446,11 +443,11 @@ class EnsemblePredictor:
         self, cls: str, mol_id: str, prog_str: str, run_name: str, molecules_df
     ) -> bool:
         """
-        Check ilp_val_cache (from validation_details) first; fall back to Clingo
+        Check cache first; fall back to Clingo
         for molecules not in the cache (e.g. test-set molecules).
         Clingo fallback requires molecules_df with mol objects.
         """
-        mol_cache = self.ilp_val_cache.get(run_name, {}).get(cls)
+        mol_cache = self.cache.get(run_name, {}).get(cls)
         if mol_cache is not None and mol_id in mol_cache:
             return mol_cache[mol_id]
 
@@ -458,6 +455,8 @@ class EnsemblePredictor:
             return False
 
         from chebILP.mol2ilp import build_background_chemlog
+        from chebILP.clingo_eval import run_ilp_validation_clingo
+
 
         mol_row = molecules_df[molecules_df.index == mol_id].dropna(subset=["mol"])
         if mol_row.empty:
@@ -499,3 +498,37 @@ class EnsemblePredictor:
             records.append({cls: cls in pos for cls in self.topo_order})
 
         return pd.DataFrame(records, index=mol_ids, columns=self.topo_order)
+
+
+if __name__ == "__main__":
+    from chebi_utils import build_chebi_graph, extract_molecules, get_hierarchy_subgraph
+    from chebILP.mol2ilp import get_direct_neighbors
+    import networkx as nx
+    obo_path = os.path.join("data", "chebi_v248", "raw", "chebi.obo")
+    sdf_path = os.path.join("data", "chebi_v248", "raw", "chebi.sdf.gz")
+    chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
+    molecules_df = extract_molecules(sdf_path)
+    hierarchy_graph = nx.transitive_closure_dag(chebi_graph)
+    molecules_df = extract_molecules(sdf_path)
+    molecules_df.index = molecules_df["chebi_id"].astype(str)
+    molecules_df.index.name = None
+
+    with open(os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "classes.txt"), "r") as f:
+        classes = [line.strip() for line in f if line.strip()]
+            
+    cls_stats = []
+    for cls_id in classes:
+        pos_ids, neg_ids = get_direct_neighbors(cls_id, chebi_graph, hierarchy_graph, molecules_df)
+        
+        cls_stats.append({
+            "chebi_id": cls_id,
+            "num_pos": len(pos_ids),
+            "num_neg": len(neg_ids),
+            "has_negatives": len(neg_ids) > 0
+        })
+    
+    # save to csv
+    with open(os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"), "w") as f:
+        f.write("chebi_id,num_pos,num_neg,has_negatives\n")
+        for stat in cls_stats:
+            f.write(f"{stat['chebi_id']},{stat['num_pos']},{stat['num_neg']},{stat['has_negatives']}\n")

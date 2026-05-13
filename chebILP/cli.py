@@ -198,63 +198,22 @@ def _handle_select_predicates(args):
     print(f"\nCompleted: {successful}/{len(chebi_ids)} classes processed successfully")
 
 
-def _handle_prepare_dl_preds(args):
-    from chebILP.prepare_dl_preds import extract_dl_preds
-
-    extract_dl_preds(
-        preds_pt_path=args.preds_file,
-        checkpoint_path=args.checkpoint,
-        splits_csv_path=args.splits_csv,
-        output_file=args.output_file,
-    )
-
-
-def _handle_eval_correct_val(args):
-    from chebILP.ensemble_eval import load_dl_preds, run_correct_val_eval
-
-    target_ids = _load_classes(args.labels_file)
-
-    dl_preds = load_dl_preds(args.dl_preds_npy, args.dl_preds_meta)
-    print(f"Loaded DL predictions: {dl_preds.shape[0]} molecules × {dl_preds.shape[1]} classes")
-
-    ilp_run_dirs = {}
-    for run_path in args.ilp_runs:
-        run_name = os.path.basename(run_path.rstrip("/\\"))
-        ilp_run_dirs[run_name] = run_path
-
-    ilp_builder = _make_ilp_builder(args)
-
-    run_correct_val_eval(
-        target_ids=target_ids,
-        ilp_run_dirs=ilp_run_dirs,
-        dl_preds=dl_preds,
-        chebi_graph=ilp_builder.chebi_graph,
-        hierarchy_graph=ilp_builder.hierarchy_graph,
-        molecules_df=ilp_builder.molecules,
-        validation_ids=ilp_builder.validation_ids,
-        output_path=args.output,
-        problem_dir=ilp_builder.problem_dir,
-        predicate_set=ilp_builder.predicate_set,
-    )
-
-
 def _handle_ensemble_predict(args):
     from chebILP.ensemble_eval import EnsemblePredictor, load_dl_preds
-    from chebi_utils import build_chebi_graph, get_hierarchy_subgraph
+    from chebi_utils import build_chebi_graph, get_hierarchy_subgraph, extract_molecules
+    import networkx as nx
 
-    with open(args.label_set) as f:
-        label_set = [l.strip() for l in f if l.strip()]
-    print(f"Label set: {len(label_set)} classes")
+    with open(args.label_stats) as f:
+        # chebi_id,num_pos,num_neg,has_negatives
+        label_stats_lines = [line.strip().split(",") for line in f if line.strip()][1:]
+        label_stats = {
+            line[0]: {"num_pos": int(line[1]), "num_neg": int(line[2]), "has_negatives": line[3].lower() == "true"}
+            for line in label_stats_lines
+        }
+    print(f"Label stats: {len(label_stats)} labels, {sum(1 for v in label_stats.values() if not v['has_negatives'])} without negatives")
 
     dl_preds = load_dl_preds(args.dl_preds_npy, args.dl_preds_meta)
-    print(f"DL predictions: {dl_preds.shape[0]} molecules x {dl_preds.shape[1]} classes")
-
-    # Load separate val preds for model selection when predicting on a different split
-    if args.dl_preds_val_npy and args.dl_preds_val_meta:
-        dl_preds_val = load_dl_preds(args.dl_preds_val_npy, args.dl_preds_val_meta)
-        print(f"DL val predictions (for model selection): {dl_preds_val.shape[0]} molecules x {dl_preds_val.shape[1]} classes")
-    else:
-        dl_preds_val = None  # EnsemblePredictor defaults to dl_preds
+    print(f"DL predictions: {dl_preds.shape[0]} molecules x {dl_preds.shape[1]} labels")
 
     ilp_val_run_dirs = {}
     for run_path in args.ilp_val_runs:
@@ -266,17 +225,29 @@ def _handle_ensemble_predict(args):
 
     data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
     obo_path = os.path.join(data_dir, "raw", "chebi.obo")
+    sdf_path = os.path.join(data_dir, "raw", "chebi.sdf.gz")
     chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
+
+    chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
+    
+    with open(args.dl_val_scores) as f:
+        # class_id,TP,FP,TN,FN
+        dl_val_scores_lines = [line.strip().split(",") for line in f if line.strip()][1:]
+        dl_val_scores = {
+            line[0]: {"TP": int(line[1]) if line[1] != "" else 0, "FP": int(line[2]) if line[2] != "" else 0, "TN": int(line[3]) if line[3] != "" else 0, "FN": int(line[4]) if line[4] != "" else 0}
+            for line in dl_val_scores_lines
+        }
+
 
     predictor = EnsemblePredictor(
         ilp_val_runs=ilp_val_run_dirs,
         ilp_runs=ilp_run_dirs,
         dl_preds=dl_preds,
         chebi_graph=chebi_graph,
-        label_set=label_set,
+        label_stats=label_stats,
+        dl_val_scores=dl_val_scores,
         classifier_chain_mode=not args.native_mode,
         model_selection_metric=args.model_selection_metric,
-        dl_preds_val=dl_preds_val,
     )
 
     mol_ids = []
@@ -429,44 +400,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp_test.add_argument("--verbose", action="store_true", help="Log classification result for up to 10 positive and negative samples per class.")
     sp_test.set_defaults(func=_handle_test)
 
-    # ── prepare_dl_preds ─────────────────────────────────────────────────
-    sp_prep = subparsers.add_parser(
-        "prepare_dl_preds",
-        help="(EXP-006) Extract DL validation predictions to numpy format. Requires torch.",
-    )
-    sp_prep.add_argument("--preds_file", type=str, required=True, help="Path to the .pt predictions tensor.")
-    sp_prep.add_argument("--checkpoint", type=str, required=True, help="Path to the model checkpoint (.ckpt).")
-    sp_prep.add_argument("--splits_csv", type=str, required=True, help="Path to the splits CSV file.")
-    sp_prep.add_argument("--output_file", type=str, default=os.path.join("data", "preds", "val_preds_chebi25.npy"), help="Path to save the numpy array (val_preds_chebi25.npy) and metadata JSON.")
-    sp_prep.set_defaults(func=_handle_prepare_dl_preds)
-
-    # ── eval_correct_val ─────────────────────────────────────────────────
-    sp_ecv = subparsers.add_parser(
-        "eval_correct_val",
-        help="(EXP-006) Evaluate all models on the correct (parent-restricted) validation sets.",
-    )
-    _add_common_args(sp_ecv)
-    sp_ecv.add_argument(
-        "--ilp_runs", type=str, nargs="+", required=True,
-        help="One or more ILP run directories (each must contain results.json).",
-    )
-    sp_ecv.add_argument(
-        "--dl_preds_npy", type=str,
-        default=os.path.join("data", "preds", "val_preds_chebi25.npy"),
-        help="Path to the DL predictions numpy array (from prepare_dl_preds).",
-    )
-    sp_ecv.add_argument(
-        "--dl_preds_meta", type=str,
-        default=os.path.join("data", "preds", "val_preds_chebi25_metadata.json"),
-        help="Path to the DL predictions metadata JSON (from prepare_dl_preds).",
-    )
-    sp_ecv.add_argument(
-        "--output", type=str,
-        default=os.path.join("data", "results_correct_val", "metrics.csv"),
-        help="Output CSV path for per-class per-model metrics.",
-    )
-    sp_ecv.set_defaults(func=_handle_eval_correct_val)
-
     # ── ensemble_predict ─────────────────────────────────────────────────
     sp_ep = subparsers.add_parser(
         "ensemble_predict",
@@ -475,20 +408,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp_ep.add_argument("--chebi_version", type=int, default=248)
     sp_ep.add_argument("--chebi_split", type=str, required=True,
                        help="Path to the splits CSV file.")
-    sp_ep.add_argument("--label_set", type=str, required=True,
-                       help="File with one ChEBI class ID per line (e.g. ChEBI25_3_STAR/processed/classes.txt).")
+    sp_ep.add_argument("--dl_val_scores", type=str, default=os.path.join("data", "preds", "dl_val_direct_neighbor_scores.csv"),
+                       help="DL validation scores on direct neighbors (generated with get_dl_direct_neighbor_scores).")
     sp_ep.add_argument("--ilp_val_runs", type=str, nargs="+", default=[],
                        help="Validation-run directories (output of 'test' with test_on=validation); used for model selection and cache.")
     sp_ep.add_argument("--ilp_runs", type=str, nargs="+", default=[],
                        help="ILP run directories providing the programs used for prediction; their validation_details also populate the cache.")
-    sp_ep.add_argument("--dl_preds_npy", type=str, required=True,
+    sp_ep.add_argument("--dl_preds_npy", type=str, default=os.path.join("data", "preds", "test_preds_chebi25.npy"),
                        help="DL predictions .npy for the target split (validation or test).")
-    sp_ep.add_argument("--dl_preds_meta", type=str, required=True,
+    sp_ep.add_argument("--dl_preds_meta", type=str, default=os.path.join("data", "preds", "test_preds_chebi25_metadata.json"),
                        help="Metadata JSON for --dl_preds_npy.")
-    sp_ep.add_argument("--dl_preds_val_npy", type=str, default=None,
-                       help="DL validation predictions .npy for model selection (required when --predict_on=test).")
-    sp_ep.add_argument("--dl_preds_val_meta", type=str, default=None,
-                       help="Metadata JSON for --dl_preds_val_npy.")
+    sp_ep.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
+                       help="Path to the class statistics CSV file (contains list of label classes + info about which classes have negative samples and which do not).")
     sp_ep.add_argument("--predict_on", type=str, default="validation",
                        choices=["train", "validation", "test"],
                        help="Which split to predict on (default: validation).")

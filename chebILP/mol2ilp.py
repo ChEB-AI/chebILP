@@ -327,8 +327,7 @@ def get_direct_neighbors(
         neg_ids: list of negative validation molecule IDs
                  (empty when target has no siblings)
     """
-    mol_index = set(molecules_df.index)
-
+    mol_index = set(str(idx) for idx in molecules_df.index)
     pos_ids = [
         str(d)
         for d in hierarchy_graph.predecessors(target_id)
