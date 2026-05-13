@@ -201,19 +201,11 @@ def _handle_select_predicates(args):
 def _handle_prepare_dl_preds(args):
     from chebILP.prepare_dl_preds import extract_dl_preds
 
-    target_class_ids = []
-    with open(args.target_classes, "r") as f:
-        for line in f:
-            cls_id = line.strip()
-            if cls_id:
-                target_class_ids.append(cls_id)
-
     extract_dl_preds(
         preds_pt_path=args.preds_file,
         checkpoint_path=args.checkpoint,
         splits_csv_path=args.splits_csv,
-        target_class_ids=target_class_ids,
-        output_dir=args.output_dir,
+        output_file=args.output_file,
     )
 
 
@@ -257,6 +249,17 @@ def _handle_ensemble_predict(args):
     dl_preds = load_dl_preds(args.dl_preds_npy, args.dl_preds_meta)
     print(f"DL predictions: {dl_preds.shape[0]} molecules x {dl_preds.shape[1]} classes")
 
+    # Load separate val preds for model selection when predicting on a different split
+    if args.dl_preds_val_npy and args.dl_preds_val_meta:
+        dl_preds_val = load_dl_preds(args.dl_preds_val_npy, args.dl_preds_val_meta)
+        print(f"DL val predictions (for model selection): {dl_preds_val.shape[0]} molecules x {dl_preds_val.shape[1]} classes")
+    else:
+        dl_preds_val = None  # EnsemblePredictor defaults to dl_preds
+
+    ilp_val_run_dirs = {}
+    for run_path in args.ilp_val_runs:
+        ilp_val_run_dirs[os.path.basename(run_path.rstrip("/\\"))] = run_path
+
     ilp_run_dirs = {}
     for run_path in args.ilp_runs:
         ilp_run_dirs[os.path.basename(run_path.rstrip("/\\"))] = run_path
@@ -266,12 +269,14 @@ def _handle_ensemble_predict(args):
     chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
 
     predictor = EnsemblePredictor(
-        metrics_csv=args.metrics_csv,
-        ilp_run_dirs=ilp_run_dirs,
+        ilp_val_runs=ilp_val_run_dirs,
+        ilp_runs=ilp_run_dirs,
         dl_preds=dl_preds,
         chebi_graph=chebi_graph,
         label_set=label_set,
         classifier_chain_mode=not args.native_mode,
+        model_selection_metric=args.model_selection_metric,
+        dl_preds_val=dl_preds_val,
     )
 
     mol_ids = []
@@ -291,7 +296,7 @@ def _handle_ensemble_predict(args):
         molecules_df.index.name = None
         print(f"Loaded {len(molecules_df)} molecules for Clingo fallback")
 
-    predictions_df = predictor.predict_validation_set(mol_ids, molecules_df)
+    predictions_df = predictor.predict_set(mol_ids, molecules_df)
 
     import numpy as np, json as _json
     arr = predictions_df.to_numpy().astype("float32")
@@ -432,8 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_prep.add_argument("--preds_file", type=str, required=True, help="Path to the .pt predictions tensor.")
     sp_prep.add_argument("--checkpoint", type=str, required=True, help="Path to the model checkpoint (.ckpt).")
     sp_prep.add_argument("--splits_csv", type=str, required=True, help="Path to the splits CSV file.")
-    sp_prep.add_argument("--target_classes", type=str, required=True, help="Path to file with target ChEBI class IDs (one per line).")
-    sp_prep.add_argument("--output_dir", type=str, default=os.path.join("data", "preds"), help="Directory to save numpy array (val_preds_chebi25.npy) and metadata JSON.")
+    sp_prep.add_argument("--output_file", type=str, default=os.path.join("data", "preds", "val_preds_chebi25.npy"), help="Path to save the numpy array (val_preds_chebi25.npy) and metadata JSON.")
     sp_prep.set_defaults(func=_handle_prepare_dl_preds)
 
     # ── eval_correct_val ─────────────────────────────────────────────────
@@ -473,22 +477,29 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Path to the splits CSV file.")
     sp_ep.add_argument("--label_set", type=str, required=True,
                        help="File with one ChEBI class ID per line (e.g. ChEBI25_3_STAR/processed/classes.txt).")
-    sp_ep.add_argument("--metrics_csv", type=str, required=True,
-                       help="Correct-val metrics CSV produced by eval_correct_val.")
+    sp_ep.add_argument("--ilp_val_runs", type=str, nargs="+", default=[],
+                       help="Validation-run directories (output of 'test' with test_on=validation); used for model selection and cache.")
     sp_ep.add_argument("--ilp_runs", type=str, nargs="+", default=[],
-                       help="ILP run directories (same ones used in eval_correct_val).")
-    sp_ep.add_argument("--dl_preds_npy", type=str,
-                       default=os.path.join("data", "preds", "val_preds_chebi25.npy"))
-    sp_ep.add_argument("--dl_preds_meta", type=str,
-                       default=os.path.join("data", "preds", "val_preds_chebi25_metadata.json"))
+                       help="ILP run directories providing the programs used for prediction; their validation_details also populate the cache.")
+    sp_ep.add_argument("--dl_preds_npy", type=str, required=True,
+                       help="DL predictions .npy for the target split (validation or test).")
+    sp_ep.add_argument("--dl_preds_meta", type=str, required=True,
+                       help="Metadata JSON for --dl_preds_npy.")
+    sp_ep.add_argument("--dl_preds_val_npy", type=str, default=None,
+                       help="DL validation predictions .npy for model selection (required when --predict_on=test).")
+    sp_ep.add_argument("--dl_preds_val_meta", type=str, default=None,
+                       help="Metadata JSON for --dl_preds_val_npy.")
     sp_ep.add_argument("--predict_on", type=str, default="validation",
                        choices=["train", "validation", "test"],
                        help="Which split to predict on (default: validation).")
     sp_ep.add_argument("--load_molecules", action="store_true",
-                       help="Load molecule structures for Clingo fallback on uncached molecules.")
+                       help="Load molecule structures for Clingo fallback on uncached molecules (required for test-set ILP predictions).")
     sp_ep.add_argument("--output", type=str,
                        default=os.path.join("data", "results_correct_val", "ensemble_predictions.npy"),
                        help="Output .npy path; a matching _metadata.json is written alongside.")
+    sp_ep.add_argument("--model_selection_metric", type=str, default="f1",
+                       choices=["balanced_acc", "f1", "weighted_f1"],
+                       help="Metric for model selection: 'f1'/'balanced_acc' pick the single best model; 'weighted_f1' blends all models weighted by F1.")
     sp_ep.add_argument("--native_mode", "-n", action="store_true",
                        help="Skips classifier chain mode (only predict a class if all parents are predicted positive, the default).")
     sp_ep.set_defaults(func=_handle_ensemble_predict)

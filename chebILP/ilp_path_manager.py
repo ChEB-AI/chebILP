@@ -1,7 +1,7 @@
 import os
 from typing import Literal
 
-Split = Literal["train", "validation", "test", "validation_correct"]
+Split = Literal["train", "validation", "test"]
 
 
 def get_problem_dir(chebi_id, split: Split, base_dir=None):

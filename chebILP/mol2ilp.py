@@ -285,25 +285,24 @@ class ILPProblemBuilder:
 
         df_pos = self.molecules[[id in descendants for id in self.molecules.index]]
         df_neg = self.molecules[[id not in df_pos.index for id in self.molecules.index]]
-        assert len(df_pos) >= min_pos_samples, f"ChEBI class {target_id} does not have enough positive samples (found {len(df_pos)}, required are at least {min_pos_samples}). Got samples {df_pos.index.tolist()}"
-        assert len(df_neg) >= min_neg_samples, f"ChEBI class {target_id} does not have enough negative samples (found {len(df_neg)}, required are at least {min_neg_samples}). Got samples {df_neg.index.tolist()}"
+        if len(df_pos) < min_pos_samples:
+            print(f"ChEBI class {target_id} does not have enough positive samples (found {len(df_pos)}, required are at least {min_pos_samples}). Got samples {df_pos.index.tolist()}")
+        if len(df_neg) < min_neg_samples:
+            print(f"ChEBI class {target_id} does not have enough negative samples (found {len(df_neg)}, required are at least {min_neg_samples}). Got samples {df_neg.index.tolist()}")
         
         samples_by_split = dict()
-        for posneg in ["pos", "neg"]:
-            df = df_pos if posneg == "pos" else df_neg
-            df_index = df.index.astype(str)
-            train_samples = df[df_index.isin(self.train_ids)]
-            val_samples = df[df_index.isin(self.validation_ids)]
-            test_samples = df[df_index.isin(self.test_ids)]
-            if posneg == "pos":
-                samples_by_split[(posneg, "train")] = train_samples.sample(min(max_pos_samples, len(train_samples)), random_state=42) # if there are more positives than max_pos_samples, sample randomly
-                samples_by_split[(posneg, "validation")] = val_samples.sample(min(max_pos_samples, len(val_samples)), random_state=42)
-                samples_by_split[(posneg, "test")] = test_samples.sample(min(max_pos_samples, len(test_samples)), random_state=42)            
-            else:
-                samples_by_split[(posneg, "train")] = self.get_closest_negatives(train_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples)
-                samples_by_split[(posneg, "validation")] = self.get_closest_negatives(val_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples, direct_only=True)
-                samples_by_split[(posneg, "test")] = self.get_closest_negatives(test_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples, direct_only=True)
-            
+        pos_train_samples = df_pos[df_pos.index.astype(str).isin(self.train_ids)]
+        samples_by_split[("pos", "train")] = pos_train_samples.sample(min(max_pos_samples, len(pos_train_samples)), random_state=42) # if there are more positives than max_pos_samples, sample randomly
+        neg_train_samples = df_neg[df_neg.index.astype(str).isin(self.train_ids)]
+        samples_by_split[("neg", "train")] = self.get_closest_negatives(neg_train_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples) # get closest negatives for training (not necessarily direct neighbors, but keep collecting from farther rings until we have enough samples)
+
+        # only use direct neighbors for validation / testing
+        pos_ids, neg_ids_direct = get_direct_neighbors(target_id, self.chebi_graph, self.hierarchy_graph, self.molecules)
+        samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(self.validation_ids) & df_pos.index.astype(str).isin(pos_ids)]
+        samples_by_split[("neg", "validation")] = df_neg[df_neg.index.astype(str).isin(self.validation_ids) & df_neg.index.astype(str).isin(neg_ids_direct)]
+        samples_by_split[("pos", "test")] = df_pos[df_pos.index.astype(str).isin(self.test_ids) & df_pos.index.astype(str).isin(pos_ids)]
+        samples_by_split[("neg", "test")] = df_neg[df_neg.index.astype(str).isin(self.test_ids) & df_neg.index.astype(str).isin(neg_ids_direct)]
+        
         for (posneg, split), df in samples_by_split.items():
             exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split=split)
             with open(exs_path, "w+" if posneg == "pos" else "a") as f:
@@ -311,8 +310,44 @@ class ILPProblemBuilder:
                     f.write(f"{posneg}(chebi_{target_id}({sample})).\n")
 
         # sum up all positive and negative samples across splits
-        return len(samples_by_split[("pos", "train")]) + len(samples_by_split[("pos", "validation")]) + len(samples_by_split[("pos", "test")]), len(samples_by_split[("neg", "train")]) + len(samples_by_split[("neg", "validation")]) + len(samples_by_split[("neg", "test")])
+        return sum(len(v) for k, v in samples_by_split.items() if k[0] == "pos"), sum(len(v) for k, v in samples_by_split.items() if k[0] == "neg")
     
+
+def get_direct_neighbors(
+    target_id: str,
+    chebi_graph,
+    hierarchy_graph,
+    molecules_df: pd.DataFrame,
+) -> tuple[list[str], list[str]]:
+    """
+    Return the positive and negative samples for a target class, only considering descendants of its direct parents.
+
+    Returns:
+        pos_ids: list of positive validation molecule IDs
+        neg_ids: list of negative validation molecule IDs
+                 (empty when target has no siblings)
+    """
+    mol_index = set(molecules_df.index)
+
+    pos_ids = [
+        str(d)
+        for d in hierarchy_graph.predecessors(target_id)
+        if str(d) in mol_index
+    ]
+
+    sample_space_by_parent = dict()
+    for parent in chebi_graph.successors(target_id):
+        sample_space_by_parent[parent] = set()
+        for desc in hierarchy_graph.predecessors(parent):
+            s = str(desc)
+            if s in mol_index:
+                sample_space_by_parent[parent].add(s)
+    if len(sample_space_by_parent) == 0:
+        return pos_ids, []
+    sample_space = set.intersection(*sample_space_by_parent.values())
+    neg_ids = list(sample_space - set(pos_ids))
+    return pos_ids, neg_ids
+
 
 def get_atom_id(atom: int, molecule_id):
     return "a" + str(molecule_id) + "_" + str(atom + 1)  # Prolog indices start at 1

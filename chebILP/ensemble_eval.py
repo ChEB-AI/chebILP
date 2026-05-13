@@ -16,129 +16,14 @@ Provides evaluation for both ILP programs (via Clingo) and DL predictions
 import json
 import os
 import tempfile
-from typing import Optional
+from typing import Literal, Optional
 
 import numpy as np
 import pandas as pd
 
 from chebILP.clingo_eval import run_ilp_validation_clingo
+from chebILP.mol2ilp import get_direct_neighbors
 
-
-# ---------------------------------------------------------------------------
-# Correct validation set computation
-# ---------------------------------------------------------------------------
-
-def get_pos_neg_samples_for_class(
-    target_id: str,
-    chebi_graph,
-    hierarchy_graph,
-    molecules_df: pd.DataFrame,
-) -> tuple[list[str], list[str]]:
-    """
-    Return the positive and negative samples for a target class, only considering descendants of its direct parents.
-
-
-    Returns:
-        pos_ids: list of positive validation molecule IDs
-        neg_ids: list of negative validation molecule IDs
-                 (empty when target has no siblings)
-    """
-    mol_index = set(molecules_df.index)
-
-    pos_ids = [
-        str(d)
-        for d in hierarchy_graph.predecessors(target_id)
-        if str(d) in mol_index
-    ]
-    pos_set = set(pos_ids)
-
-    sample_space_by_parent = dict()
-    for parent in chebi_graph.successors(target_id):
-        sample_space_by_parent[parent] = set()
-        for desc in hierarchy_graph.predecessors(parent):
-            s = str(desc)
-            if s in mol_index:
-                sample_space_by_parent[parent].add(s)
-    if len(sample_space_by_parent) == 0:
-        return pos_ids, []
-    sample_space = set.intersection(*sample_space_by_parent.values())
-    neg_ids = list(sample_space - pos_set)
-    return pos_ids, neg_ids
-
-
-# ---------------------------------------------------------------------------
-# ILP evaluation on correct validation set
-# ---------------------------------------------------------------------------
-
-def eval_ilp_on_correct_val(
-    target_id: str,
-    prog_str: str,
-    pos_ids: list[str],
-    neg_ids: list[str],
-    molecules_df: pd.DataFrame,
-    problem_dir: Optional[str] = None,
-    predicate_set: str = "atoms",
-) -> Optional[tuple[dict, list]]:
-    """
-    Evaluate an ILP program on the correct validation set.
-
-    Builds exs.pl and bk.pl for the specific molecule subset and runs Clingo.
-    When problem_dir is given the files are written to
-    ``<problem_dir>/chebi_<target_id>/validation_correct/`` (persisted for
-    later inspection / reuse); otherwise a temporary directory is used.
-
-    Returns ``(conf_matrix, details)`` where conf_matrix is {TP,FP,TN,FN} and
-    details is a list of per-sample dicts with keys id/true_label/outcome.
-    Returns None when evaluation is not possible (no program or no positives).
-    """
-    if not prog_str or not pos_ids:
-        return None
-
-    all_ids = set(pos_ids) | set(neg_ids)
-    relevant_mols = molecules_df[molecules_df.index.isin(all_ids)].dropna(subset=["mol"])
-
-    valid_ids = set(relevant_mols.index)
-    pos_ids = [i for i in pos_ids if i in valid_ids]
-    neg_ids = [i for i in neg_ids if i in valid_ids]
-
-    if not pos_ids:
-        return None
-
-    from chebILP.mol2ilp import build_background_chemlog  # lazy: avoids popper import at module level
-    from chebILP.ilp_path_manager import get_exs_path, get_bk_path
-
-    if problem_dir is not None:
-        exs_path = get_exs_path(target_id, split="validation_correct", base_dir=problem_dir)
-        bk_path = get_bk_path(target_id, split="validation_correct", predicate_set=predicate_set, base_dir=problem_dir)
-        ctx = None  # no tempdir needed
-    else:
-        _tmpdir = tempfile.TemporaryDirectory()
-        exs_path = os.path.join(_tmpdir.name, "exs.pl")
-        bk_path = os.path.join(_tmpdir.name, "bk.pl")
-        ctx = _tmpdir
-
-    try:
-        with open(exs_path, "w") as f:
-            for mol_id in pos_ids:
-                f.write(f"pos(chebi_{target_id}({mol_id})).\n")
-            for mol_id in neg_ids:
-                f.write(f"neg(chebi_{target_id}({mol_id})).\n")
-
-        prolog_lines, _ = build_background_chemlog(relevant_mols)
-        with open(bk_path, "w") as f:
-            f.write("\n".join(prolog_lines) + "\n")
-
-        result = run_ilp_validation_clingo(target_id, prog_str, exs_path, bk_path, return_details=True)
-        if result is None:
-            return None
-        conf_matrix, details = result
-        return conf_matrix, details
-    except Exception as e:
-        print(f"  Clingo eval failed for ChEBI:{target_id}: {e}")
-        return None
-    finally:
-        if ctx is not None:
-            ctx.cleanup()
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +45,7 @@ def load_dl_preds(npy_path: str, meta_json_path: str) -> pd.DataFrame:
     return pd.DataFrame(arr, index=mol_order, columns=class_labels)
 
 
-def eval_dl_on_correct_val(
+def eval_dl_on_ids(
     target_id: str,
     pos_ids: list[str],
     neg_ids: list[str],
@@ -232,141 +117,6 @@ def balanced_accuracy(conf: dict) -> Optional[float]:
     return 0.5 * (tpr + tnr)
 
 
-def _flat_metrics(prefix: str, conf: Optional[dict]) -> dict:
-    if conf is None:
-        return {f"{prefix}_{k}": None for k in ("tp", "fp", "tn", "fn", "balanced_acc")}
-    ba = balanced_accuracy(conf)
-    return {
-        f"{prefix}_tp": conf["TP"],
-        f"{prefix}_fp": conf["FP"],
-        f"{prefix}_tn": conf["TN"],
-        f"{prefix}_fn": conf["FN"],
-        f"{prefix}_balanced_acc": round(ba, 4) if ba is not None else None,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Main evaluation orchestrator
-# ---------------------------------------------------------------------------
-
-def run_correct_val_eval(
-    target_ids: list[str],
-    ilp_run_dirs: dict[str, str],
-    dl_preds: pd.DataFrame,
-    chebi_graph,
-    hierarchy_graph,
-    molecules_df: pd.DataFrame,
-    validation_ids: set,
-    output_path: str,
-    problem_dir: Optional[str] = None,
-    predicate_set: str = "atoms",
-):
-    """
-    For each target class, evaluate all models on the correct validation set
-    and write results to a CSV file.
-
-    Args:
-        target_ids:    list of ChEBI class IDs to evaluate
-        ilp_run_dirs:  dict of run_name → results directory path
-        dl_preds:      DataFrame from load_dl_preds()
-        chebi_graph:   non-transitive ChEBI hierarchy (from ILPProblemBuilder)
-        hierarchy_graph: transitive ChEBI hierarchy
-        molecules_df:  molecules DataFrame with mol objects
-        validation_ids: set of validation molecule IDs (strings)
-        output_path:   where to write the summary CSV
-        problem_dir:   ILP problems base dir; when set, exs.pl and bk.pl are
-                       written to <problem_dir>/chebi_<id>/validation_correct/
-        predicate_set: predicate set used for BK (default "atoms")
-
-    Side effects per ILP run:
-        Appends lines to ``<run_dir>/results_correct_val.json``, one JSON
-        object per class with keys chebi_id, validation_correct_score,
-        validation_correct_details (list of {id, true_label, outcome}).
-    """
-    # Load all ILP programs
-    ilp_programs = {}
-    for run_name, run_dir in ilp_run_dirs.items():
-        ilp_programs[run_name] = load_ilp_results(run_dir)
-        print(f"Loaded {len(ilp_programs[run_name])} results from '{run_name}'")
-
-    # Load already-evaluated classes per run (for resumability)
-    cached: dict[str, dict[str, dict]] = {}  # run_name → {chebi_id → stored entry}
-    for run_name, run_dir in ilp_run_dirs.items():
-        json_path = os.path.join(run_dir, "results_correct_val.json")
-        cached[run_name] = {}
-        if os.path.exists(json_path):
-            with open(json_path, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        cached[run_name][str(entry["chebi_id"])] = entry
-                    except json.JSONDecodeError:
-                        pass
-            n = len(cached[run_name])
-            if n:
-                print(f"  '{run_name}': {n} classes already evaluated, will skip those")
-
-    rows = []
-    for target_id in target_ids:
-        # compute pos/neg samples for this class (only considering descendants of direct parents)
-        pos_ids, neg_ids = get_pos_neg_samples_for_class(
-            target_id, chebi_graph, hierarchy_graph, molecules_df
-        )
-        has_negatives = len(neg_ids) > 0
-        pos_ids = [i for i in pos_ids if i in validation_ids]
-        neg_ids = [i for i in neg_ids if i in validation_ids]
-
-        row = {
-            "chebi_id": target_id,
-            "pos_count": len(pos_ids),
-            "neg_count": len(neg_ids),
-            "has_negatives": has_negatives,
-        }
-
-        dl_conf = eval_dl_on_correct_val(target_id, pos_ids, neg_ids, dl_preds)
-        row.update(_flat_metrics("dl", dl_conf))
-
-        # ILP evaluations — skip runs that already have a result for this class
-        for run_name, run_dir in ilp_run_dirs.items():
-            if target_id in cached[run_name]:
-                ilp_conf = cached[run_name][target_id].get("validation_correct_score")
-                print(f"  ILP [{run_name}] ChEBI:{target_id}: cached")
-            else:
-                entry = ilp_programs[run_name].get(target_id, {})
-                prog_str = entry.get("program")
-                ilp_conf, details = None, None
-                if prog_str:
-                    print(f"  ILP [{run_name}] ChEBI:{target_id}: evaluating...")
-                    result = eval_ilp_on_correct_val(
-                        target_id, prog_str, pos_ids, neg_ids, molecules_df,
-                        problem_dir=problem_dir, predicate_set=predicate_set,
-                    )
-                    if result is not None:
-                        ilp_conf, details = result
-                else:
-                    print(f"  ILP [{run_name}] ChEBI:{target_id}: no program")
-
-                with open(os.path.join(run_dir, "results_correct_val.json"), "a") as f:
-                    f.write(json.dumps({
-                        "chebi_id": target_id,
-                        "validation_correct_score": ilp_conf,
-                        "validation_correct_details": details,
-                    }) + "\n")
-
-            row.update(_flat_metrics(run_name, ilp_conf))
-
-        rows.append(row)
-
-    df = pd.DataFrame(rows)
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    df.to_csv(output_path, index=False)
-    print(f"\nSaved correct-val metrics to {output_path}")
-    return df
-
-
 # ---------------------------------------------------------------------------
 # Ensemble predictor
 # ---------------------------------------------------------------------------
@@ -375,72 +125,93 @@ class EnsemblePredictor:
     """
     Hierarchical ensemble combining DL and ILP models.
 
-    At init:
-    1. Builds a label-projected hierarchy: for each label, the closest ancestors
-       that are also labels (BFS upward through non-label nodes).
-    2. Selects the most trustworthy model per class (highest balanced accuracy on
-       the correct validation set from run_correct_val_eval).
-       - "always_positive" when a class has no negatives in its correct val set.
-       - Falls back to DL for classes absent from the metrics CSV.
+    ilp_val_runs: directories produced by test_chebi_classes(test_on="validation"),
+    used only for model selection. Each results.json entry needs validation_score
+    and validation_details. DL val scores are derived from the same pos/neg IDs.
+
+    ilp_runs: ILP learning/target runs providing the actual programs for prediction.
+    Their validation_details (if present) also populate the prediction cache.
+    Run names must match between ilp_val_runs and ilp_runs for model selection
+    to resolve to the correct programs.
+
+    For validation-set predictions: dl_preds covers the validation molecules.
+    For test-set predictions: pass dl_preds with test-molecule scores and
+    dl_preds_val with validation-molecule scores for model selection.
 
     Prediction for a molecule M (predict_sample):
     - Processes labels in topological order (parents before children).
     - Label C is predicted positive iff:
         (a) every label parent of C is already predicted positive, AND
         (b) the trusted model for C predicts M positive.
-    - DL predictions use the pre-loaded DataFrame (O(1) lookup per class).
-    - ILP predictions first consult the per-molecule cache loaded from
-      results_correct_val.json (O(1) lookup).  Clingo is only called for
-      molecules absent from that cache, and requires molecules_df with mol
-      objects.
+    - DL predictions use self.dl_preds (O(1) lookup).
+    - ILP predictions use ilp_val_cache (from validation_details) for val
+      molecules; Clingo fallback for uncached molecules (requires molecules_df).
     """
 
     def __init__(
         self,
-        metrics_csv: str,
-        ilp_run_dirs: dict[str, str],
+        ilp_val_runs: dict[str, str],
+        ilp_runs: dict[str, str],
         dl_preds: pd.DataFrame,
         chebi_graph,
         label_set: list[str],
         classifier_chain_mode=True,
+        model_selection_metric: Literal["balanced_acc", "f1", "weighted_f1"] = "f1",
+        dl_preds_val: Optional[pd.DataFrame] = None,
     ):
         import networkx as nx
 
         self.dl_preds = dl_preds
         self.label_set = set(str(l) for l in label_set)
         self.classifier_chain_mode = classifier_chain_mode
+        self.model_selection_metric = model_selection_metric
+        _dl_preds_val = dl_preds_val if dl_preds_val is not None else dl_preds
 
-        print("Loading ILP programs and validation cache...")
-        self.ilp_programs: dict[str, dict[str, Optional[str]]] = {}
-        # ilp_val_cache[run_name][chebi_id][mol_id] = True (predicted pos) / False (predicted neg)
-        # populated from results_correct_val.json written by eval_ilp_on_correct_val
+        # ilp_val_cache[run_name][chebi_id][mol_id] = True/False (predicted positive)
         self.ilp_val_cache: dict[str, dict[str, dict[str, bool]]] = {}
-        for run_name, run_dir in ilp_run_dirs.items():
+        # ilp_val_scores[run_name][cls_id] = conf matrix (for model selection)
+        self.ilp_val_scores: dict[str, dict[str, Optional[dict]]] = {}
+        # dl_val_scores[cls_id] = conf matrix computed from validation_details + dl_preds_val
+        self.dl_val_scores: dict[str, Optional[dict]] = {}
+
+        print("Loading validation runs (for model selection)...")
+        for run_name, run_dir in ilp_val_runs.items():
+            results = load_ilp_results(run_dir)
+            self.ilp_val_scores[run_name] = {}
+            self.ilp_val_cache.setdefault(run_name, {})
+
+            for cls_id, entry in results.items():
+                self.ilp_val_scores[run_name][cls_id] = entry.get("validation_score")
+                details = entry.get("validation_details") or []
+                if details:
+                    self.ilp_val_cache[run_name][cls_id] = {
+                        d["id"]: d["outcome"] in ("TP", "FP")
+                        for d in details
+                    }
+                    if cls_id not in self.dl_val_scores:
+                        pos_ids = [d["id"] for d in details if d["true_label"] == "pos"]
+                        neg_ids = [d["id"] for d in details if d["true_label"] == "neg"]
+                        self.dl_val_scores[cls_id] = eval_dl_on_ids(cls_id, pos_ids, neg_ids, _dl_preds_val)
+
+            n_cached = sum(len(v) for v in self.ilp_val_cache[run_name].values())
+            print(f"  '{run_name}': {len(results)} classes, {n_cached} cached molecule results")
+
+        print("Loading ILP runs (programs + cache)...")
+        self.ilp_programs: dict[str, dict[str, Optional[str]]] = {}
+        for run_name, run_dir in ilp_runs.items():
             results = load_ilp_results(run_dir)
             self.ilp_programs[run_name] = {cid: e.get("program") for cid, e in results.items()}
+            cache = self.ilp_val_cache.setdefault(run_name, {})
+            for cls_id, entry in results.items():
+                if cls_id not in cache:
+                    details = entry.get("validation_details") or []
+                    if details:
+                        cache[cls_id] = {
+                            d["id"]: d["outcome"] in ("TP", "FP")
+                            for d in details
+                        }
             n_prog = sum(1 for p in self.ilp_programs[run_name].values() if p)
-
-            self.ilp_val_cache[run_name] = {}
-            json_path = os.path.join(run_dir, "results_correct_val.json")
-            if os.path.exists(json_path):
-                with open(json_path, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            entry = json.loads(line)
-                            cls_id = str(entry["chebi_id"])
-                            details = entry.get("validation_correct_details") or []
-                            # outcome in {TP, FP} means the rule fired (predicted positive)
-                            self.ilp_val_cache[run_name][cls_id] = {
-                                d["id"]: d["outcome"] in ("TP", "FP")
-                                for d in details
-                            }
-                        except (json.JSONDecodeError, KeyError):
-                            pass
-            n_cached = sum(len(v) for v in self.ilp_val_cache[run_name].values())
-            print(f"  '{run_name}': {n_prog} programs, {len(self.ilp_val_cache[run_name])} classes cached ({n_cached} molecule results)")
+            print(f"  '{run_name}': {n_prog} programs")
 
         print("Building label-projected hierarchy...")
         self.label_parents = self._build_label_parents(chebi_graph)
@@ -451,12 +222,22 @@ class EnsemblePredictor:
                 label_graph.add_edge(parent, cls)
         self.topo_order = list(nx.topological_sort(label_graph))
 
-        print("Selecting trusted models from metrics CSV...")
-        self.trusted_model = self._select_trusted_models(metrics_csv)
-        counts: dict[str, int] = {}
-        for m in self.trusted_model.values():
-            counts[m] = counts.get(m, 0) + 1
-        print("  Trusted model counts:", counts)
+        print("Selecting models...")
+        if model_selection_metric == "weighted_f1":
+            self.model_weights = self._compute_model_weights()
+            self.trusted_model = {}
+            counts: dict[str, int] = {}
+            for w in self.model_weights.values():
+                for name in w:
+                    counts[name] = counts.get(name, 0) + 1
+            print("  Weighted model participation counts:", counts)
+        else:
+            self.model_weights = {}
+            self.trusted_model = self._select_trusted_models()
+            counts = {}
+            for m in self.trusted_model.values():
+                counts[m] = counts.get(m, 0) + 1
+            print("  Trusted model counts:", counts)
 
     # ── Hierarchy construction ────────────────────────────────────────────
 
@@ -482,7 +263,6 @@ class EnsemblePredictor:
                     visited.add(node)
                     if node in self.label_set:
                         label_parents[cls].add(node)
-                        # do not traverse above a found label node
                     else:
                         next_frontier.update(str(p) for p in chebi_graph.successors(node))
                 frontier = next_frontier - visited
@@ -491,53 +271,111 @@ class EnsemblePredictor:
 
     # ── Model selection ───────────────────────────────────────────────────
 
-    def _select_trusted_models(self, metrics_csv: str) -> dict[str, str]:
-        """
-        Pick the model with the highest balanced accuracy per class.
-        Classes absent from the CSV default to "dl".
-        """
-        df = pd.read_csv(metrics_csv)
-        ba_cols = {
-            col.replace("_balanced_acc", ""): col
-            for col in df.columns if col.endswith("_balanced_acc")
-        }
+    @staticmethod
+    def _f1_from_conf(conf: Optional[dict]) -> Optional[float]:
+        if conf is None:
+            return None
+        tp, fp, fn = conf.get("TP", 0), conf.get("FP", 0), conf.get("FN", 0)
+        if tp + fp + fn == 0:
+            return 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        if precision == 0 and recall == 0:
+            return 0.0
+        return 2 * (precision * recall) / (precision + recall)
 
+    def _compute_score_from_conf(self, conf: Optional[dict]) -> Optional[float]:
+        if conf is None:
+            return None
+        if self.model_selection_metric == "balanced_acc":
+            return balanced_accuracy(conf)
+        return self._f1_from_conf(conf)
+
+    def _has_negatives(self, cls_id: str) -> bool:
+        dl_conf = self.dl_val_scores.get(cls_id)
+        if dl_conf is not None and (dl_conf.get("TN", 0) + dl_conf.get("FP", 0)) > 0:
+            return True
+        for run_scores in self.ilp_val_scores.values():
+            sc = run_scores.get(cls_id)
+            if sc is not None and (sc.get("TN", 0) + sc.get("FP", 0)) > 0:
+                return True
+        return False
+
+    def _select_trusted_models(self) -> dict[str, str]:
+        """
+        Pick the single best model per class by the selected metric.
+        Classes absent from all validation runs default to "dl".
+        """
         trusted: dict[str, str] = {}
-        for _, row in df.iterrows():
-            cls_id = str(row["chebi_id"])
 
-            has_neg = row.get("has_negatives", True)
-            if isinstance(has_neg, str):
-                has_neg = has_neg.strip().lower() == "true"
-            if not has_neg:
+        all_cls_ids: set[str] = set()
+        for run_scores in self.ilp_val_scores.values():
+            all_cls_ids.update(run_scores.keys())
+
+        for cls_id in all_cls_ids:
+            if not self._has_negatives(cls_id):
                 trusted[cls_id] = "always_positive"
                 continue
 
+            dl_score = self._compute_score_from_conf(self.dl_val_scores.get(cls_id))
             best_model = "dl"
-            best_ba = float(row.get("dl_balanced_acc") or 0)
+            best_score = dl_score if dl_score is not None else float("-inf")
 
-            for model_name, ba_col in ba_cols.items():
-                ba = row.get(ba_col)
-                try:
-                    ba = float(ba)
-                except (TypeError, ValueError):
-                    continue
-                if ba > best_ba:
-                    if model_name != "dl":
-                        prog = self.ilp_programs.get(model_name, {}).get(cls_id)
-                        if not prog:
-                            continue
-                    best_model = model_name
-                    best_ba = ba
+            for run_name, run_scores in self.ilp_val_scores.items():
+                ilp_score = self._compute_score_from_conf(run_scores.get(cls_id))
+                if ilp_score is not None and ilp_score > best_score:
+                    if self.ilp_programs.get(run_name, {}).get(cls_id):
+                        best_model = run_name
+                        best_score = ilp_score
 
             trusted[cls_id] = best_model
 
-        # default for labels absent from metrics CSV
         for cls in self.label_set:
             if cls not in trusted:
                 trusted[cls] = "dl"
 
         return trusted
+
+    def _compute_model_weights(self) -> dict[str, dict[str, float]]:
+        """
+        Compute per-class model weights as own_F1 / sum(all_F1s).
+        Only models with programs are included alongside DL.
+        Classes with no negatives get weight 1.0 on "always_positive".
+        Classes absent from validation runs default to {"dl": 1.0}.
+        """
+        weights: dict[str, dict[str, float]] = {}
+
+        all_cls_ids: set[str] = set()
+        for run_scores in self.ilp_val_scores.values():
+            all_cls_ids.update(run_scores.keys())
+
+        for cls_id in all_cls_ids:
+            if not self._has_negatives(cls_id):
+                weights[cls_id] = {"always_positive": 1.0}
+                continue
+
+            model_f1s: dict[str, float] = {}
+
+            dl_f1 = self._f1_from_conf(self.dl_val_scores.get(cls_id))
+            if dl_f1 is not None:
+                model_f1s["dl"] = max(dl_f1, 0.0)
+
+            for run_name, run_scores in self.ilp_val_scores.items():
+                f1 = self._f1_from_conf(run_scores.get(cls_id))
+                if f1 is not None and self.ilp_programs.get(run_name, {}).get(cls_id):
+                    model_f1s[run_name] = max(f1, 0.0)
+
+            total = sum(model_f1s.values())
+            if total == 0:
+                weights[cls_id] = {"dl": 1.0}
+            else:
+                weights[cls_id] = {name: f1 / total for name, f1 in model_f1s.items()}
+
+        for cls in self.label_set:
+            if cls not in weights:
+                weights[cls] = {"dl": 1.0}
+
+        return weights
 
     # ── Prediction ────────────────────────────────────────────────────────
 
@@ -548,15 +386,19 @@ class EnsemblePredictor:
         Args:
             mol_id:       ChEBI molecule ID (string)
             molecules_df: DataFrame with mol objects — only needed when an ILP
-                          model is trusted for at least one class
+                          model is trusted for at least one class and the molecule
+                          is not in the validation cache (e.g. test-set molecules)
 
         Returns set of class IDs predicted positive.
         """
         positive: set[str] = set()
 
         for cls in self.topo_order:
-            # hierarchical gate: all label parents must already be predicted positive
-            if (self.classifier_chain_mode or self.trusted_model.get(cls) == "always_positive") and not all(p in positive for p in self.label_parents.get(cls, set())):
+            always_pos = (
+                self.trusted_model.get(cls) == "always_positive"
+                or self.model_weights.get(cls, {}) == {"always_positive": 1.0}
+            )
+            if (self.classifier_chain_mode or always_pos) and not all(p in positive for p in self.label_parents.get(cls, set())):
                 continue
 
             if self._eval_model_for_mol(cls, mol_id, molecules_df):
@@ -565,37 +407,53 @@ class EnsemblePredictor:
         return positive
 
     def _eval_model_for_mol(self, cls: str, mol_id: str, molecules_df) -> bool:
-        model = self.trusted_model.get(cls, "dl")
+        if self.model_weights:
+            weights = self.model_weights.get(cls, {"dl": 1.0})
+            if weights == {"always_positive": 1.0}:
+                return True
+            return self._compute_weighted_prediction(cls, mol_id, weights, molecules_df)
 
+        model = self.trusted_model.get(cls, "dl")
         if model == "always_positive":
             return True
-
         if model == "dl":
             if cls not in self.dl_preds.columns or mol_id not in self.dl_preds.index:
                 return False
             return float(self.dl_preds.at[mol_id, cls]) >= 0.5
-
-        # ILP model
         prog = self.ilp_programs.get(model, {}).get(cls)
         if not prog:
             return False
         return self._run_ilp_for_mol(cls, mol_id, prog, run_name=model, molecules_df=molecules_df)
 
+    def _compute_weighted_prediction(
+        self, cls: str, mol_id: str, weights: dict[str, float], molecules_df
+    ) -> bool:
+        total = 0.0
+        for model_name, weight in weights.items():
+            if weight <= 0:
+                continue
+            if model_name == "dl":
+                if cls in self.dl_preds.columns and mol_id in self.dl_preds.index:
+                    total += weight * float(self.dl_preds.at[mol_id, cls])
+            else:
+                prog = self.ilp_programs.get(model_name, {}).get(cls)
+                if prog:
+                    pred = self._run_ilp_for_mol(cls, mol_id, prog, run_name=model_name, molecules_df=molecules_df)
+                    total += weight * (1.0 if pred else 0.0)
+        return total >= 0.5
+
     def _run_ilp_for_mol(
         self, cls: str, mol_id: str, prog_str: str, run_name: str, molecules_df
     ) -> bool:
         """
-        Evaluate an ILP rule for a single molecule.
-
-        Checks ilp_val_cache[run_name][cls][mol_id] first (populated from
-        results_correct_val.json).  Falls back to Clingo only when the molecule
-        is not in the cache, which requires molecules_df with mol objects.
+        Check ilp_val_cache (from validation_details) first; fall back to Clingo
+        for molecules not in the cache (e.g. test-set molecules).
+        Clingo fallback requires molecules_df with mol objects.
         """
         mol_cache = self.ilp_val_cache.get(run_name, {}).get(cls)
         if mol_cache is not None and mol_id in mol_cache:
             return mol_cache[mol_id]
 
-        # Clingo fallback for molecules not covered by the validation cache
         if molecules_df is None:
             return False
 
@@ -623,21 +481,21 @@ class EnsemblePredictor:
                 print(f"  ILP eval failed for {cls}/{mol_id}: {e}")
                 return False
 
-    def predict_validation_set(
+    def predict_set(
         self,
-        validation_mol_ids: list[str],
+        mol_ids: list[str],
         molecules_df=None,
     ) -> pd.DataFrame:
         """
-        Run ensemble predictions for all validation molecules.
+        Run ensemble predictions for a list of molecules.
 
         Returns a boolean DataFrame: rows = mol_ids, columns = labels (topo order).
         """
         import tqdm
 
         records = []
-        for mol_id in tqdm.tqdm(validation_mol_ids, desc="Ensemble predictions"):
+        for mol_id in tqdm.tqdm(mol_ids, desc="Ensemble predictions"):
             pos = self.predict_sample(mol_id, molecules_df)
             records.append({cls: cls in pos for cls in self.topo_order})
 
-        return pd.DataFrame(records, index=validation_mol_ids, columns=self.topo_order)
+        return pd.DataFrame(records, index=mol_ids, columns=self.topo_order)

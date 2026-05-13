@@ -6,7 +6,7 @@ import time
 from chebILP.ilp_path_manager import get_bk_path, get_exs_path
 from typing import Literal, Optional
 
-def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, results_dir, selection_mode: Optional[str], selection_k: Optional[int], test_on: Literal["val", "test"] = "test", verbose: bool = False, **kwargs):
+def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, results_dir, selection_mode: Optional[str], selection_k: Optional[int], test_on: Literal["validation", "test"] = "test", verbose: bool = False, **kwargs):
 
     with open(os.path.join(results_dir, "config.yml"), "a+") as f:
         f.write(f"problem_dir: {problem_dir}\n")
@@ -30,16 +30,14 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
         start_time = time.perf_counter()
         print(f"Testing ChEBI:{chebi_id}...")
         from chebILP.clingo_eval import run_ilp_validation_clingo
-        split = "validation" if test_on == "val" else "test"
-        result = run_ilp_validation_clingo(
+        conf_matrix, details = run_ilp_validation_clingo(
             chebi_id, prog_str,
-            exs_file=get_exs_path(chebi_id, split=split, base_dir=problem_dir),
-            bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split=split, base_dir=problem_dir,
+            exs_file=get_exs_path(chebi_id, split=test_on, base_dir=problem_dir),
+            bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split=test_on, base_dir=problem_dir,
                                 selection_mode=selection_mode, selection_k=selection_k),
-            return_details=verbose,
+            return_details=True,
         )
         if verbose:
-            conf_matrix, details = result
             balanced_acc = 0.5 * (conf_matrix["TP"] / (conf_matrix["TP"] + conf_matrix["FN"]) if (conf_matrix["TP"] + conf_matrix["FN"]) > 0 else 0) + 0.5 * (conf_matrix["TN"] / (conf_matrix["TN"] + conf_matrix["FP"]) if (conf_matrix["TN"] + conf_matrix["FP"]) > 0 else 0)
             f1_score = conf_matrix["TP"] / (conf_matrix["TP"] + 0.5 * (conf_matrix["FP"] + conf_matrix["FN"])) if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0 else 0.0
             print(f"  F1: {f1_score:.2f}, BA: {balanced_acc:.2f} TPs: {conf_matrix['TP']}, FPs: {conf_matrix['FP']}, TNs: {conf_matrix['TN']}, FNs: {conf_matrix['FN']}")
@@ -48,11 +46,6 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
                 print(f"  {'False Positive' if outcome == 'FP' else 'False Negative'} samples (showing up to 10):")
                 for d in subset:
                     print(f"    {d['id']} (true label: {d['true_label']})")
-        else:
-            conf_matrix = result
-        #except Exception as e:
-        #    print(f"Testing failed for ChEBI:{chebi_id} with error: {e}")
-        #    conf_matrix = None
         
         with open(os.path.join(results_dir, "results.json"), "a+") as f:
             result_entry = {
@@ -60,5 +53,6 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
                 "time_taken": time.perf_counter() - start_time,
                 "program": prog_str,
                 f"{test_on}_score": conf_matrix,
+                f"{test_on}_details": details
             }
             f.write(json.dumps(result_entry) + "\n")
