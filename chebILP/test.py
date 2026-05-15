@@ -20,13 +20,7 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
             except json.JSONDecodeError:
                 print(f"Failed to parse line: {line}")
     
-    label_set = os.path.join("data", "demo_classes.txt")
-    with open(label_set, "r") as f:
-        label_set = {line.strip() for line in f}
-
     for row in results:
-        if row["chebi_id"] not in label_set:
-            continue
         chebi_id = row["chebi_id"]
         prog_str = row["program"]
         if prog_str is None:
