@@ -198,57 +198,66 @@ def _handle_select_predicates(args):
     print(f"\nCompleted: {successful}/{len(chebi_ids)} classes processed successfully")
 
 
-def _handle_ensemble_predict(args):
-    from chebILP.ensemble_eval import EnsemblePredictor, load_dl_preds
-    from chebi_utils import build_chebi_graph, get_hierarchy_subgraph, extract_molecules
-    import networkx as nx
+def _load_label_stats(path: str) -> dict:
+    with open(path) as f:
+        lines = [line.strip().split(",") for line in f if line.strip()][1:]
+    return {
+        line[0]: {"num_pos": int(line[1]), "num_neg": int(line[2]), "has_negatives": line[3].lower() == "true"}
+        for line in lines
+    }
 
-    with open(args.label_stats) as f:
-        # chebi_id,num_pos,num_neg,has_negatives
-        label_stats_lines = [line.strip().split(",") for line in f if line.strip()][1:]
-        label_stats = {
-            line[0]: {"num_pos": int(line[1]), "num_neg": int(line[2]), "has_negatives": line[3].lower() == "true"}
-            for line in label_stats_lines
+
+def _load_dl_val_scores(path: str) -> dict:
+    with open(path) as f:
+        lines = [line.strip().split(",") for line in f if line.strip()][1:]
+    return {
+        line[0]: {
+            "TP": int(line[1]) if line[1] != "" else 0,
+            "FP": int(line[2]) if line[2] != "" else 0,
+            "TN": int(line[3]) if line[3] != "" else 0,
+            "FN": int(line[4]) if line[4] != "" else 0,
         }
-    print(f"Label stats: {len(label_stats)} labels, {sum(1 for v in label_stats.values() if not v['has_negatives'])} without negatives")
-
-    dl_preds = load_dl_preds(args.dl_preds_npy, args.dl_preds_meta)
-    print(f"DL predictions: {dl_preds.shape[0]} molecules x {dl_preds.shape[1]} labels")
-
-    ilp_val_run_dirs = {}
-    for run_path in args.ilp_val_runs:
-        ilp_val_run_dirs[os.path.basename(run_path.rstrip("/\\"))] = run_path
-
-    ilp_run_dirs = {}
-    for run_path in args.ilp_runs:
-        ilp_run_dirs[os.path.basename(run_path.rstrip("/\\"))] = run_path
-
-    data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
-    obo_path = os.path.join(data_dir, "raw", "chebi.obo")
-    sdf_path = os.path.join(data_dir, "raw", "chebi.sdf.gz")
-    chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
-
-    chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
-    
-    with open(args.dl_val_scores) as f:
-        # class_id,TP,FP,TN,FN
-        dl_val_scores_lines = [line.strip().split(",") for line in f if line.strip()][1:]
-        dl_val_scores = {
-            line[0]: {"TP": int(line[1]) if line[1] != "" else 0, "FP": int(line[2]) if line[2] != "" else 0, "TN": int(line[3]) if line[3] != "" else 0, "FN": int(line[4]) if line[4] != "" else 0}
-            for line in dl_val_scores_lines
-        }
+        for line in lines
+    }
 
 
-    predictor = EnsemblePredictor(
+def _handle_ensemble_construct(args):
+    """Perform model selection and generate the ILP predictions tensor."""
+    from chebILP.ensemble_eval import EnsembleConstructor
+    from chebi_utils import extract_molecules
+
+    label_stats = _load_label_stats(args.label_stats)
+    print(f"Label stats: {len(label_stats)} labels, {sum(v['has_negatives'] for v in label_stats.values())} with negatives")
+
+    dl_val_scores = _load_dl_val_scores(args.dl_val_scores)
+
+    ilp_val_run_dirs = {os.path.basename(p.rstrip("/\\")): p for p in args.ilp_val_runs}
+
+    constructor = EnsembleConstructor(
         ilp_val_runs=ilp_val_run_dirs,
-        ilp_runs=ilp_run_dirs,
-        dl_preds=dl_preds,
-        chebi_graph=chebi_graph,
-        label_stats=label_stats,
         dl_val_scores=dl_val_scores,
-        classifier_chain_mode=not args.native_mode,
+        label_stats=label_stats,
         model_selection_metric=args.model_selection_metric,
     )
+
+    output_base = args.output
+    os.makedirs(os.path.dirname(output_base) or ".", exist_ok=True)
+
+    if constructor.model_weights:
+        trusted_path = output_base + "_model_weights.csv"
+        model_names = list(next(iter(constructor.model_weights.values())).keys())
+        with open(trusted_path, "w") as f:
+            f.write("chebi_id," + ",".join(model_names) + "\n")
+            for chebi_id, weights in constructor.model_weights.items():
+                f.write(chebi_id + "," + ",".join(str(weights.get(m, 0.0)) for m in model_names) + "\n")
+        print(f"Saved model weights: {trusted_path}")
+    else:
+        trusted_path = output_base + "_trusted_models.csv"
+        with open(trusted_path, "w") as f:
+            f.write("chebi_id,model\n")
+            for chebi_id, model in constructor.trusted_model.items():
+                f.write(f"{chebi_id},{model}\n")
+        print(f"Saved trusted models: {trusted_path}")
 
     mol_ids = []
     with open(args.chebi_split) as f:
@@ -256,20 +265,69 @@ def _handle_ensemble_predict(args):
             mol_id, split = line.strip().split(",")
             if split == args.predict_on:
                 mol_ids.append(mol_id)
-    print(f"Predicting on {len(mol_ids)} '{args.predict_on}' molecules...")
+    print(f"Building ILP tensor for {len(mol_ids)} '{args.predict_on}' molecules...")
 
-    molecules_df = None
-    if args.load_molecules:
-        from chebi_utils import extract_molecules
-        sdf_path = os.path.join(data_dir, "raw", "chebi.sdf.gz")
-        molecules_df = extract_molecules(sdf_path)
-        molecules_df.index = molecules_df["chebi_id"].astype(str)
-        molecules_df.index.name = None
-        print(f"Loaded {len(molecules_df)} molecules for Clingo fallback")
+    data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
+    sdf_path = os.path.join(data_dir, "raw", "chebi.sdf.gz")
+    molecules_df = extract_molecules(sdf_path)
+    molecules_df.index = molecules_df["chebi_id"].astype(str)
+    molecules_df.index.name = None
+    print(f"Loaded {len(molecules_df)} molecules")
 
-    predictions_df = predictor.predict_set(mol_ids, molecules_df)
+    constructor.build_ilp_preds(
+        molecules_df=molecules_df,
+        mol_order=mol_ids,
+        output_npy_path=output_base + "_ilp_preds.npy",
+        output_meta_path=output_base + "_ilp_preds_metadata.json",
+    )
 
-    import numpy as np, json as _json
+
+def _handle_ensemble_aggregate(args):
+    """Aggregate pre-computed DL and ILP prediction tensors into ensemble predictions."""
+    from chebILP.ensemble_eval import EnsembleAggregator, load_dl_preds, load_ilp_preds
+    from chebi_utils import build_chebi_graph, get_hierarchy_subgraph
+    import numpy as np, json as _json, pandas as pd
+
+    label_stats = _load_label_stats(args.label_stats)
+
+    dl_preds = load_dl_preds(args.dl_preds_npy, args.dl_preds_meta)
+    print(f"DL predictions: {dl_preds.shape[0]} molecules x {dl_preds.shape[1]} labels")
+
+    ilp_preds = load_ilp_preds(args.ilp_preds_npy, args.ilp_preds_meta)
+    print(f"ILP predictions: {ilp_preds.shape[0]} molecules x {ilp_preds.shape[1]} classes")
+
+    tm_df = pd.read_csv(args.trusted_models, dtype=str)
+    if list(tm_df.columns) == ["chebi_id", "model"]:
+        trusted_model = dict(zip(tm_df["chebi_id"], tm_df["model"]))
+        model_weights_dict = None
+        print(f"Loaded trusted models: {len(trusted_model)} classes")
+    else:
+        trusted_model = None
+        tm_df = tm_df.set_index("chebi_id")
+        model_weights_dict = {
+            cls_id: {col: float(val) for col, val in row.items()}
+            for cls_id, row in tm_df.iterrows()
+        }
+        print(f"Loaded model weights: {len(model_weights_dict)} classes")
+
+    data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
+    chebi_graph = get_hierarchy_subgraph(build_chebi_graph(os.path.join(data_dir, "raw", "chebi.obo")))
+
+    aggregator = EnsembleAggregator(
+        dl_preds=dl_preds,
+        ilp_preds=ilp_preds,
+        label_stats=label_stats,
+        chebi_graph=chebi_graph,
+        trusted_model=trusted_model,
+        model_weights=model_weights_dict,
+        classifier_chain_mode=not args.native_mode,
+    )
+
+    mol_ids = dl_preds.index.tolist()
+    print(f"Predicting on {len(mol_ids)} molecules...")
+
+    predictions_df = aggregator.predict_set(mol_ids)
+
     arr = predictions_df.to_numpy().astype("float32")
     meta = {"mol_order": list(predictions_df.index), "class_labels": list(predictions_df.columns)}
 
@@ -396,44 +454,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="Evaluate learned programs on the test set using results from a previous run.",
     )
     sp_test.add_argument("--run_to_evaluate", type=str, required=True, help="Path to a previous run directory (must contain results.json and config.yml).")
-    sp_test.add_argument("--test_on", type=str, default="test", choices=["val", "test"], help="Split to evaluate on: 'test' (default) or 'val' (validation).")
+    sp_test.add_argument("--test_on", type=str, default="test", choices=["validation", "test"], help="Split to evaluate on: 'test' (default) or 'validation' (validation).")
     sp_test.add_argument("--verbose", action="store_true", help="Log classification result for up to 10 positive and negative samples per class.")
     sp_test.set_defaults(func=_handle_test)
 
-    # ── ensemble_predict ─────────────────────────────────────────────────
-    sp_ep = subparsers.add_parser(
-        "ensemble_predict",
-        help="(EXP-006) Run the hierarchical ensemble predictor on a data split.",
+    # ── ensemble_construct ───────────────────────────────────────────────
+    sp_ec = subparsers.add_parser(
+        "ensemble_construct",
+        help="(EXP-006) Perform model selection and generate the ILP predictions tensor.",
     )
-    sp_ep.add_argument("--chebi_version", type=int, default=248)
-    sp_ep.add_argument("--chebi_split", type=str, required=True,
-                       help="Path to the splits CSV file.")
-    sp_ep.add_argument("--dl_val_scores", type=str, default=os.path.join("data", "preds", "dl_val_direct_neighbor_scores.csv"),
-                       help="DL validation scores on direct neighbors (generated with get_dl_direct_neighbor_scores).")
-    sp_ep.add_argument("--ilp_val_runs", type=str, nargs="+", default=[],
-                       help="Validation-run directories (output of 'test' with test_on=validation); used for model selection and cache.")
-    sp_ep.add_argument("--ilp_runs", type=str, nargs="+", default=[],
-                       help="ILP run directories providing the programs used for prediction; their validation_details also populate the cache.")
-    sp_ep.add_argument("--dl_preds_npy", type=str, default=os.path.join("data", "preds", "test_preds_chebi25.npy"),
-                       help="DL predictions .npy for the target split (validation or test).")
-    sp_ep.add_argument("--dl_preds_meta", type=str, default=os.path.join("data", "preds", "test_preds_chebi25_metadata.json"),
-                       help="Metadata JSON for --dl_preds_npy.")
-    sp_ep.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
-                       help="Path to the class statistics CSV file (contains list of label classes + info about which classes have negative samples and which do not).")
-    sp_ep.add_argument("--predict_on", type=str, default="validation",
-                       choices=["train", "validation", "test"],
-                       help="Which split to predict on (default: validation).")
-    sp_ep.add_argument("--load_molecules", action="store_true",
-                       help="Load molecule structures for Clingo fallback on uncached molecules (required for test-set ILP predictions).")
-    sp_ep.add_argument("--output", type=str,
-                       default=os.path.join("data", "results_correct_val", "ensemble_predictions.npy"),
-                       help="Output .npy path; a matching _metadata.json is written alongside.")
-    sp_ep.add_argument("--model_selection_metric", type=str, default="f1",
+    sp_ec.add_argument("--chebi_version", type=int, default=248)
+    sp_ec.add_argument("--chebi_split", type=str, required=True,
+                       help="Path to the splits CSV (mol_id,split); used to obtain the molecule list for the ILP tensor.")
+    sp_ec.add_argument("--predict_on", type=str, default="validation",
+                       choices=["validation", "test"],
+                       help="Which split to build the ILP predictions tensor for (default: validation).")
+    sp_ec.add_argument("--dl_val_scores", type=str, default=os.path.join("data", "preds", "dl_val_direct_neighbor_scores.csv"),
+                       help="DL validation scores on direct neighbors (from get_dl_direct_neighbor_scores); used for model selection.")
+    sp_ec.add_argument("--ilp_val_runs", type=str, nargs="+", default=[],
+                       help="Validation-run directories (output of 'test --test_on validation'); provides both validation scores for model selection and programs for ILP tensor.")
+    sp_ec.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
+                       help="Class statistics CSV (label list + has_negatives flag).")
+    sp_ec.add_argument("--model_selection_metric", type=str, default="f1",
                        choices=["balanced_acc", "f1", "weighted_f1"],
-                       help="Metric for model selection: 'f1'/'balanced_acc' pick the single best model; 'weighted_f1' blends all models weighted by F1.")
-    sp_ep.add_argument("--native_mode", "-n", action="store_true",
-                       help="Skips classifier chain mode (only predict a class if all parents are predicted positive, the default).")
-    sp_ep.set_defaults(func=_handle_ensemble_predict)
+                       help="Metric for model selection.")
+    sp_ec.add_argument("--output", type=str,
+                       default=os.path.join("data", "ensemble_predictions", "ensemble_f1"),
+                       help="Base output path. Suffixes _trusted_models.csv, _ilp_preds.npy, _ilp_preds_metadata.json are appended.")
+    sp_ec.set_defaults(func=_handle_ensemble_construct)
+
+    # ── ensemble_aggregate ───────────────────────────────────────────────
+    sp_ea = subparsers.add_parser(
+        "ensemble_aggregate",
+        help="(EXP-006) Aggregate pre-computed DL and ILP tensors into ensemble predictions.",
+    )
+    sp_ea.add_argument("--chebi_version", type=int, default=248)
+    sp_ea.add_argument("--dl_preds_npy", type=str, required=True,
+                       help="DL predictions .npy for the target split.")
+    sp_ea.add_argument("--dl_preds_meta", type=str, required=True,
+                       help="Metadata JSON for --dl_preds_npy.")
+    sp_ea.add_argument("--ilp_preds_npy", type=str, required=True,
+                       help="ILP predictions tensor .npy (from ensemble_construct).")
+    sp_ea.add_argument("--ilp_preds_meta", type=str, required=True,
+                       help="Metadata JSON for --ilp_preds_npy.")
+    sp_ea.add_argument("--trusted_models", type=str, required=True,
+                       help="Trusted models CSV (_trusted_models.csv) or model weights CSV (_model_weights.csv) from ensemble_construct.")
+    sp_ea.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
+                       help="Class statistics CSV (label list + has_negatives flag).")
+    sp_ea.add_argument("--output", type=str,
+                       default=os.path.join("data", "ensemble_predictions", "ensemble_predictions.npy"),
+                       help="Output .npy path; a matching _metadata.json is written alongside.")
+    sp_ea.add_argument("--native_mode", "-n", action="store_true",
+                       help="Disable classifier-chain mode (predict each class independently of parents).")
+    sp_ea.set_defaults(func=_handle_ensemble_aggregate)
 
     return parser
 
