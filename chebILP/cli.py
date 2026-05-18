@@ -209,13 +209,19 @@ def _load_label_stats(path: str) -> dict:
 
 def _load_dl_val_scores(path: str) -> dict:
     with open(path) as f:
-        lines = [line.strip().split(",") for line in f if line.strip()][1:]
+        lines = [line.strip().split(",") for line in f if line.strip()]
+        header = [h.lower() for h in lines[0]]
+        lines = lines[1:]
+        tp_idx = header.index("tp")
+        fp_idx = header.index("fp")
+        tn_idx = header.index("tn")
+        fn_idx = header.index("fn")
     return {
         line[0]: {
-            "TP": int(line[1]) if line[1] != "" else 0,
-            "FP": int(line[2]) if line[2] != "" else 0,
-            "TN": int(line[3]) if line[3] != "" else 0,
-            "FN": int(line[4]) if line[4] != "" else 0,
+            "TP": int(line[tp_idx]) if line[tp_idx] != "" else 0,
+            "FP": int(line[fp_idx]) if line[fp_idx] != "" else 0,
+            "TN": int(line[tn_idx]) if line[tn_idx] != "" else 0,
+            "FN": int(line[fn_idx]) if line[fn_idx] != "" else 0,
         }
         for line in lines
     }
@@ -224,7 +230,7 @@ def _load_dl_val_scores(path: str) -> dict:
 def _handle_ensemble_construct(args):
     """Perform model selection and generate the ILP predictions tensor."""
     from chebILP.ensemble_eval import EnsembleConstructor
-    from chebi_utils import extract_molecules
+    from chebi_utils import extract_molecules, get_hierarchy_subgraph, build_chebi_graph
 
     label_stats = _load_label_stats(args.label_stats)
     print(f"Label stats: {len(label_stats)} labels, {sum(v['has_negatives'] for v in label_stats.values())} with negatives")
@@ -232,12 +238,15 @@ def _handle_ensemble_construct(args):
     dl_val_scores = _load_dl_val_scores(args.dl_val_scores)
 
     ilp_val_run_dirs = {os.path.basename(p.rstrip("/\\")): p for p in args.ilp_val_runs}
+    data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
+    chebi_graph = get_hierarchy_subgraph(build_chebi_graph(os.path.join(data_dir, "raw", "chebi.obo")))
 
     constructor = EnsembleConstructor(
         ilp_val_runs=ilp_val_run_dirs,
         dl_val_scores=dl_val_scores,
         label_stats=label_stats,
         model_selection_metric=args.model_selection_metric,
+        chebi_graph=chebi_graph
     )
 
     output_base = args.output
@@ -373,6 +382,8 @@ def _handle_test(args):
         for arg in vars(args):
             f.write(f"  {arg}: {getattr(args, arg)}\n")
 
+    print(f"Config for test run saved to {os.path.join(results_dir, 'config.yml')}")
+
     with tee_output(log_path):
         test_chebi_classes(args.run_to_evaluate, config["problem_dir"], config["predicate_set"], results_dir, selection_mode=config["selection_mode"], selection_k=config["selection_k"], test_on=args.test_on, verbose=args.verbose)
 
@@ -476,7 +487,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_ec.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
                        help="Class statistics CSV (label list + has_negatives flag).")
     sp_ec.add_argument("--model_selection_metric", type=str, default="f1",
-                       choices=["balanced_acc", "f1", "weighted_f1"],
+                       choices=["balanced_acc", "f1", "weighted_f1", "f1_bottom_ilp"],
                        help="Metric for model selection.")
     sp_ec.add_argument("--output", type=str,
                        default=os.path.join("data", "ensemble_predictions", "ensemble_f1"),

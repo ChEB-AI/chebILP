@@ -16,6 +16,7 @@ Provides evaluation for both ILP programs (via Clingo) and DL predictions
 import json
 import os
 from typing import Literal, Optional
+import networkx as nx
 
 import numpy as np
 import pandas as pd
@@ -79,7 +80,7 @@ def eval_dl_on_ids(
     return {"TP": tp, "FP": fp, "TN": tn, "FN": fn}
 
 
-def get_dl_direct_neighbor_scores(dl_preds: pd.DataFrame, chebi_graph, hierarchy_graph, molecules_df, output_path: str):
+def get_dl_direct_neighbor_scores(dl_preds: pd.DataFrame, chebi_graph: nx.DiGraph, hierarchy_graph, molecules_df, output_path: str):
     """
     Compute DL confusion matrices for all classes.
 
@@ -167,7 +168,6 @@ def build_ilp_preds_tensor(
             present_mol_ids.append(mol_id)
     if missing:
         print(f"  {missing} molecules missing from molecules_df — predicted False")
-
     all_rules = [line for prog in programs.values() for line in prog.split("\n") if line.strip()]
     all_target_labels = [f"chebi_{cls_id}" for cls_id in ilp_class_ids]
 
@@ -226,6 +226,25 @@ def balanced_accuracy(conf: dict) -> Optional[float]:
     return 0.5 * (tpr + tnr)
 
 
+def build_label_parents(label_set, chebi_graph) -> dict[str, set]:
+    label_parents: dict[str, set] = {cls: set() for cls in label_set}
+    for cls in label_set:
+        frontier = {str(p) for p in chebi_graph.successors(cls)}
+        visited: set[str] = set()
+        while frontier:
+            next_frontier: set[str] = set()
+            for node in frontier:
+                if node in visited:
+                    continue
+                visited.add(node)
+                if node in label_set:
+                    label_parents[cls].add(node)
+                else:
+                    next_frontier.update(str(p) for p in chebi_graph.successors(node))
+            frontier = next_frontier - visited
+    return label_parents
+
+
 # ---------------------------------------------------------------------------
 # Ensemble construction: model selection + ILP tensor generation
 # ---------------------------------------------------------------------------
@@ -247,12 +266,22 @@ class EnsembleConstructor:
         ilp_val_runs: dict[str, str],
         dl_val_scores: dict[str, dict[str, int]],
         label_stats: dict[str, dict],
-        model_selection_metric: Literal["balanced_acc", "f1", "weighted_f1"] = "f1",
+        chebi_graph: nx.DiGraph,
+        model_selection_metric: Literal["balanced_acc", "f1", "weighted_f1", "f1_bottom_ilp"] = "f1",
     ):
         self.label_set = set(str(l) for l in label_stats.keys())
         self.label_stats = label_stats
         self.dl_val_scores = dl_val_scores
         self.model_selection_metric = model_selection_metric
+        self.chebi_graph = chebi_graph
+
+        self.label_parents = build_label_parents(self.label_set, chebi_graph)
+        label_graph = nx.DiGraph()
+        for cls in self.label_set:
+            label_graph.add_node(cls)
+            for parent in self.label_parents[cls]:
+                label_graph.add_edge(parent, cls)
+        self.topo_order = list(nx.topological_sort(label_graph))
 
         self.ilp_programs: dict[str, dict[str, Optional[str]]] = {}
         self.ilp_val_scores: dict[str, dict[str, Optional[dict]]] = {}
@@ -313,18 +342,38 @@ class EnsembleConstructor:
 
     def _select_trusted_models(self) -> dict[str, str]:
         trusted: dict[str, str] = {}
-        for cls_id in self.label_set:
-            if not self._has_negatives(cls_id):
-                trusted[cls_id] = "always_positive"
-                continue
+        trusted_scores: dict[str, float] = {}
+        if self.model_selection_metric == "f1_bottom_ilp":
+            label_parents = build_label_parents(self.label_set, self.chebi_graph)
+            label_children = {cls: set() for cls in self.label_set}
+            for cls, parents in label_parents.items():
+                for p in parents:
+                    label_children[p].add(cls)
+            print(f"Got label children for {len(label_children)} classes, {len([c for c in label_children.values() if not c])} are leaves")
+            
+        for cls_id in self.topo_order:
             dl_score = self._compute_score_from_conf(self.dl_val_scores.get(cls_id))
-            best_model, best_score = "dl", dl_score if dl_score is not None else float("-inf")
-            for run_name, run_scores in self.ilp_val_scores.items():
-                ilp_score = self._compute_score_from_conf(run_scores.get(cls_id))
-                if ilp_score is not None and ilp_score > best_score:
-                    if self.ilp_programs.get(run_name, {}).get(cls_id):
-                        best_model, best_score = run_name, ilp_score
+            best_model, best_score = "dl", dl_score if dl_score is not None else 0
+
+            # only consider ILP models for classes that are at the bottom of the label hierarchy
+            if self.model_selection_metric != "f1_bottom_ilp" or (cls_id in label_children and len(label_children[cls_id]) == 0):
+                #if not self._has_negatives(cls_id):
+                #    trusted[cls_id] = "always_positive"
+                #    trusted_scores[cls_id] = 1
+                #    continue
+                for run_name, run_scores in self.ilp_val_scores.items():
+                    ilp_score = self._compute_score_from_conf(run_scores.get(cls_id))
+                    if ilp_score is None:
+                        continue
+                    # ilp score is the relative to superclass - multiply with parent scores
+                    parent_scores = [trusted_scores.get(p, 1.0) for p in self.label_parents.get(cls_id, [])]
+                    for p_score in parent_scores:
+                        ilp_score = ilp_score * p_score
+                    if ilp_score >= best_score:
+                        if self.ilp_programs.get(run_name, {}).get(cls_id):
+                            best_model, best_score = run_name, ilp_score
             trusted[cls_id] = best_model
+            trusted_scores[cls_id] = best_score if best_model != "dl" else dl_score or 0
         return trusted
 
     def _compute_model_weights(self) -> dict[str, dict[str, float]]:
@@ -423,7 +472,7 @@ class EnsembleAggregator:
         self.model_weights = model_weights or {}
 
         print("Building label-projected hierarchy...")
-        self.label_parents = self._build_label_parents(chebi_graph)
+        self.label_parents = build_label_parents(self.label_set, chebi_graph)
         label_graph = nx.DiGraph()
         for cls in self.label_set:
             label_graph.add_node(cls)
@@ -442,25 +491,6 @@ class EnsembleAggregator:
                 counts[m] = counts.get(m, 0) + 1
             print("  Trusted model counts:", counts)
 
-    # ── Hierarchy construction ────────────────────────────────────────────
-
-    def _build_label_parents(self, chebi_graph) -> dict[str, set]:
-        label_parents: dict[str, set] = {cls: set() for cls in self.label_set}
-        for cls in self.label_set:
-            frontier = {str(p) for p in chebi_graph.successors(cls)}
-            visited: set[str] = set()
-            while frontier:
-                next_frontier: set[str] = set()
-                for node in frontier:
-                    if node in visited:
-                        continue
-                    visited.add(node)
-                    if node in self.label_set:
-                        label_parents[cls].add(node)
-                    else:
-                        next_frontier.update(str(p) for p in chebi_graph.successors(node))
-                frontier = next_frontier - visited
-        return label_parents
 
     # ── Prediction ────────────────────────────────────────────────────────
 
@@ -472,7 +502,8 @@ class EnsembleAggregator:
                 self.trusted_model.get(cls) == "always_positive"
                 or self.model_weights.get(cls, {}) == {"always_positive": 1.0}
             )
-            if (self.classifier_chain_mode or always_pos) and not all(
+            # native mode = DL model can predict classes that have not-predicted parents (ILP / always-positive still follow the chain)
+            if (self.classifier_chain_mode or always_pos or self.trusted_model.get(cls, "dl") != "dl") and not all(
                 p in positive for p in self.label_parents.get(cls, set())
             ):
                 continue
@@ -563,10 +594,10 @@ if __name__ == "__main__":
         _lines = [l.strip().split(",") for l in _f if l.strip()][1:]
         label_stats = {l[0]: {"has_negatives": l[3].lower() == "true"} for l in _lines}
 
-    constructor = EnsembleConstructor(ilp_val_runs, dl_val_scores, label_stats)
+    constructor = EnsembleConstructor(ilp_val_runs, dl_val_scores, label_stats, chebi_graph=chebi_graph)
     constructor.build_ilp_preds(
         molecules_df=molecules_df,
-        mol_order=samples,
-        output_npy_path=os.path.join("data", "ensemble_predictions", "ensemble_f1_ilp_preds.npy"),
-        output_meta_path=os.path.join("data", "ensemble_predictions", "ensemble_f1_ilp_preds_meta.json"),
+        mol_order=["145501"],
+        output_npy_path=os.path.join("data", "ensemble_predictions", "DEMO145501_ilp_preds.npy"),
+        output_meta_path=os.path.join("data", "ensemble_predictions", "DEMO145501_ilp_preds_metadata.json"),
     )
