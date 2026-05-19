@@ -234,13 +234,14 @@ def _load_dl_val_scores(path: str) -> dict:
 
 def _handle_ensemble_construct(args):
     """Perform model selection and generate the ILP predictions tensor."""
-    from chebILP.ensemble_eval import EnsembleConstructor
-    from chebi_utils import extract_molecules, get_hierarchy_subgraph, build_chebi_graph
+    from chebILP.ensemble_eval import EnsembleConstructor, load_dl_preds
+    from chebi_utils import get_hierarchy_subgraph, build_chebi_graph
 
     label_stats = _load_label_stats(args.label_stats)
     print(f"Label stats: {len(label_stats)} labels, {sum(v['has_negatives'] for v in label_stats.values()) if isinstance(label_stats, dict) else '?'} with negatives")
 
-    dl_val_scores = _load_dl_val_scores(args.dl_val_scores)
+    dl_val_preds = load_dl_preds(args.dl_val_preds_npy, args.dl_val_preds_meta)
+    print(f"DL val predictions: {dl_val_preds.shape[0]} molecules x {dl_val_preds.shape[1]} classes")
 
     ilp_val_run_dirs = {os.path.basename(p.rstrip("/\\")): p for p in args.ilp_val_runs}
     data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
@@ -248,10 +249,10 @@ def _handle_ensemble_construct(args):
 
     constructor = EnsembleConstructor(
         ilp_val_runs=ilp_val_run_dirs,
-        dl_val_scores=dl_val_scores,
+        dl_val_preds=dl_val_preds,
         label_stats=label_stats,
         model_selection_metric=args.model_selection_metric,
-        chebi_graph=chebi_graph
+        chebi_graph=chebi_graph,
     )
 
     output_base = args.output
@@ -279,17 +280,9 @@ def _handle_ensemble_construct(args):
             mol_id, split = line.strip().split(",")
             if split == args.predict_on:
                 mol_ids.append(mol_id)
-    print(f"Building ILP tensor for {len(mol_ids)} '{args.predict_on}' molecules...")
+    print(f"Slicing ILP tensor for {len(mol_ids)} '{args.predict_on}' molecules...")
 
-    data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
-    sdf_path = os.path.join(data_dir, "raw", "chebi.sdf.gz")
-    molecules_df = extract_molecules(sdf_path)
-    molecules_df.index = molecules_df["chebi_id"].astype(str)
-    molecules_df.index.name = None
-    print(f"Loaded {len(molecules_df)} molecules")
-
-    constructor.build_ilp_preds(
-        molecules_df=molecules_df,
+    constructor.slice_ilp_preds(
         mol_order=mol_ids,
         output_npy_path=output_base + "_ilp_preds.npy",
         output_meta_path=output_base + "_ilp_preds_metadata.json",
@@ -485,10 +478,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp_ec.add_argument("--predict_on", type=str, default="validation",
                        choices=["validation", "test"],
                        help="Which split to build the ILP predictions tensor for (default: validation).")
-    sp_ec.add_argument("--dl_val_scores", type=str, default=os.path.join("data", "preds", "dl_val_direct_neighbor_scores.csv"),
-                       help="DL validation scores on direct neighbors (from get_dl_direct_neighbor_scores); used for model selection.")
+    sp_ec.add_argument("--dl_val_preds_npy", type=str, required=True,
+                       help="DL validation predictions .npy (mol × class float scores).")
+    sp_ec.add_argument("--dl_val_preds_meta", type=str, required=True,
+                       help="Metadata JSON for --dl_val_preds_npy.")
     sp_ec.add_argument("--ilp_val_runs", type=str, nargs="+", default=[],
-                       help="Validation-run directories (output of 'test --test_on validation'); provides both validation scores for model selection and programs for ILP tensor.")
+                       help="Validation-run directories (output of 'test --test_on validation'). "
+                            "Each must contain full_val_preds.npy + full_val_preds_metadata.json "
+                            "and results.json (for ILP programs).")
     sp_ec.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
                        help="Class statistics CSV (label list + has_negatives flag).")
     sp_ec.add_argument("--model_selection_metric", type=str, default="f1",
