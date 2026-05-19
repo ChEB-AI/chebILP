@@ -265,11 +265,11 @@ class EnsembleConstructor:
         self,
         ilp_val_runs: dict[str, str],
         dl_val_scores: dict[str, dict[str, int]],
-        label_stats: dict[str, dict],
+        label_stats: dict[str, dict]|list[str],
         chebi_graph: nx.DiGraph,
         model_selection_metric: Literal["balanced_acc", "f1", "weighted_f1", "f1_bottom_ilp"] = "f1",
     ):
-        self.label_set = set(str(l) for l in label_stats.keys())
+        self.label_set = set(str(l) for l in label_stats.keys()) if isinstance(label_stats, dict) else set(label_stats)
         self.label_stats = label_stats
         self.dl_val_scores = dl_val_scores
         self.model_selection_metric = model_selection_metric
@@ -455,7 +455,7 @@ class EnsembleAggregator:
         self,
         dl_preds: pd.DataFrame,
         ilp_preds: pd.DataFrame,
-        label_stats: dict[str, dict],
+        label_stats: dict[str, dict]|list[str],
         chebi_graph,
         trusted_model: Optional[dict[str, str]] = None,
         model_weights: Optional[dict[str, dict[str, float]]] = None,
@@ -465,8 +465,7 @@ class EnsembleAggregator:
 
         self.dl_preds = dl_preds
         self.ilp_preds = ilp_preds
-        self.label_set = set(str(l) for l in label_stats.keys())
-        self.label_stats = label_stats
+        self.label_set = set(str(l) for l in label_stats.keys()) if isinstance(label_stats, dict) else set(label_stats)
         self.classifier_chain_mode = classifier_chain_mode
         self.trusted_model = trusted_model or {}
         self.model_weights = model_weights or {}
@@ -522,8 +521,10 @@ class EnsembleAggregator:
         if model == "always_positive":
             return True
         if model == "dl":
-            if cls not in self.dl_preds.columns or mol_id not in self.dl_preds.index:
-                raise ValueError(f"DL prediction for cls={cls}, mol_id={mol_id} not found in dl_preds")
+            if cls not in self.dl_preds.columns:
+                raise ValueError(f"DL predictions for cls={cls} not found in dl_preds. dl_preds has {len(self.dl_preds.columns)} classes: {self.dl_preds.columns.tolist()[:10]}...")
+            if mol_id not in self.dl_preds.index:
+                raise ValueError(f"DL predictions for mol_id={mol_id} not found in dl_preds. dl_preds has {len(self.dl_preds.index)} molecules: {self.dl_preds.index.tolist()[:10]}...")
             return float(self.dl_preds.at[mol_id, cls]) >= 0.5
         # ILP model: look up in pre-computed tensor; False if not covered
         if cls not in self.ilp_preds.columns or mol_id not in self.ilp_preds.index:
@@ -558,7 +559,7 @@ class EnsembleAggregator:
         return pd.DataFrame(records, index=mol_ids, columns=self.topo_order)
 
 
-if __name__ == "__main__":
+def ensemble_construct_demo():
     from chebi_utils import build_chebi_graph, extract_molecules, get_hierarchy_subgraph
     from chebILP.mol2ilp import get_direct_neighbors
     import networkx as nx
@@ -601,3 +602,6 @@ if __name__ == "__main__":
         output_npy_path=os.path.join("data", "ensemble_predictions", "DEMO145501_ilp_preds.npy"),
         output_meta_path=os.path.join("data", "ensemble_predictions", "DEMO145501_ilp_preds_metadata.json"),
     )
+
+if __name__ == "__main__":
+    ensemble_construct_demo()
