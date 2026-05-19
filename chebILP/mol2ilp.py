@@ -8,7 +8,6 @@ from typing import Literal
 import networkx as nx
 
 import tqdm
-from chebILP.ilp_classifier import PopperWrapper, run_ilp_training_subprocess, run_ilp_validation_subprocess
 from chebILP.mol_to_fol import mol_to_fol_atoms
 from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
 from chebi_utils import (

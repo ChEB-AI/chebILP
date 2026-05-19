@@ -198,7 +198,12 @@ def _handle_select_predicates(args):
     print(f"\nCompleted: {successful}/{len(chebi_ids)} classes processed successfully")
 
 
-def _load_label_stats(path: str) -> dict:
+def _load_label_stats(path: str) -> dict|list[str]:
+    # process classes.txt files or class_stats.csv files
+    if path.endswith(".txt"):
+        with open(path) as f:
+            lines = [line.strip() for line in f if line.strip()]
+        return lines
     with open(path) as f:
         lines = [line.strip().split(",") for line in f if line.strip()][1:]
     return {
@@ -233,7 +238,7 @@ def _handle_ensemble_construct(args):
     from chebi_utils import extract_molecules, get_hierarchy_subgraph, build_chebi_graph
 
     label_stats = _load_label_stats(args.label_stats)
-    print(f"Label stats: {len(label_stats)} labels, {sum(v['has_negatives'] for v in label_stats.values())} with negatives")
+    print(f"Label stats: {len(label_stats)} labels, {sum(v['has_negatives'] for v in label_stats.values()) if isinstance(label_stats, dict) else '?'} with negatives")
 
     dl_val_scores = _load_dl_val_scores(args.dl_val_scores)
 
@@ -519,7 +524,83 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Disable classifier-chain mode (predict each class independently of parents).")
     sp_ea.set_defaults(func=_handle_ensemble_aggregate)
 
+    # ── explain ──────────────────────────────────────────────────────────────
+    sp_explain = subparsers.add_parser(
+        "explain",
+        help="Explain why a molecule satisfies a learned ILP rule using xclingo.",
+    )
+    smiles_group = sp_explain.add_mutually_exclusive_group(required=True)
+    smiles_group.add_argument("--smiles", type=str, help="SMILES string of the molecule to explain.")
+    smiles_group.add_argument("--smiles_file", type=str, help="File containing a single SMILES string.")
+    rule_group = sp_explain.add_mutually_exclusive_group(required=True)
+    rule_group.add_argument("--rule", type=str, help="ILP rule clause(s) as a string.")
+    rule_group.add_argument("--rule_file", type=str, help="File containing ILP rule clause(s).")
+    sp_explain.add_argument("--label_parents_json", type=str, default=os.path.join("data", "class_parents.json"), help="JSON file mapping class labels to their parent labels (for hierarchical explanations).")
+    sp_explain.add_argument("--output", type=str, default=None, help="Path to save the molecule visualization image (PNG).")
+    sp_explain.add_argument("--verbose", "-v", action="store_true", help="Print the assembled xclingo program before running.")
+    sp_explain.set_defaults(func=_handle_explain)
+
+    # ── rule_to_nl ───────────────────────────────────────────────────────────
+    sp_rtnl = subparsers.add_parser(
+        "rule_to_nl",
+        help="Translate a learned ILP rule to a natural language description.",
+    )
+    rule_group_rtnl = sp_rtnl.add_mutually_exclusive_group(required=True)
+    rule_group_rtnl.add_argument("--rule", type=str, help="ILP rule clause(s) as a string.")
+    rule_group_rtnl.add_argument("--rule_file", type=str, help="File containing ILP rule clause(s).")
+    sp_rtnl.add_argument(
+        "--class_parents", type=str,
+        default=os.path.join("data", "class_parents.json"),
+        help="Path to class_parents.json for name/parent lookup (default: data/class_parents.json).",
+    )
+    sp_rtnl.set_defaults(func=_handle_rule_to_nl)
+
     return parser
+
+
+def _handle_rule_to_nl(args):
+    from chebILP.rule_to_nl import translate_rule, load_class_parents
+
+    rule = args.rule
+    if rule is None:
+        with open(args.rule_file, "r") as f:
+            rule = f.read()
+
+    class_parents = None
+    if os.path.exists(args.class_parents):
+        class_parents = load_class_parents(args.class_parents)
+
+    print(translate_rule(rule, class_parents=class_parents))
+
+
+def _handle_explain(args):
+    from chebILP.explain import explain_molecule
+
+    smiles = args.smiles
+    if smiles is None:
+        with open(args.smiles_file, "r") as f:
+            smiles = f.read().strip()
+
+    rule = args.rule
+    if rule is None:
+        with open(args.rule_file, "r") as f:
+            rule = f.read()
+
+    satisfies, conditions, _ = explain_molecule(
+        smiles=smiles,
+        rule=rule,
+        label_parents_json=args.label_parents_json,
+        output_path=args.output,
+        verbose=args.verbose,
+    )
+
+    if satisfies:
+        print("Molecule satisfies the rule.")
+        print("Conditions:")
+        for cond in conditions:
+            print(f"  - {cond}")
+    else:
+        print("Molecule does not satisfy the rule.")
 
 
 def main():
