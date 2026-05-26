@@ -8,9 +8,7 @@ from xclingo import XclingoControl
 
 from chebILP.mol2ilp import build_background_chemlog
 from chebILP.clingo_eval import split_prolog_literals
-
-_pt = Chem.GetPeriodicTable()
-_ELEMENT_SYMBOLS = {_pt.GetElementSymbol(z).lower() for z in range(1, 119)}
+from chebILP.rule_to_nl import _ELEMENT_NAMES, _num_word, _sort_clause_literals
 
 
 def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
@@ -18,29 +16,43 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
     if arity == 1:
         A = "A"
         call = f"{pred_name}({A})"
-        if pred_name.lower() in _ELEMENT_SYMBOLS:
-            return f'%!trace {{"% is a {pred_name.upper()} atom", {A}}} {call}.'
+        if pred_name.lower() in _ELEMENT_NAMES:
+            name = _ELEMENT_NAMES[pred_name.lower()]
+            article = "an" if name[0] in "aeiou" else "a"
+            return f'%!trace {{"% is {article} {name} atom", {A}}} {call}.'
         if pred_name == "charge0":
-            return f'%!trace {{"% has charge 0", {A}}} {call}.'
-        if re.fullmatch(r"charge_?[pm]\d*", pred_name):
-            return f'%!trace {{"% has charge ({pred_name})", {A}}} {call}.'
-        if re.fullmatch(r"has_\d+_hs", pred_name):
-            n = pred_name.split("_")[1]
-            return f'%!trace {{"% has {n} hydrogen(s)", {A}}} {call}.'
-        if re.fullmatch(r"has_at_least_\d+_hs", pred_name):
-            n = pred_name.split("_")[3]
-            return f'%!trace {{"% has at least {n} hydrogen(s)", {A}}} {call}.'
+            return f'%!trace {{"% has no formal charge", {A}}} {call}.'
+        m = re.fullmatch(r"charge_?([pm])(\d*)", pred_name)
+        if m:
+            sign = "+" if m.group(1) == "p" else "-"
+            val = m.group(2) or "1"
+            return f'%!trace {{"% has formal charge {sign}{val}", {A}}} {call}.'
+        m = re.fullmatch(r"has_(\d+)_hs", pred_name)
+        if m:
+            n = int(m.group(1))
+            noun = "hydrogen atom" if n == 1 else "hydrogen atoms"
+            return f'%!trace {{"% has {_num_word(n)} {noun}", {A}}} {call}.'
+        m = re.fullmatch(r"has_at_least_(\d+)_hs", pred_name)
+        if m:
+            n = int(m.group(1))
+            noun = "hydrogen atom" if n == 1 else "hydrogen atoms"
+            return f'%!trace {{"% has at least {_num_word(n)} {noun}", {A}}} {call}.'
         if pred_name.startswith("cip_code_"):
             code = pred_name.replace("cip_code_", "").upper()
             return f'%!trace {{"% has CIP code {code}", {A}}} {call}.'
         if pred_name.startswith("steroid_"):
             num = pred_name.replace("steroid_", "")
             return f'%!trace {{"% is at steroid position {num}", {A}}} {call}.'
-        if pred_name in {"aromatic", "aliphatic"}:
-            return f'%!trace {{"molecule % is {pred_name}", {A}}} {call}.'
-        if pred_name in {"net_charge_positive", "net_charge_negative", "net_charge_neutral"}:
-            label = pred_name.replace("_", " ")
-            return f'%!trace {{"molecule % has {label}", {A}}} {call}.'
+        if pred_name == "aromatic":
+            return f'%!trace {{"% is aromatic", {A}}} {call}.'
+        if pred_name == "aliphatic":
+            return f'%!trace {{"% is aliphatic", {A}}} {call}.'
+        if pred_name == "net_charge_positive":
+            return f'%!trace {{"% has a positive net charge", {A}}} {call}.'
+        if pred_name == "net_charge_negative":
+            return f'%!trace {{"% has a negative net charge", {A}}} {call}.'
+        if pred_name == "net_charge_neutral":
+            return f'%!trace {{"% has no net charge", {A}}} {call}.'
         return f'%!trace {{"% satisfies {pred_name}", {A}}} {call}.'
 
     if arity == 2:
@@ -52,7 +64,8 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
             return f'%!trace {{"% has a bond to %", {A1}, {A2}}} {call}.'
         if re.fullmatch(r"b[A-Z]+", pred_name):
             bond_type = pred_name[1:].lower()
-            return f'%!trace {{"% has a {bond_type} bond with %", {A1}, {A2}}} {call}.'
+            article = "an" if bond_type[0] in "aeiou" else "a"
+            return f'%!trace {{"% has {article} {bond_type} bond to %", {A1}, {A2}}} {call}.'
         return f'%!trace {{"% is related to % via {pred_name}", {A1}, {A2}}} {call}.'
 
     return None
@@ -86,6 +99,27 @@ def _parse_rule(rule: str) -> tuple[Optional[str], set[tuple[str, int]]]:
     return head_pred, body_predicates
 
 
+def _sort_rule_literals(rule: str) -> str:
+    """Sort body literals in each clause using the same BFS order as rule_to_nl."""
+    sorted_clauses = []
+    for line in rule.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("%") or ":-" not in line:
+            sorted_clauses.append(line)
+            continue
+        line = line.rstrip(".")
+        head_str, body_str = line.split(":-", 1)
+        head_str = head_str.strip()
+        mol_var = "V0"
+        if "(" in head_str:
+            args_str = head_str[head_str.index("(") + 1: head_str.rindex(")")]
+            mol_var = args_str.strip().split(",")[0].strip()
+        literals = split_prolog_literals(body_str.strip())
+        sorted_lits = _sort_clause_literals(literals, mol_var)
+        sorted_clauses.append(f"{head_str} :- {', '.join(sorted_lits)}.")
+    return "\n".join(sorted_clauses)
+
+
 def _build_xclingo_program(
     bk_lines: list[str],
     rule: str,
@@ -106,7 +140,7 @@ def _build_xclingo_program(
         *bk_lines,
         "",
         "% Rule(s)",
-        *[l for l in rule.strip().split("\n") if l.strip()],
+        *[l for l in _sort_rule_literals(rule).split("\n") if l.strip()],
         "",
         "% Trace annotations",
         *trace_lines,
@@ -158,6 +192,7 @@ def _process_explanations(
                     continue
 
                 clean = atom_re.sub(lambda m: f"atom {m.group(1)}", label)
+                clean = clean.replace(mol_id, "the molecule")
                 if clean not in seen:
                     seen.add(clean)
                     conditions.append(clean)
@@ -207,7 +242,7 @@ def explain_molecule(
     mol_id: str = "mol1",
     output_path: Optional[str] = None,
     verbose: bool = False,
-) -> tuple[bool, list[str], "PIL.Image.Image"]:
+) -> tuple[bool, str, "PIL.Image.Image"]:
     """
     Explain why a molecule satisfies (or fails to satisfy) a learned ILP rule.
 
@@ -250,6 +285,11 @@ def explain_molecule(
     image = _draw_molecule(mol, highlight_atoms, output_path)
 
     parents = label_parents.get(head_pred.split("_")[1], [])
-    p_conditions = [f"the molecule has been predicted to be a {p} (CHEBI:{id}) (by a Deep Learning model)" for p, id in zip(parents["parent_names"], parents["parent_ids"])]
+    p_conditions = [f"the molecule is a {p} (CHEBI:{id}, not verified)" for p, id in zip(parents["parent_names"], parents["parent_ids"])]
     conditions = p_conditions + conditions
-    return satisfies, conditions, image
+
+    if not satisfies:
+        full_text = f"The molecule is not a {parents['name']} (CHEBI:{head_pred.split('_')[1]})"
+    else:
+        full_text = f"The molecule is a {parents['name']} (CHEBI:{head_pred.split('_')[1]}) because it fulfills the following conditions:\n" + "\n".join(f"- {c}" for c in conditions)
+    return satisfies, full_text, image

@@ -232,6 +232,36 @@ def _load_dl_val_scores(path: str) -> dict:
     }
 
 
+def _handle_build_ilp_preds_for_ensemble(args):
+    """Build a full ILP predictions tensor for a given split from a run's results.json."""
+    from chebILP.test import build_ilp_preds_tensor
+    from chebILP.ensemble_eval import load_ilp_results
+    from chebi_utils import extract_molecules
+
+    results = load_ilp_results(args.run_dir)
+    programs = {cid: entry["program"] for cid, entry in results.items() if entry.get("program")}
+    print(f"Loaded {len(programs)} ILP programs from {args.run_dir}")
+
+    mol_ids = []
+    with open(args.chebi_split) as f:
+        for line in f.readlines()[1:]:
+            mol_id, split = line.strip().split(",")
+            if split == args.predict_on:
+                mol_ids.append(mol_id)
+    print(f"Building predictions for {len(mol_ids)} '{args.predict_on}' molecules")
+
+    sdf_path = os.path.join("data", f"chebi_v{args.chebi_version}", "raw", "chebi.sdf.gz")
+    print(f"Loading molecules from {sdf_path}...")
+    molecules_df = extract_molecules(sdf_path)
+    molecules_df.index = molecules_df["chebi_id"].astype(str)
+
+    prefix = "val" if args.predict_on == "validation" else args.predict_on
+    output_npy = os.path.join(args.run_dir, f"full_{prefix}_preds.npy")
+    output_meta = os.path.join(args.run_dir, f"full_{prefix}_preds_metadata.json")
+
+    build_ilp_preds_tensor(programs, molecules_df, mol_ids, output_npy, output_meta)
+
+
 def _handle_ensemble_construct(args):
     """Perform model selection and generate the ILP predictions tensor."""
     from chebILP.ensemble_eval import EnsembleConstructor, load_dl_preds
@@ -253,6 +283,7 @@ def _handle_ensemble_construct(args):
         label_stats=label_stats,
         model_selection_metric=args.model_selection_metric,
         chebi_graph=chebi_graph,
+        predict_on=args.predict_on,
     )
 
     output_base = args.output
@@ -303,12 +334,14 @@ def _handle_ensemble_aggregate(args):
     ilp_preds = load_ilp_preds(args.ilp_preds_npy, args.ilp_preds_meta)
     print(f"ILP predictions: {ilp_preds.shape[0]} molecules x {ilp_preds.shape[1]} classes")
 
-    tm_df = pd.read_csv(args.trusted_models, dtype=str)
-    if list(tm_df.columns) == ["chebi_id", "model"]:
-        trusted_model = dict(zip(tm_df["chebi_id"], tm_df["model"]))
+    with open(args.trusted_models) as f:
+        lines = [line.strip().split(",") for line in f if line.strip()]
+    if lines[0] == ["chebi_id", "model"]:
+        trusted_model = {line[0]: [model.replace("'", "").replace("[", "").replace("]", "").strip() for model in line[1:]] for line in lines[1:]}
         model_weights_dict = None
         print(f"Loaded trusted models: {len(trusted_model)} classes")
     else:
+        tm_df = pd.read_csv(args.trusted_models, dtype=str)
         trusted_model = None
         tm_df = tm_df.set_index("chebi_id")
         model_weights_dict = {
@@ -467,6 +500,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp_test.add_argument("--verbose", action="store_true", help="Log classification result for up to 10 positive and negative samples per class.")
     sp_test.set_defaults(func=_handle_test)
 
+    # ── build_ilp_preds_for_ensemble ─────────────────────────────────────
+    sp_bipe = subparsers.add_parser(
+        "build_ilp_preds_for_ensemble",
+        help="Build a full ILP predictions tensor for a split using programs from a run's results.json. "
+             "Builds background knowledge from scratch (not from bk.pl files). "
+             "Output is saved as full_val_preds.npy / full_test_preds.npy inside the run directory.",
+    )
+    sp_bipe.add_argument("--run_dir", type=str, required=True,
+                         help="Run directory containing results.json (output of 'learn' or 'test').")
+    sp_bipe.add_argument("--predict_on", type=str, default="validation",
+                         choices=["validation", "test"],
+                         help="Split to build predictions for (default: validation).")
+    sp_bipe.add_argument("--chebi_split", type=str, required=True,
+                         help="Path to the splits CSV (mol_id,split).")
+    sp_bipe.add_argument("--chebi_version", type=int, default=248,
+                         help="ChEBI version; used to locate the SDF at data/chebi_v{version}/raw/chebi.sdf.gz.")
+    sp_bipe.set_defaults(func=_handle_build_ilp_preds_for_ensemble)
+
     # ── ensemble_construct ───────────────────────────────────────────────
     sp_ec = subparsers.add_parser(
         "ensemble_construct",
@@ -489,7 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_ec.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
                        help="Class statistics CSV (label list + has_negatives flag).")
     sp_ec.add_argument("--model_selection_metric", type=str, default="f1",
-                       choices=["balanced_acc", "f1", "weighted_f1", "f1_bottom_ilp"],
+                       choices=["balanced_acc", "f1", "weighted_f1", "f1_bottom_ilp", "f1_bottom_ilp_best", "f1_bottom_ilp_multiple"],
                        help="Metric for model selection.")
     sp_ec.add_argument("--output", type=str,
                        default=os.path.join("data", "ensemble_predictions", "ensemble_f1"),
@@ -583,7 +634,7 @@ def _handle_explain(args):
         with open(args.rule_file, "r") as f:
             rule = f.read()
 
-    satisfies, conditions, _ = explain_molecule(
+    satisfies, explanation_text, _ = explain_molecule(
         smiles=smiles,
         rule=rule,
         label_parents_json=args.label_parents_json,
@@ -591,14 +642,7 @@ def _handle_explain(args):
         verbose=args.verbose,
     )
 
-    if satisfies:
-        print("Molecule satisfies the rule.")
-        print("Conditions:")
-        for cond in conditions:
-            print(f"  - {cond}")
-    else:
-        print("Molecule does not satisfy the rule.")
-
+    print(explanation_text)
 
 def main():
     parser = build_parser()

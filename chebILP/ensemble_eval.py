@@ -120,79 +120,6 @@ def load_ilp_preds(npy_path: str, meta_json_path: str) -> pd.DataFrame:
     return pd.DataFrame(arr, index=meta["mol_order"], columns=meta["class_labels"])
 
 
-def build_ilp_preds_tensor(
-    programs: dict[str, str],
-    molecules_df,
-    mol_order: list[str],
-    output_npy_path: str,
-    output_meta_path: str,
-) -> pd.DataFrame:
-    """
-    Evaluate ILP programs against every molecule in mol_order and save the
-    result as a boolean numpy tensor.
-
-    Args:
-        programs:         class_id → Prolog program string for each ILP-trusted
-                          class (already filtered; excludes 'dl'/'always_positive').
-        molecules_df:     DataFrame with 'mol' column; index = molecule IDs.
-        mol_order:        ordered list of molecule IDs to evaluate.
-        output_npy_path:  where to write the boolean .npy tensor.
-        output_meta_path: where to write the JSON metadata file.
-
-    All programs are submitted to Clingo in a single batched call: background
-    knowledge is built once for all molecules, and all head predicates are
-    evaluated simultaneously.
-
-    Returns a boolean DataFrame (index=mol_order, columns=sorted class IDs).
-    """
-    import tqdm
-    from chebILP.clingo_eval import evaluate_with_clingo
-    from chebILP.mol2ilp import build_background_chemlog
-
-    ilp_class_ids = sorted(programs.keys())
-    n_mols = len(mol_order)
-    n_classes = len(ilp_class_ids)
-    print(f"Building ILP predictions tensor: {n_mols} molecules × {n_classes} classes")
-
-    print("Building background facts for all molecules...")
-    all_bg_facts: list[str] = []
-    present_mol_ids: list[str] = []
-    missing: int = 0
-    for mol_id in tqdm.tqdm(mol_order, desc="Background knowledge"):
-        mol_row = molecules_df[molecules_df.index == mol_id].dropna(subset=["mol"])
-        if mol_row.empty:
-            missing += 1
-        else:
-            lines, _ = build_background_chemlog(mol_row)
-            all_bg_facts.extend(lines)
-            present_mol_ids.append(mol_id)
-    if missing:
-        print(f"  {missing} molecules missing from molecules_df — predicted False")
-    all_rules = [line for prog in programs.values() for line in prog.split("\n") if line.strip()]
-    all_target_labels = [f"chebi_{cls_id}" for cls_id in ilp_class_ids]
-
-    print("Running Clingo for all ILP classes...")
-    try:
-        positives = evaluate_with_clingo(all_rules, all_bg_facts, all_target_labels, present_mol_ids)
-    except Exception as e:
-        print(f"Clingo evaluation failed: {e}")
-        positives = {}
-
-    mol_idx = {mol_id: i for i, mol_id in enumerate(mol_order)}
-    tensor = np.zeros((n_mols, n_classes), dtype=bool)
-    for col_idx, cls_id in enumerate(ilp_class_ids):
-        label = f"chebi_{cls_id}"
-        for mol_id in positives.get(label, []):
-            if mol_id in mol_idx:
-                tensor[mol_idx[mol_id], col_idx] = True
-
-    np.save(output_npy_path, tensor)
-    with open(output_meta_path, "w") as f:
-        json.dump({"mol_order": mol_order, "class_labels": ilp_class_ids}, f)
-    print(f"Saved ILP predictions tensor to {output_npy_path} ({n_mols} × {n_classes})")
-
-    return pd.DataFrame(tensor, index=mol_order, columns=ilp_class_ids)
-
 # ---------------------------------------------------------------------------
 # Loading ILP run results
 # ---------------------------------------------------------------------------
@@ -323,7 +250,8 @@ class EnsembleConstructor:
         dl_val_preds: pd.DataFrame,
         label_stats: dict[str, dict]|list[str],
         chebi_graph: nx.DiGraph,
-        model_selection_metric: Literal["balanced_acc", "f1", "weighted_f1", "f1_bottom_ilp"] = "f1_bottom_ilp",
+        model_selection_metric: Literal["balanced_acc", "f1", "weighted_f1", "f1_bottom_ilp", "f1_bottom_ilp_best", "f1_bottom_ilp_multiple"] = "f1_bottom_ilp",
+        predict_on: str = "validation",
     ):
         self.label_set = set(str(l) for l in label_stats.keys()) if isinstance(label_stats, dict) else set(label_stats)
         self.label_stats = label_stats
@@ -375,6 +303,25 @@ class EnsembleConstructor:
                 print(f"  Warning: no val tensor for '{run_name}' "
                       f"(expected {npy_path}); skipping run in model selection")
 
+        # Load predictions for the target split (for slicing output tensor)
+        # Always distinct from val preds when predict_on != "validation"
+        slice_prefix = "val" if predict_on == "validation" else predict_on
+        if predict_on == "validation":
+            self.ilp_slice_preds = self.ilp_val_preds
+        else:
+            self.ilp_slice_preds: dict[str, Optional[pd.DataFrame]] = {}
+            print(f"Loading ILP {predict_on} tensors for slicing...")
+            for run_name, run_dir in ilp_val_runs.items():
+                npy_path = os.path.join(run_dir, f"full_{slice_prefix}_preds.npy")
+                meta_path = os.path.join(run_dir, f"full_{slice_prefix}_preds_metadata.json")
+                if os.path.exists(npy_path) and os.path.exists(meta_path):
+                    self.ilp_slice_preds[run_name] = load_ilp_preds(npy_path, meta_path)
+                    print(f"  '{run_name}': loaded {slice_prefix} tensor {self.ilp_slice_preds[run_name].shape}")
+                else:
+                    self.ilp_slice_preds[run_name] = None
+                    print(f"  Warning: no {predict_on} tensor for '{run_name}' "
+                          f"(expected {npy_path}). Run build_ilp_preds_for_ensemble first.")
+
         print("Selecting models...")
         if model_selection_metric == "weighted_f1":
             self.model_weights: dict[str, dict[str, float]] = self._compute_model_weights()
@@ -389,7 +336,11 @@ class EnsembleConstructor:
             self.trusted_model = self._select_trusted_models()
             counts = {}
             for m in self.trusted_model.values():
-                counts[m] = counts.get(m, 0) + 1
+                if isinstance(m, list):
+                    for run_name in m:
+                        counts[run_name] = counts.get(run_name, 0) + 1
+                else:
+                    counts[m] = counts.get(m, 0) + 1
             print("  Trusted model counts:", counts)
 
     # ── Model selection ───────────────────────────────────────────────────
@@ -453,28 +404,27 @@ class EnsembleConstructor:
             "TN": int((~ensemble_pred & ~gt).sum()),
         })
 
-    def _select_trusted_models(self) -> dict[str, str]:
-        trusted: dict[str, str] = {}
+    def _select_trusted_models(self) -> dict[str, str|list[str]]:
+        trusted: dict[str, str|list[str]] = {}
         trusted_scores: dict[str, float] = {}
         label_children: dict[str, set] = {}
-        if self.model_selection_metric == "f1_bottom_ilp":
+        if self.model_selection_metric.startswith("f1_bottom_ilp"):
             label_children = {cls: set() for cls in self.label_set}
             for cls, parents in self.label_parents.items():
                 for p in parents:
                     label_children[p].add(cls)
-            n_leaves = sum(1 for c in label_children.values() if not c)
-            print(f"  {len(label_children)} classes, {n_leaves} leaves")
 
         for cls_id in self.topo_order:
             dl_score = self._compute_score_from_conf(self.dl_val_scores.get(cls_id))
             best_model, best_score = "dl", dl_score if dl_score is not None else 0
+            scores_log = {"dl": dl_score}
 
             # Only consider ILP for leaf classes in f1_bottom_ilp mode
-            if self.model_selection_metric != "f1_bottom_ilp" or (
+            if not self.model_selection_metric.startswith("f1_bottom_ilp") or (
                 cls_id in label_children and not label_children[cls_id]
             ):
                 for run_name in self.ilp_val_scores:
-                    if self.model_selection_metric == "f1_bottom_ilp":
+                    if self.model_selection_metric.startswith("f1_bottom_ilp"):
                         ilp_score = self._compute_bottom_ilp_f1(cls_id, run_name)
                     else:
                         ilp_score = self._compute_score_from_conf(
@@ -483,8 +433,25 @@ class EnsembleConstructor:
 
                     if ilp_score is None:
                         continue
-                    if ilp_score >= best_score and self.ilp_programs.get(run_name, {}).get(cls_id):
-                        best_model, best_score = run_name, ilp_score
+                    scores_log[run_name] = ilp_score
+                    # 3 options: take 1 ILP rule (if there is one that matches / beats DL), take all ILP rules that match the best score, take all ILP rules that beat DL
+                    if self.model_selection_metric == "f1_bottom_ilp":
+                        if ilp_score >= best_score and self.ilp_programs.get(run_name, {}).get(cls_id):
+                            best_model, best_score = run_name, ilp_score
+                    if self.model_selection_metric == "f1_bottom_ilp_best":
+                        if ilp_score > best_score and self.ilp_programs.get(run_name, {}).get(cls_id):
+                            best_model, best_score = [run_name], ilp_score
+                        elif ilp_score == best_score and self.ilp_programs.get(run_name, {}).get(cls_id):
+                            if best_model == "dl":
+                                best_model = [run_name]
+                            else:
+                                best_model.append(run_name)
+                    if self.model_selection_metric == "f1_bottom_ilp_multiple":
+                        if ilp_score >= best_score and self.ilp_programs.get(run_name, {}).get(cls_id):
+                            if best_model == "dl":
+                                best_model = [run_name]
+                            elif isinstance(best_model, list):
+                                best_model.append(run_name)
 
             trusted[cls_id] = best_model
             trusted_scores[cls_id] = best_score if best_model != "dl" else dl_score or 0
@@ -533,27 +500,31 @@ class EnsembleConstructor:
         # Determine trusted class → run mapping
         if self.trusted_model:
             cls_to_run = {
-                cls: model
-                for cls, model in self.trusted_model.items()
-                if model not in ("dl", "always_positive")
-                and self.ilp_val_preds.get(model) is not None
+                cls: models
+                for cls, models in self.trusted_model.items()
+                if all(model not in ("dl", "always_positive")
+                and self.ilp_slice_preds.get(model) is not None for model in (models if isinstance(models, list) else [models]))
             }
         else:
             cls_to_run = {}
             for cls, weights in self.model_weights.items():
                 for model_name, weight in weights.items():
                     if model_name not in ("dl", "always_positive") and weight > 0 \
-                            and self.ilp_val_preds.get(model_name) is not None:
+                            and self.ilp_slice_preds.get(model_name) is not None:
                         cls_to_run[cls] = model_name
                         break
 
         ilp_class_ids = sorted(cls_to_run)
         cols = {}
         for cls_id in ilp_class_ids:
-            run_name = cls_to_run[cls_id]
-            preds = self.ilp_val_preds[run_name]
-            if cls_id in preds.columns:
-                cols[cls_id] = preds[cls_id].reindex(mol_order, fill_value=False).astype(bool)
+            run_names = cls_to_run[cls_id]
+            if isinstance(run_names, str):
+                cols[cls_id] = self.ilp_slice_preds.get(run_names)[cls_id].reindex(mol_order, fill_value=False).astype(bool)
+                continue
+            preds = np.stack([self.ilp_slice_preds.get(run_name)[cls_id].reindex(mol_order, fill_value=False).astype(bool) for run_name in run_names if self.ilp_slice_preds.get(run_name) is not None and cls_id in self.ilp_slice_preds.get(run_name).columns], axis=0)
+            #if preds.shape[0] > 1:
+            #    print(f"Combining ILP predictions for class {cls_id} from runs {run_names} with OR (avg sum: {preds.sum(axis=1).mean():.2f}, after aggregation: {np.any(preds, axis=0).sum()})")
+            cols[cls_id] = np.mean(preds, axis=0) >= 0.5
 
         result = pd.DataFrame(cols, index=mol_order)
         arr = result.to_numpy().astype(bool)
@@ -588,7 +559,7 @@ class EnsembleAggregator:
         ilp_preds: pd.DataFrame,
         label_stats: dict[str, dict]|list[str],
         chebi_graph,
-        trusted_model: Optional[dict[str, str]] = None,
+        trusted_model: Optional[dict[str, str|list[str]]] = None,
         model_weights: Optional[dict[str, dict[str, float]]] = None,
         classifier_chain_mode: bool = True,
     ):
@@ -618,7 +589,11 @@ class EnsembleAggregator:
             print("  Weighted model participation counts:", counts)
         else:
             for m in self.trusted_model.values():
-                counts[m] = counts.get(m, 0) + 1
+                if isinstance(m, list):
+                    for model in m:
+                        counts[model] = counts.get(model, 0) + 1
+                else:
+                    counts[m] = counts.get(m, 0) + 1
             print("  Trusted model counts:", counts)
 
 
@@ -633,7 +608,8 @@ class EnsembleAggregator:
                 or self.model_weights.get(cls, {}) == {"always_positive": 1.0}
             )
             # native mode = DL model can predict classes that have not-predicted parents (ILP / always-positive still follow the chain)
-            if (self.classifier_chain_mode or always_pos or self.trusted_model.get(cls, "dl") != "dl") and not all(
+            trusted_model_is_dl = self.trusted_model.get(cls) == "dl" or (isinstance(self.trusted_model.get(cls), list) and "dl" in self.trusted_model.get(cls))
+            if (self.classifier_chain_mode or always_pos or not trusted_model_is_dl) and not all(
                 p in positive for p in self.label_parents.get(cls, set())
             ):
                 continue
@@ -651,7 +627,7 @@ class EnsembleAggregator:
         model = self.trusted_model.get(cls, "dl")
         if model == "always_positive":
             return True
-        if model == "dl":
+        if model == "dl" or isinstance(model, list) and "dl" in model:
             if cls not in self.dl_preds.columns:
                 raise ValueError(f"DL predictions for cls={cls} not found in dl_preds. dl_preds has {len(self.dl_preds.columns)} classes: {self.dl_preds.columns.tolist()[:10]}...")
             if mol_id not in self.dl_preds.index:
@@ -659,7 +635,7 @@ class EnsembleAggregator:
             return float(self.dl_preds.at[mol_id, cls]) >= 0.5
         # ILP model: look up in pre-computed tensor; False if not covered
         if cls not in self.ilp_preds.columns or mol_id not in self.ilp_preds.index:
-            return False
+            raise ValueError(f"ILP predictions for cls={cls} or mol_id={mol_id} not found in ilp_preds. ilp_preds has {len(self.ilp_preds.columns)} classes: {self.ilp_preds.columns.tolist()[:10]} and {len(self.ilp_preds.index)} molecules: {self.ilp_preds.index.tolist()[:10]}...")    
         return bool(self.ilp_preds.at[mol_id, cls])
 
     def _compute_weighted_prediction(self, cls: str, mol_id: str, weights: dict[str, float]) -> bool:
