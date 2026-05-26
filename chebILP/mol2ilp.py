@@ -7,16 +7,11 @@ from datetime import datetime
 from typing import Literal
 import networkx as nx
 
+import pickle
+
 import tqdm
 from chebILP.mol_to_fol import mol_to_fol_atoms
 from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
-from chebi_utils import (
-    build_chebi_graph,
-    download_chebi_obo,
-    download_chebi_sdf,
-    extract_molecules,
-    get_hierarchy_subgraph,
-)
 import pandas as pd
 import time
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
@@ -73,13 +68,8 @@ AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "chebi_fg
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_version, chebi_split, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", max_vars=6, max_body=6, max_clauses=2, **kwargs):
-        # chembl_fgs: ChEMBL FGs supplied as samples
-        # chebi_fgs: ChEBI FGs supplied as samples
-        # chebi_fg_rules: ChEBI FGs supplied as Prolog rules (extracted from ChEBI SMILES) - currently broken
-        # chebi_fgs_learned_rules ChEBI FGs supplied as rules, learned with ILP from chebi_fgs
+    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", max_vars=6, max_body=6, max_clauses=2, **kwargs):
         self.predicate_set = predicate_set
-        self.chebi_version = chebi_version
         self._problem_dir = problem_dir
         os.makedirs(self.problem_dir, exist_ok=True)
         self.muggleton = muggleton
@@ -87,22 +77,10 @@ class ILPProblemBuilder:
         self.max_body = max_body
         self.max_clauses = max_clauses
 
-        # --- Load ChEBI data via chebi_utils --------------------------------
-        data_dir = os.path.join("data", f"chebi_v{chebi_version}")
-        os.makedirs(data_dir, exist_ok=True)
-        obo_path = os.path.join(data_dir, "raw", "chebi.obo")
-        sdf_path = os.path.join(data_dir, "raw", "chebi.sdf.gz")
-        if not os.path.exists(obo_path):
-            download_chebi_obo(chebi_version, dest_dir=data_dir)
-        if not os.path.exists(sdf_path):
-            download_chebi_sdf(chebi_version, dest_dir=data_dir)
-
-        self.chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
-
-        molecules_df = extract_molecules(sdf_path)
-        molecules_df.index = molecules_df["chebi_id"].astype(str)
-        molecules_df.index.name = None
-        self.molecules = molecules_df
+        # --- Load pre-built ChEBI data -------------------------------------
+        with open(chebi_graph_path, "rb") as f:
+            self.chebi_graph = pickle.load(f)
+        self.molecules = pd.read_pickle(molecules_path)
         self.hierarchy_graph = nx.transitive_closure_dag(self.chebi_graph)
         self.undirected_graph = self.chebi_graph.to_undirected()
 
@@ -476,6 +454,12 @@ def mol_to_prolog_muggleton(mol, molecule_id="mol1"):
 
 
 if __name__ == "__main__":
-    builder = ILPProblemBuilder(chebi_version="248", chebi_split=os.path.join("data", "chebi_v248", "splits_chebi248.csv"), predicate_set="atoms")
+    _data_dir = os.path.join("data", "chebi_v248")
+    builder = ILPProblemBuilder(
+        chebi_split=os.path.join(_data_dir, "min50", "splits.csv"),
+        chebi_graph_path=os.path.join(_data_dir, "chebi_graph.pkl"),
+        molecules_path=os.path.join(_data_dir, "molecules.pkl"),
+        predicate_set="atoms",
+    )
     target_ids = ["134362"]
     builder.build_examples(target_ids)

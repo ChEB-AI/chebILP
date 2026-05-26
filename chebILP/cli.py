@@ -95,12 +95,14 @@ def _load_classes(labels_file: str) -> list[str]:
 def _make_ilp_builder(args) -> ILPProblemBuilder:
     if isinstance(args, dict):
         fg_mode = args["fg_mode"]
-        chebi_version = int(args["chebi_version"])
+        chebi_version = int(args.get("chebi_version", 248))
         chebi_split = args["chebi_split"]
         predicate_set = args["predicate_set"]
         max_vars = int(args.get("max_vars", 6))
         max_body = int(args.get("max_body", 8))
         max_clauses = int(args.get("max_clauses", 2))
+        chebi_graph_path = args.get("chebi_graph_path")
+        molecules_path = args.get("molecules_path")
     else:
         fg_mode = args.fg_mode
         chebi_version = args.chebi_version
@@ -109,11 +111,20 @@ def _make_ilp_builder(args) -> ILPProblemBuilder:
         max_vars = args.max_vars
         max_body = args.max_body
         max_clauses = args.max_clauses
+        chebi_graph_path = getattr(args, "chebi_graph_path", None)
+        molecules_path = getattr(args, "molecules_path", None)
+
+    data_dir = os.path.join("data", f"chebi_v{chebi_version}")
+    if chebi_graph_path is None:
+        chebi_graph_path = os.path.join(data_dir, "chebi_graph.pkl")
+    if molecules_path is None:
+        molecules_path = os.path.join(data_dir, "molecules.pkl")
 
     if fg_mode:
         return FGILPProblemBuilder(
-            chebi_version=chebi_version,
             chebi_split=chebi_split,
+            chebi_graph_path=chebi_graph_path,
+            molecules_path=molecules_path,
             dataset_path=os.path.join("data", "chebi_fgs_dataset.pkl"),
             predicate_set=predicate_set,
             max_vars=max_vars,
@@ -121,8 +132,9 @@ def _make_ilp_builder(args) -> ILPProblemBuilder:
             max_clauses=max_clauses,
         )
     return ILPProblemBuilder(
-        chebi_version=chebi_version,
         chebi_split=chebi_split,
+        chebi_graph_path=chebi_graph_path,
+        molecules_path=molecules_path,
         muggleton=False,
         predicate_set=predicate_set,
         max_vars=max_vars,
@@ -229,9 +241,9 @@ def _load_dl_val_scores(path: str) -> dict:
 
 def _handle_build_ilp_preds_for_ensemble(args):
     """Build a full ILP predictions tensor for a given split from a run's results.json."""
+    import pandas as pd
     from chebILP.test import build_ilp_preds_tensor
     from chebILP.ensemble_eval import load_ilp_results
-    from chebi_utils import extract_molecules
 
     results = load_ilp_results(args.run_dir)
     programs = {cid: entry["program"] for cid, entry in results.items() if entry.get("program")}
@@ -245,10 +257,11 @@ def _handle_build_ilp_preds_for_ensemble(args):
                 mol_ids.append(mol_id)
     print(f"Building predictions for {len(mol_ids)} '{args.predict_on}' molecules")
 
-    sdf_path = os.path.join("data", f"chebi_v{args.chebi_version}", "raw", "chebi.sdf.gz")
-    print(f"Loading molecules from {sdf_path}...")
-    molecules_df = extract_molecules(sdf_path)
-    molecules_df.index = molecules_df["chebi_id"].astype(str)
+    molecules_pkl = getattr(args, "molecules_path", None) or os.path.join(
+        "data", f"chebi_v{args.chebi_version}", "molecules.pkl"
+    )
+    print(f"Loading molecules from {molecules_pkl}...")
+    molecules_df = pd.read_pickle(molecules_pkl)
 
     prefix = "val" if args.predict_on == "validation" else args.predict_on
     output_npy = os.path.join(args.run_dir, f"full_{prefix}_preds.npy")
@@ -260,7 +273,6 @@ def _handle_build_ilp_preds_for_ensemble(args):
 def _handle_ensemble_construct(args):
     """Perform model selection and generate the ILP predictions tensor."""
     from chebILP.ensemble_eval import EnsembleConstructor, load_dl_preds
-    from chebi_utils import get_hierarchy_subgraph, build_chebi_graph
 
     label_stats = _load_label_stats(args.label_stats)
     print(f"Label stats: {len(label_stats)} labels")
@@ -270,7 +282,9 @@ def _handle_ensemble_construct(args):
 
     ilp_val_run_dirs = {os.path.basename(p.rstrip("/\\")): p for p in args.ilp_val_runs}
     data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
-    chebi_graph = get_hierarchy_subgraph(build_chebi_graph(os.path.join(data_dir, "raw", "chebi.obo")))
+    import pickle as _pickle
+    with open(os.path.join(data_dir, "chebi_graph.pkl"), "rb") as _f:
+        chebi_graph = _pickle.load(_f)
 
     constructor = EnsembleConstructor(
         ilp_val_runs=ilp_val_run_dirs,
@@ -308,7 +322,6 @@ def _handle_ensemble_construct(args):
 def _handle_ensemble_aggregate(args):
     """Aggregate pre-computed DL and ILP prediction tensors into ensemble predictions."""
     from chebILP.ensemble_eval import EnsembleAggregator, load_dl_preds, load_ilp_preds
-    from chebi_utils import build_chebi_graph, get_hierarchy_subgraph
     import numpy as np, json as _json, pandas as pd
 
     label_stats = _load_label_stats(args.label_stats)
@@ -336,7 +349,9 @@ def _handle_ensemble_aggregate(args):
         print(f"Loaded model weights: {len(model_weights_dict)} classes")
 
     data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
-    chebi_graph = get_hierarchy_subgraph(build_chebi_graph(os.path.join(data_dir, "raw", "chebi.obo")))
+    import pickle as _pickle
+    with open(os.path.join(data_dir, "chebi_graph.pkl"), "rb") as _f:
+        chebi_graph = _pickle.load(_f)
 
     aggregator = EnsembleAggregator(
         dl_preds=dl_preds,
@@ -409,13 +424,31 @@ def _handle_test(args):
 def _add_common_args(parser: argparse.ArgumentParser):
     """Add arguments shared by all subcommands that build an ILPProblemBuilder."""
     parser.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
-    parser.add_argument("--chebi_split", type=str, required=True, help="Path to the ChEBI split file.")
+    parser.add_argument("--chebi_split", type=str, required=True, help="Path to the ChEBI split file (mol_id,split CSV).")
     parser.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
-    parser.add_argument("--chebi_version", type=int, default=248, help="ChEBI version to use.")
+    parser.add_argument("--chebi_version", type=int, default=248, help="ChEBI version; used to derive default graph/molecule paths.")
+    parser.add_argument("--chebi_graph_path", type=str, default=None,
+                        help="Path to chebi_graph.pkl (default: data/chebi_v{version}/chebi_graph.pkl).")
+    parser.add_argument("--molecules_path", type=str, default=None,
+                        help="Path to molecules.pkl (default: data/chebi_v{version}/molecules.pkl).")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
     parser.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
     parser.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")
     parser.add_argument("--max_clauses", type=int, default=2, help="Maximum number of clauses in the learned program.")
+
+
+def _handle_prepare_dataset(args):
+    from chebILP.data_preparation import ChEBIDataset
+    ChEBIDataset.prepare(
+        chebi_version=args.chebi_version,
+        data_dir=args.data_dir,
+        min_pos_samples=args.min_pos_samples,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        seed=args.seed,
+        labels_path=args.labels_path,
+        splits_path=args.splits_path,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -423,6 +456,33 @@ def build_parser() -> argparse.ArgumentParser:
         description="ILP classification CLI for ChEBI classes using Popper.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # ── prepare_dataset ──────────────────────────────────────────────────
+    sp_pd = subparsers.add_parser(
+        "prepare_dataset",
+        help="Download ChEBI data and build all dataset artefacts "
+             "(graph cache, molecule cache, labels.txt, splits.csv).",
+    )
+    sp_pd.add_argument("--chebi_version", type=int, required=True,
+                       help="ChEBI ontology version (e.g. 248).")
+    sp_pd.add_argument("--data_dir", type=str, default=None,
+                       help="Root directory for raw and cached files "
+                            "(default: data/chebi_v{version}).")
+    sp_pd.add_argument("--min_pos_samples", type=int, default=50,
+                       help="Minimum descendant molecules per label class (default: 50).")
+    sp_pd.add_argument("--val_ratio", type=float, default=0.1,
+                       help="Fraction of molecules for validation (default: 0.1).")
+    sp_pd.add_argument("--test_ratio", type=float, default=0.1,
+                       help="Fraction of molecules for test (default: 0.1).")
+    sp_pd.add_argument("--seed", type=int, default=42,
+                       help="Random seed for splits (default: 42).")
+    sp_pd.add_argument("--labels_path", type=str, default=None,
+                       help="Output path for labels.txt "
+                            "(default: {data_dir}/min{n}/labels.txt).")
+    sp_pd.add_argument("--splits_path", type=str, default=None,
+                       help="Output path for splits.csv "
+                            "(default: {data_dir}/min{n}/splits.csv).")
+    sp_pd.set_defaults(func=_handle_prepare_dataset)
 
     # ── build_samples ────────────────────────────────────────────────────
     sp_samples = subparsers.add_parser(
@@ -499,7 +559,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp_bipe.add_argument("--chebi_split", type=str, required=True,
                          help="Path to the splits CSV (mol_id,split).")
     sp_bipe.add_argument("--chebi_version", type=int, default=248,
-                         help="ChEBI version; used to locate the SDF at data/chebi_v{version}/raw/chebi.sdf.gz.")
+                         help="ChEBI version; used to derive default molecules_path.")
+    sp_bipe.add_argument("--molecules_path", type=str, default=None,
+                         help="Path to molecules.pkl (default: data/chebi_v{version}/molecules.pkl).")
     sp_bipe.set_defaults(func=_handle_build_ilp_preds_for_ensemble)
 
     # ── ensemble_construct ───────────────────────────────────────────────

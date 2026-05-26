@@ -34,29 +34,40 @@ python -m chebILP {command} -h
 
 An ILP dataset for ChEBI version 248 is available on [HuggingFace](https://huggingface.co/datasets/chebai/ChEBI25-3STAR-ILP). However, you can also create your own dataset.
 
-Prepare training examples and background knowledge for a set of ChEBI classes.
+**Step 1 — Download ChEBI data and build the dataset** (downloads `chebi.obo` and `chebi.sdf.gz`, builds cached graph and molecule files, selects label classes, and creates a train/val/test split):
+```bash
+python -m chebILP prepare_dataset \
+  --chebi_version 248 \
+  --min_pos_samples 50
+```
 
-**Build example files** (positive/negative molecules per class):
+This writes to `data/chebi_v248/`:
+- `chebi_graph.pkl` — hierarchy graph (networkx DiGraph)
+- `molecules.pkl` — molecule DataFrame (index = ChEBI ID)
+- `min50/labels.txt` — selected class IDs (one per line)
+- `min50/splits.csv` — molecule-level train/val/test split
+
+**Step 2 — Build ILP example files** (positive/negative molecules per class):
 ```bash
 python -m chebILP build_samples \
-  --labels_file data/labels.txt \
-  --chebi_split data/chebi_v248/ChEBI25_3_STAR/processed/splits.csv \
+  --labels_file data/chebi_v248/min50/labels.txt \
+  --chebi_split data/chebi_v248/min50/splits.csv \
   --chebi_version 248 \
   --predicate_set atoms \
   --min_pos_samples 25 --max_pos_samples 200 \
   --min_neg_samples 25 --max_neg_samples 200
 ```
 
-**Build background knowledge files** (molecule features as logic facts):
+**Step 3 — Build ILP background knowledge files** (molecule features as logic facts):
 ```bash
 python -m chebILP build_bk \
-  --labels_file data/labels.txt \
-  --chebi_split data/chebi_v248/ChEBI25_3_STAR/processed/splits.csv \
+  --labels_file data/chebi_v248/min50/labels.txt \
+  --chebi_split data/chebi_v248/min50/splits.csv \
   --chebi_version 248 \
   --predicate_set atoms
 ```
 
-Both commands write files into `data/ilp_problems/` (one subdirectory per class). `labels.txt` contains one ChEBI ID per line. Available predicate sets: `atoms`, `atoms_bonds`, `atoms_bonds_stereo`.
+Steps 2 and 3 write files into `data/ilp_problems/` (one subdirectory per class). Available predicate sets: `atoms`, `chembl_fgs`, `chebi_fgs`, `chebi_fg_rules` and `chebi_fg_learned_rules`.
 
 ---
 
