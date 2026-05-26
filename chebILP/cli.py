@@ -198,18 +198,13 @@ def _handle_select_predicates(args):
     print(f"\nCompleted: {successful}/{len(chebi_ids)} classes processed successfully")
 
 
-def _load_label_stats(path: str) -> dict|list[str]:
-    # process classes.txt files or class_stats.csv files
-    if path.endswith(".txt"):
-        with open(path) as f:
-            lines = [line.strip() for line in f if line.strip()]
-        return lines
+def _load_label_stats(path: str) -> list[str]:
     with open(path) as f:
-        lines = [line.strip().split(",") for line in f if line.strip()][1:]
-    return {
-        line[0]: {"num_pos": int(line[1]), "num_neg": int(line[2]), "has_negatives": line[3].lower() == "true"}
-        for line in lines
-    }
+        lines = [line.strip() for line in f if line.strip()]
+    if path.endswith(".txt"):
+        return lines
+    # CSV: first column is class ID, skip header
+    return [line.split(",")[0] for line in lines[1:]]
 
 
 def _load_dl_val_scores(path: str) -> dict:
@@ -268,7 +263,7 @@ def _handle_ensemble_construct(args):
     from chebi_utils import get_hierarchy_subgraph, build_chebi_graph
 
     label_stats = _load_label_stats(args.label_stats)
-    print(f"Label stats: {len(label_stats)} labels, {sum(v['has_negatives'] for v in label_stats.values()) if isinstance(label_stats, dict) else '?'} with negatives")
+    print(f"Label stats: {len(label_stats)} labels")
 
     dl_val_preds = load_dl_preds(args.dl_val_preds_npy, args.dl_val_preds_meta)
     print(f"DL val predictions: {dl_val_preds.shape[0]} molecules x {dl_val_preds.shape[1]} classes")
@@ -281,7 +276,6 @@ def _handle_ensemble_construct(args):
         ilp_val_runs=ilp_val_run_dirs,
         dl_val_preds=dl_val_preds,
         label_stats=label_stats,
-        model_selection_metric=args.model_selection_metric,
         chebi_graph=chebi_graph,
         predict_on=args.predict_on,
     )
@@ -289,21 +283,12 @@ def _handle_ensemble_construct(args):
     output_base = args.output
     os.makedirs(os.path.dirname(output_base) or ".", exist_ok=True)
 
-    if constructor.model_weights:
-        trusted_path = output_base + "_model_weights.csv"
-        model_names = list(next(iter(constructor.model_weights.values())).keys())
-        with open(trusted_path, "w") as f:
-            f.write("chebi_id," + ",".join(model_names) + "\n")
-            for chebi_id, weights in constructor.model_weights.items():
-                f.write(chebi_id + "," + ",".join(str(weights.get(m, 0.0)) for m in model_names) + "\n")
-        print(f"Saved model weights: {trusted_path}")
-    else:
-        trusted_path = output_base + "_trusted_models.csv"
-        with open(trusted_path, "w") as f:
-            f.write("chebi_id,model\n")
-            for chebi_id, model in constructor.trusted_model.items():
-                f.write(f"{chebi_id},{model}\n")
-        print(f"Saved trusted models: {trusted_path}")
+    trusted_path = output_base + "_trusted_models.csv"
+    with open(trusted_path, "w") as f:
+        f.write("chebi_id,model\n")
+        for chebi_id, model in constructor.trusted_model.items():
+            f.write(f"{chebi_id},{model}\n")
+    print(f"Saved trusted models: {trusted_path}")
 
     mol_ids = []
     with open(args.chebi_split) as f:
@@ -360,7 +345,6 @@ def _handle_ensemble_aggregate(args):
         chebi_graph=chebi_graph,
         trusted_model=trusted_model,
         model_weights=model_weights_dict,
-        classifier_chain_mode=not args.native_mode,
     )
 
     mol_ids = dl_preds.index.tolist()
@@ -539,9 +523,6 @@ def build_parser() -> argparse.ArgumentParser:
                             "and results.json (for ILP programs).")
     sp_ec.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
                        help="Class statistics CSV (label list + has_negatives flag).")
-    sp_ec.add_argument("--model_selection_metric", type=str, default="f1",
-                       choices=["balanced_acc", "f1", "weighted_f1", "f1_bottom_ilp", "f1_bottom_ilp_best", "f1_bottom_ilp_multiple"],
-                       help="Metric for model selection.")
     sp_ec.add_argument("--output", type=str,
                        default=os.path.join("data", "ensemble_predictions", "ensemble_f1"),
                        help="Base output path. Suffixes _trusted_models.csv, _ilp_preds.npy, _ilp_preds_metadata.json are appended.")
@@ -568,8 +549,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp_ea.add_argument("--output", type=str,
                        default=os.path.join("data", "ensemble_predictions", "ensemble_predictions.npy"),
                        help="Output .npy path; a matching _metadata.json is written alongside.")
-    sp_ea.add_argument("--native_mode", "-n", action="store_true",
-                       help="Disable classifier-chain mode (predict each class independently of parents).")
     sp_ea.set_defaults(func=_handle_ensemble_aggregate)
 
     # ── explain ──────────────────────────────────────────────────────────────
