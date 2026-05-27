@@ -169,16 +169,16 @@ DL predictions propagate freely through the class hierarchy; ILP and always-posi
 
 ## Other utilities
 
-**Translate a rule to natural language:**
+**Translate a rule to natural language (global explanation):**
 ```bash
-python -m chebILP rule_to_nl --rule_file my_rule.pl --class_parents data/class_parents.json
+python -m chebILP rule_to_nl --rule "chebi_15734(V0) :- has_atom(V0,V1), c(V1), has_2_hs(V1), bSINGLE(V1,V2), o(V2), has_1_hs(V2)." --chebi_graph_path data/chebi_v248/chebi_graph.pkl
 ```
 
-**Explain why a molecule satisfies a rule:**
+**Explain why a molecule satisfies a rule (local explanation):**
 ```bash
 python -m chebILP explain \
   --smiles "CCO" \
-  --rule_file my_rule.pl \
-  --label_parents_json data/class_parents.json \
+  --rule "chebi_15734(V0) :- has_atom(V0,V1), c(V1), has_2_hs(V1), bSINGLE(V1,V2), o(V2), has_1_hs(V2)." \
+  --chebi_graph_path data/chebi_v248/chebi_graph.pkl \
   --output explanation.png
 ```

@@ -1,4 +1,3 @@
-import json
 import re
 from typing import Optional
 
@@ -238,7 +237,7 @@ def _draw_molecule(
 def explain_molecule(
     smiles: str,
     rule: str,
-    label_parents_json: str,
+    chebi_graph=None,
     mol_id: str = "mol1",
     output_path: Optional[str] = None,
     verbose: bool = False,
@@ -247,11 +246,13 @@ def explain_molecule(
     Explain why a molecule satisfies (or fails to satisfy) a learned ILP rule.
 
     Args:
-        smiles:       SMILES string of the molecule.
-        rule:         One or more ILP rule clauses as a string.
-        mol_id:       Identifier for the molecule in the logic program (default: "mol1").
-        output_path:  Path to save the visualization image (PNG). Optional.
-        verbose:      If True, print the assembled xclingo program before running.
+        smiles:      SMILES string of the molecule.
+        rule:        One or more ILP rule clauses as a string.
+        chebi_graph: networkx DiGraph loaded from chebi_graph.pkl. Used to look up the
+                     class name and parent classes for the output text. Optional.
+        mol_id:      Identifier for the molecule in the logic program (default: "mol1").
+        output_path: Path to save the visualization image (PNG). Optional.
+        verbose:     If True, print the assembled xclingo program before running.
 
     Returns:
         satisfies:   True if the molecule satisfies the rule.
@@ -260,7 +261,6 @@ def explain_molecule(
         image:       PIL Image with 1-based numbered atoms; atoms in the explanation
                      are highlighted in orange.
     """
-    label_parents = json.load(open(label_parents_json))
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         raise ValueError(f"Invalid SMILES: {smiles!r}")
@@ -284,12 +284,21 @@ def explain_molecule(
 
     image = _draw_molecule(mol, highlight_atoms, output_path)
 
-    parents = label_parents.get(head_pred.split("_")[1], [])
-    p_conditions = [f"the molecule is a {p} (CHEBI:{id}, not verified)" for p, id in zip(parents["parent_names"], parents["parent_ids"])]
+    chebi_id = head_pred.split("_", 1)[1] if "_" in head_pred else head_pred
+    class_name = f"CHEBI:{chebi_id}"
+    p_conditions = []
+    if chebi_graph is not None:
+        node_data = dict(chebi_graph.nodes.get(chebi_id, {}))
+        class_name = node_data.get("name", class_name)
+        for pid in chebi_graph.successors(chebi_id):
+            pdata = dict(chebi_graph.nodes.get(pid, {}))
+            pname = pdata.get("name", f"CHEBI:{pid}")
+            p_conditions.append(f"the molecule is a {pname} (CHEBI:{pid}, not verified)")
+
     conditions = p_conditions + conditions
 
     if not satisfies:
-        full_text = f"The molecule is not a {parents['name']} (CHEBI:{head_pred.split('_')[1]})"
+        full_text = f"The molecule is not a {class_name} (CHEBI:{chebi_id})"
     else:
-        full_text = f"The molecule is a {parents['name']} (CHEBI:{head_pred.split('_')[1]}) because it fulfills the following conditions:\n" + "\n".join(f"- {c}" for c in conditions)
+        full_text = f"The molecule is a {class_name} (CHEBI:{chebi_id}) because it fulfills the following conditions:\n" + "\n".join(f"- {c}" for c in conditions)
     return satisfies, full_text, image

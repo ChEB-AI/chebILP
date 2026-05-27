@@ -1,5 +1,4 @@
 """Translate chebILP ILP rules to natural language descriptions."""
-import json
 import re
 from typing import Optional
 
@@ -296,14 +295,14 @@ def _clause_to_nl(literals: list[str], mol_var: str, var_map: dict[str, str]) ->
     return ". ".join(parts) + "."
 
 
-def translate_rule(rule: str, class_parents: Optional[dict] = None) -> str:
+def translate_rule(rule: str, chebi_graph=None) -> str:
     """
     Translate one or more ILP rule clauses to a natural language description.
 
     Args:
-        rule:          Rule string (one or more clauses sharing the same head predicate).
-        class_parents: Dict loaded from data/class_parents.json. Used to look up the
-                       target class name and parent class(es) automatically.
+        rule:        Rule string (one or more clauses sharing the same head predicate).
+        chebi_graph: networkx DiGraph loaded from chebi_graph.pkl. Used to look up the
+                     target class name and parent class(es) automatically.
 
     Returns:
         Multi-line natural language string.
@@ -317,11 +316,13 @@ def translate_rule(rule: str, class_parents: Optional[dict] = None) -> str:
     chebi_name: Optional[str] = None
     parent_ids: list[str] = []
     parent_names: list[str] = []
-    if class_parents and chebi_id and chebi_id in class_parents:
-        entry = class_parents[chebi_id]
-        chebi_name = entry.get("name")
-        parent_ids = entry.get("parent_ids", [])
-        parent_names = entry.get("parent_names", [])
+    if chebi_graph is not None and chebi_id:
+        node_data = dict(chebi_graph.nodes.get(chebi_id, {}))
+        chebi_name = node_data.get("name")
+        for pid in chebi_graph.successors(chebi_id):
+            pdata = dict(chebi_graph.nodes.get(pid, {}))
+            parent_ids.append(str(pid))
+            parent_names.append(pdata.get("name", f"CHEBI:{pid}"))
 
     if chebi_name and chebi_id:
         header = f"A compound is a {chebi_name} (CHEBI:{chebi_id}) if it"
@@ -353,6 +354,3 @@ def translate_rule(rule: str, class_parents: Optional[dict] = None) -> str:
     return "\n".join(lines)
 
 
-def load_class_parents(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
