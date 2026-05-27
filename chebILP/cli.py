@@ -103,7 +103,7 @@ def _handle_learn(args):
     with tee_output(log_path):
         learn_chebi_classes(
             classes, 
-            args.get("problem_dir", None),
+            getattr(args, "problem_dir", None),
             args.predicate_set,
             results_dir,
             timeout=args.timeout,
@@ -420,6 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
     sp_learn.add_argument("--timeout", type=int, default=20, help="Timeout for ILP solver in seconds.")
     sp_learn.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use.")
+    sp_learn.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
     sp_learn.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive samples per class.")
     sp_learn.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
     sp_learn.add_argument("--selection_mode", type=str, default=None, choices=["claude", "random", "top_k"], help="Mode for selecting body predicates in bias file.")

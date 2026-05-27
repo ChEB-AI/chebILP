@@ -104,16 +104,21 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         "noisy": True,
         "anytime_solver": "nuwls",
         "timeout": timeout,
-        "mdl_weight_fn": mdl_weight_fn,
-        "mdl_weight_fp": mdl_weight_fp,
-        "mdl_weight_size": mdl_weight_size,
-        "max_vars": max_vars,
-        "max_body": max_body,
-        "max_clauses": max_clauses
     }
+    if mdl_weight_fn != 1 or mdl_weight_fp != 1 or mdl_weight_size != 1:
+        settings_parameters["mdl_weight_fn"] = mdl_weight_fn
+        settings_parameters["mdl_weight_fp"] = mdl_weight_fp
+        settings_parameters["mdl_weight_size"] = mdl_weight_size
 
     with open(os.path.join(results_dir, "config.yml"), "a+") as f:
         f.write(f"problem_dir: {problem_dir}\n")
+        f.write(f"predicate_set: {predicate_set}\n")
+        f.write(f"selection_mode: {selection_mode}\n")
+        if selection_mode is not None:
+            f.write(f"selection_k: {selection_k}\n")
+        f.write(f"max_vars: {max_vars}\n")
+        f.write(f"max_body: {max_body}\n")
+        f.write(f"max_clauses: {max_clauses}\n")
         f.write("popper_settings:\n")
         for key, value in settings_parameters.items():
             f.write(f"\t{key}: {value}\n")
