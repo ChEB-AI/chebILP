@@ -536,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     rule_group = sp_explain.add_mutually_exclusive_group(required=True)
     rule_group.add_argument("--rule", type=str, help="ILP rule clause(s) as a string.")
     rule_group.add_argument("--rule_file", type=str, help="File containing ILP rule clause(s).")
-    sp_explain.add_argument("--label_parents_json", type=str, default=os.path.join("data", "class_parents.json"), help="JSON file mapping class labels to their parent labels (for hierarchical explanations).")
+    sp_explain.add_argument("--chebi_graph_path", type=str, default=None, help="Path to chebi_graph.pkl for class name and parent lookup (optional).")
     sp_explain.add_argument("--output", type=str, default=None, help="Path to save the molecule visualization image (PNG).")
     sp_explain.add_argument("--verbose", "-v", action="store_true", help="Print the assembled xclingo program before running.")
     sp_explain.set_defaults(func=_handle_explain)
@@ -550,9 +550,9 @@ def build_parser() -> argparse.ArgumentParser:
     rule_group_rtnl.add_argument("--rule", type=str, help="ILP rule clause(s) as a string.")
     rule_group_rtnl.add_argument("--rule_file", type=str, help="File containing ILP rule clause(s).")
     sp_rtnl.add_argument(
-        "--class_parents", type=str,
-        default=os.path.join("data", "class_parents.json"),
-        help="Path to class_parents.json for name/parent lookup (default: data/class_parents.json).",
+        "--chebi_graph_path", type=str,
+        default=None,
+        help="Path to chebi_graph.pkl for class name and parent lookup (optional).",
     )
     sp_rtnl.set_defaults(func=_handle_rule_to_nl)
 
@@ -560,18 +560,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _handle_rule_to_nl(args):
-    from chebILP.rule_to_nl import translate_rule, load_class_parents
+    from chebILP.rule_to_nl import translate_rule
 
     rule = args.rule
     if rule is None:
         with open(args.rule_file, "r") as f:
             rule = f.read()
 
-    class_parents = None
-    if os.path.exists(args.class_parents):
-        class_parents = load_class_parents(args.class_parents)
+    chebi_graph = None
+    if args.chebi_graph_path and os.path.exists(args.chebi_graph_path):
+        import pickle as _pickle
+        with open(args.chebi_graph_path, "rb") as f:
+            chebi_graph = _pickle.load(f)
+    elif args.chebi_graph_path:
+        print(f"Warning: chebi_graph_path '{args.chebi_graph_path}' does not exist. Proceeding without ChEBI graph.")
 
-    print(translate_rule(rule, class_parents=class_parents))
+    print(translate_rule(rule, chebi_graph=chebi_graph))
 
 
 def _handle_explain(args):
@@ -587,10 +591,18 @@ def _handle_explain(args):
         with open(args.rule_file, "r") as f:
             rule = f.read()
 
+    chebi_graph = None
+    if args.chebi_graph_path and os.path.exists(args.chebi_graph_path):
+        import pickle as _pickle
+        with open(args.chebi_graph_path, "rb") as f:
+            chebi_graph = _pickle.load(f)
+    elif args.chebi_graph_path:
+        print(f"Warning: chebi_graph_path '{args.chebi_graph_path}' does not exist. Proceeding without ChEBI graph.")
+
     satisfies, explanation_text, _ = explain_molecule(
         smiles=smiles,
         rule=rule,
-        label_parents_json=args.label_parents_json,
+        chebi_graph=chebi_graph,
         output_path=args.output,
         verbose=args.verbose,
     )
