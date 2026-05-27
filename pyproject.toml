@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "chebi-utils>=0.1.1",
-    "popper-ilp@git+https://github.com/logic-and-learning-lab/Popper#egg=main",
+    "popper @ git+https://github.com/logic-and-learning-lab/Popper@v4.4.0",
     "bitarray>=3.8.0",
     "clingo>=5.8.0",
     "janus-swi>=1.5.2",
