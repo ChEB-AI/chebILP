@@ -1,5 +1,4 @@
 import os
-import traceback
 from typing import Literal
 import typing
 import json
@@ -12,78 +11,8 @@ from chebILP.ilp_classifier import run_ilp_training_subprocess
 from chebILP.ilp_path_manager import get_exs_path, get_bk_path, get_bias_path
 from chebILP.utils import tee_output
 
+from chebILP.ilp_classifier import learn_chebi_classes
 
-
-
-def learn_chebi_classes(classes_list, ilp_builder: ILPProblemBuilder, results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1):
-
-        # Build settings parameters for Popper
-        settings_parameters = {
-            "noisy": True,
-            "anytime_solver": "nuwls",
-            "timeout": timeout,
-            "mdl_weight_fn": mdl_weight_fn,
-            "mdl_weight_fp": mdl_weight_fp,
-            "mdl_weight_size": mdl_weight_size,
-        }
-
-        with open(os.path.join(results_dir, "config.yml"), "a+") as f:
-            f.write(f"problem_dir: {ilp_builder.problem_dir}\n")
-            f.write("popper_settings:\n")
-            for key, value in settings_parameters.items():
-                f.write(f"\t{key}: {value}\n")
-
-        ilp_builder.build_bias(classes_list, selection_mode=selection_mode, selection_k=selection_k)
-
-        for chebi_id in classes_list:
-            start_time = time.perf_counter()
-            # Run training in subprocess (isolated Prolog session)
-            print(f"Training ChEBI:{chebi_id}")
-            exs_path = get_exs_path(chebi_id, split="train", base_dir=ilp_builder.problem_dir)
-            bk_path = get_bk_path(chebi_id, split="train", base_dir=ilp_builder.problem_dir, predicate_set=ilp_builder.predicate_set, selection_mode=selection_mode, selection_k=selection_k)
-            bias_path = get_bias_path(chebi_id, split="train", base_dir=ilp_builder.problem_dir, predicate_set=ilp_builder.predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=ilp_builder.max_vars, max_body=ilp_builder.max_body, max_clauses=ilp_builder.max_clauses)
-            if not os.path.exists(exs_path) or not os.path.exists(bk_path) or not os.path.exists(bias_path):
-                print(f"Missing files for ChEBI:{chebi_id} - skipping. exs_path: {exs_path}, bk_path: {bk_path}, bias_path: {bias_path}")
-                continue
-            train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, settings_parameters, log_dir=results_dir)
-            prog_str = train_result["prog_str"]  # string representation for display/storage
-            score = train_result["score"]
-            if score:
-                tp, fn, tn, fp = score[0], score[1], score[2], score[3]
-                f1 = (2*tp / (2*tp + fn + fp)) if (tp + fn + fp) > 0 else 0.0
-                print(f"ChEBI:{chebi_id} - F1: {f1:.2f} (TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn})")
-            if prog_str:
-                print(f"    Learned program:\n    {prog_str}")
-            else:
-                print(f"ChEBI:{chebi_id} - No program learned.")
-
-            conf_matrix = None
-            if prog_str is not None:
-                # Run validation in subprocess (isolated Prolog session)
-                print(f"Validating ChEBI:{chebi_id}...")
-                try:
-                    from chebILP.clingo_eval import run_ilp_validation_clingo
-                    conf_matrix = run_ilp_validation_clingo(
-                        chebi_id, prog_str,
-                        exs_file=get_exs_path(chebi_id, split="validation", base_dir=ilp_builder.problem_dir),
-                        bk_file=get_bk_path(chebi_id, predicate_set=ilp_builder.predicate_set, split="validation", base_dir=ilp_builder.problem_dir),
-                    )
-                    f1 = (2*conf_matrix["TP"] / (2*conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"])) if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0 else 0.0
-                    print(f"    Validation F1: {f1:.2f} (TP: {conf_matrix['TP']}, FP: {conf_matrix['FP']}, TN: {conf_matrix['TN']}, FN: {conf_matrix['FN']})")
-                except Exception as e:
-                    print(f"Validation failed for ChEBI:{chebi_id} with error: {e}")
-                    traceback.print_exc()
-                    conf_matrix = None
-
-            with open(os.path.join(results_dir, "results.json"), "a+") as f:
-                result_entry = {
-                    "chebi_id": chebi_id,
-                    "train_score": {"TP": tp, "FP": fp, "TN": tn, "FN": fn} if score else None,
-                    "time_taken": time.perf_counter() - start_time,
-                    "program": prog_str,
-                    "validation_score": conf_matrix,
-                }
-                f.write(json.dumps(result_entry) + "\n")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -96,7 +25,6 @@ def _load_classes(labels_file: str) -> list[str]:
 def _make_ilp_builder(args) -> ILPProblemBuilder:
     if isinstance(args, dict):
         fg_mode = args["fg_mode"]
-        chebi_version = int(args.get("chebi_version", 248))
         chebi_split = args.get("chebi_split")
         predicate_set = args["predicate_set"]
         max_vars = int(args.get("max_vars", 6))
@@ -106,7 +34,6 @@ def _make_ilp_builder(args) -> ILPProblemBuilder:
         molecules_path = args.get("molecules_path")
     else:
         fg_mode = args.fg_mode
-        chebi_version = args.chebi_version
         chebi_split = getattr(args, "chebi_split", None)
         predicate_set = args.predicate_set
         max_vars = args.max_vars
@@ -114,12 +41,6 @@ def _make_ilp_builder(args) -> ILPProblemBuilder:
         max_clauses = args.max_clauses
         chebi_graph_path = getattr(args, "chebi_graph_path", None)
         molecules_path = getattr(args, "molecules_path", None)
-
-    data_dir = os.path.join("data", f"chebi_v{chebi_version}")
-    if chebi_graph_path is None:
-        chebi_graph_path = os.path.join(data_dir, "chebi_graph.pkl")
-    if molecules_path is None:
-        molecules_path = os.path.join(data_dir, "molecules.pkl")
 
     if fg_mode:
         return FGILPProblemBuilder(
@@ -180,12 +101,17 @@ def _handle_learn(args):
             f.write(f"  {arg}: {getattr(args, arg)}\n")
 
     with tee_output(log_path):
-        ilp_builder = _make_ilp_builder(args)
         learn_chebi_classes(
-            classes, ilp_builder, results_dir,
+            classes, 
+            args.get("problem_dir", None),
+            args.predicate_set,
+            results_dir,
             timeout=args.timeout,
             selection_mode=args.selection_mode,
             selection_k=args.selection_k,
+            max_vars=args.max_vars,
+            max_body=args.max_body,
+            max_clauses=args.max_clauses,
             mdl_weight_fn=args.mdl_weight_fn,
             mdl_weight_fp=args.mdl_weight_fp,
             mdl_weight_size=args.mdl_weight_size,
@@ -413,10 +339,7 @@ def _add_common_args(parser: argparse.ArgumentParser):
     parser.add_argument("--molecules_path", type=str, default=True,
                         help="Path to molecules.pkl.")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
-    parser.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
-    parser.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")
-    parser.add_argument("--max_clauses", type=int, default=2, help="Maximum number of clauses in the learned program.")
-
+   
 
 def _handle_prepare_dataset(args):
     from chebILP.data_preparation import ChEBIDataset
@@ -494,12 +417,16 @@ def build_parser() -> argparse.ArgumentParser:
         "learn",
         help="Run ILP learning (training + validation) for the given ChEBI classes.",
     )
-    _add_common_args(sp_learn)
+    sp_learn.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
     sp_learn.add_argument("--timeout", type=int, default=20, help="Timeout for ILP solver in seconds.")
+    sp_learn.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use.")
     sp_learn.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive samples per class.")
     sp_learn.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
     sp_learn.add_argument("--selection_mode", type=str, default=None, choices=["claude", "random", "top_k"], help="Mode for selecting body predicates in bias file.")
     sp_learn.add_argument("--selection_k", type=int, default=10, help="Number of predicates selection with selection_mode (required if selection_mode is set).")
+    sp_learn.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
+    sp_learn.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")
+    sp_learn.add_argument("--max_clauses", type=int, default=2, help="Maximum number of clauses in the learned program.")
     sp_learn.add_argument("--mdl_weight_fn", type=int, default=1, help="Weight β for false negatives in MDL cost (default: 1).")
     sp_learn.add_argument("--mdl_weight_fp", type=int, default=1, help="Weight γ for false positives in MDL cost (default: 1).")
     sp_learn.add_argument("--mdl_weight_size", type=int, default=1, help="Weight α for program size in MDL cost (default: 1).")

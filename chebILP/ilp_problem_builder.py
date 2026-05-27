@@ -21,9 +21,9 @@ AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "chebi_fg
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", max_vars=6, max_body=6, max_clauses=2, **kwargs):
+    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms"):
         self.predicate_set = predicate_set
-        self._problem_dir = problem_dir
+        self.problem_dir = os.path.join("data", "ilp_problems") if problem_dir is None else problem_dir
         os.makedirs(self.problem_dir, exist_ok=True)
         self.muggleton = muggleton
         self.max_vars = max_vars
@@ -56,9 +56,6 @@ class ILPProblemBuilder:
             else:
                 raise ValueError(f"Unknown split '{split}' for ChEBI ID {chebi_id}")
             
-    @property
-    def problem_dir(self):
-        return self._problem_dir if self._problem_dir else os.path.join("data", f"ilp_problems")
             
     def build_examples(self, target_ids: list[str], min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
         min_n_pos = max_pos_samples + 1
@@ -158,27 +155,6 @@ class ILPProblemBuilder:
             # bias without settings (as template)
             with open(plain_bias_path, "w+") as f:
                 f.write("\n".join(bias_lines) + "\n")
-                    
-    
-    def build_bias(self, target_ids, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None):
-        # use bias template generated in build_bk and create settings-specific bias files
-        for target_id in tqdm.tqdm(target_ids, desc="Building bias files for ChEBI classes"):
-            plain_bias_path = get_bias_path(target_id, split="train", base_dir=self.problem_dir, predicate_set=self.predicate_set, selection_mode=selection_mode, selection_k=selection_k) # template bias file created in build_bk
-            if selection_mode is None:
-                assert os.path.exists(plain_bias_path), f"Bias template file {plain_bias_path} does not exist. Please run build_bk first to create the bias template before running build_bias."
-            else:
-                assert os.path.exists(plain_bias_path), f"Bias template file {plain_bias_path} does not exist. Please run predicate selection with selection_mode={selection_mode} and top_k={selection_k} first."
-
-            bias_path = get_bias_path(target_id, split="train", base_dir=self.problem_dir, predicate_set=self.predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=self.max_vars, max_body=self.max_body, max_clauses=self.max_clauses)
-            # use bias.pl to generate settings-specific bias file
-            with open(plain_bias_path, "r") as f:
-                bias_content = f.read()
-            bias_content = bias_content.replace("%% max_vars(TODO).", f"max_vars({self.max_vars}).")
-            bias_content = bias_content.replace("%% max_body(TODO).", f"max_body({self.max_body}).")
-            bias_content = bias_content.replace("%% max_clauses(TODO).", f"max_clauses({self.max_clauses}).") 
-                    
-            with open(bias_path, "w+") as f:
-                f.write(bias_content)
 
 
     def get_closest_negatives(self, samples: pd.DataFrame, target_id: str, min_samples=25, max_samples=None, direct_only=False):

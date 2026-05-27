@@ -53,14 +53,14 @@ python -m chebILP build_samples \
   --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
   --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
   --chebi_graph_path data/chebi_v248/chebi_graph.pkl \
-  --molecules_path data/chebi_v28/ChEBI25_3_STAR/molecules.pkl
+  --molecules_path data/chebi_v248/ChEBI25_3_STAR/molecules.pkl
 ```
 
 **Step 3 — Build ILP background knowledge files** (molecule features as logic facts):
 ```bash
 python -m chebILP build_bk \
-  --labels_file data/chebi_v248/min50/labels.txt \
-  --chebi_split data/chebi_v248/min50/splits.csv \
+  --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
+  --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
   --chebi_graph_path data/chebi_v248/chebi_graph.pkl \
   --molecules_path data/chebi_v28/ChEBI25_3_STAR/molecules.pkl
 ```
@@ -71,15 +71,14 @@ Steps 2 and 3 write files into `data/ilp_problems/` (one subdirectory per class)
 
 ### 2. Learning ILP rules
 
-Learn Prolog classification rules for each class using the examples and background knowledge from workflow 1.
+Learn Prolog classification rules for each class using the examples and background knowledge from workflow 1. 
+The learn function will create an updated bias file based on the `max_vars`, `max_body` and `max_clauses` parameters.
 
 **Learn rules:**
 ```bash
 python -m chebILP learn \
-  --labels_file data/labels.txt \
-  --chebi_split data/chebi_v248/ChEBI25_3_STAR/processed/splits.csv \
-  --chebi_version 248 \
-  --predicate_set atoms \
+  --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
+  --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
   --timeout 60
 ```
 
