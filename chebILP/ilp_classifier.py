@@ -1,17 +1,15 @@
-from popper.loop import learn_solution, get_bk_cons, timeout, popper
-from popper.tester import Tester, format_literal_janus, deduce_neg_example_recalls
-from popper.util import Settings, format_prog, Literal
 import os
 import subprocess
 import sys
 import json
-import pickle
-import base64
 from datetime import datetime
 import time
-import re
-from janus_swi import consult, query_once
-from bitarray.util import ones
+import traceback
+import tqdm
+from typing import Literal, Optional
+
+from chebILP.ilp_path_manager import get_bias_path, get_bk_path, get_exs_path
+from chebILP.ilp_problem_builder import AVAILABLE_PREDICATE_SETS
 
 def log_subprocess_output(log_dir, phase, result):
     """Write subprocess stdout/stderr to the run log with timestamp."""
@@ -39,105 +37,6 @@ def log_subprocess_output(log_dir, phase, result):
                 f.write(f"[{timestamp}] [stderr] {line}\n")
 
 
-def reload_tester(tester, settings):
-        exs_pl_path = settings.ex_file
-
-        if not settings.pi_enabled:
-            consult('prog', f':- dynamic {settings.head_literal.predicate}/{len(settings.head_literal.arguments)}.')
-
-        for x in [exs_pl_path]:
-            if os.name == 'nt': # if on Windows, SWI requires escaped directory separators
-                x = x.replace('\\', '\\\\')
-            consult(x)
-
-        query_once('load_examples')
-
-        neg_literal = Literal('neg_fact', tuple(range(len(settings.head_literal.arguments))))
-        tester.neg_fact_str = format_literal_janus(neg_literal)
-        tester.neg_literal_set = frozenset([neg_literal])
-
-        q = 'findall(_Atom2, (neg_index(_K, _Atom1), term_string(_Atom1, _Atom2)), S)'
-        res = query_once(q)['S']
-        atoms = []
-        for x in res:
-            x = x[:-1].split('(')[1].split(',')
-            atoms.append(x)
-
-        if atoms:
-            try:
-                settings.recall = settings.recall | deduce_neg_example_recalls(settings, atoms)
-            except Exception as e:
-                print(e)
-
-        tester.num_pos = query_once('findall(_K, pos_index(_K, _Atom), _S), length(_S, N)')['N']
-        tester.num_neg = query_once('findall(_K, neg_index(_K, _Atom), _S), length(_S, N)')['N']
-
-        print(f"Reloaded tester with {tester.num_pos} positive and {tester.num_neg} negative examples.")
-
-        tester.pos_examples_ = ones(tester.num_pos)
-
-        tester.cached_pos_covered = {}
-        tester.cached_inconsistent = {}
-
-        if tester.settings.recursion_enabled:
-            query_once(f'assert(timeout({tester.settings.eval_timeout})), fail')
-
-
-class PopperWrapper:
-
-    def __init__(self, settings_parameters):
-        # override default settings for Popper
-        self.settings_parameters = {
-            "noisy": True,
-            "anytime_solver": "nuwls",
-        }
-        self.settings_parameters.update(settings_parameters)
-        self.settings = None
-        self.tester = None
-
-    def solve(self, chebi_id, exs_file, bk_file, bias_file):
-        if self.settings is None:
-            self.settings = Settings(ex_file=exs_file, bk_file=bk_file, bias_file=bias_file, **self.settings_parameters)
-            self.settings.nonoise = not self.settings.noisy
-            self.settings.datalog = False
-
-        else:
-            # override head_pred
-            self.settings.head_pred = f"chebi_{chebi_id}"
-            # Clear cache
-            from janus_swi import query_once
-            query_once("abolish(pos/1), true")
-            query_once("(retractall(pos_index(_, _)) ; abolish(pos_index/2), true)")
-            query_once("abolish(neg/1), true")
-            query_once("(retractall(neg_index(_, _)) ; abolish(neg_index/2), true)")
-            query_once("(retractall(neg_fact(_, _)) ; abolish(neg_fact/2), true)")
-            num_pos = query_once('findall(_K, pos_index(_K, _Atom), _S), length(_S, N)')['N']
-            num_neg = query_once('findall(_K, neg_index(_K, _Atom), _S), length(_S, N)')['N']
-            assert num_pos == 0 and num_neg == 0, f"Cache not cleared properly: {num_pos} positive and {num_neg} negative examples remain."
-
-            # set ex_file 
-            self.settings.ex_file = exs_file
-            self.settings.bk_file = bk_file
-            self.settings.bias_file = bias_file
-
-        with self.settings.stats.duration('load data'):
-            self.tester = Tester(self.settings)
-        # learn_solution
-        self.settings.solution_found = False
-        self.settings.solution = None
-        self.settings.best_prog_score = None
-        bkcons = get_bk_cons(self.settings, self.tester)
-        self.settings.datalog = False
-        timeout(self.settings, popper, (self.settings, self.tester, bkcons), timeout_duration=int(self.settings.timeout),)
-        prog_str = format_prog(self.settings.solution) if self.settings.solution else None
-        return {
-            "prog": self.settings.solution, 
-            "prog_str": prog_str, 
-            "score": list(self.settings.best_prog_score) if self.settings.best_prog_score else None
-            }
-    
-
-    
 def run_ilp_training_subprocess(exs_file, bk_file, bias_file, settings_parameters, log_dir=None):
     """Run Popper ILP learning in a separate subprocess for isolated Prolog session."""
     #print(f"Running ILP training subprocess with exs_file={exs_file}, bk_file={bk_file}, bias_file={bias_file}...")
@@ -176,100 +75,103 @@ print(json.dumps(result))
     return output
 
 
-def split_prolog_literals(body):
-    """Split Prolog body into literals by comma, respecting parentheses depth."""
-    literals = []
-    current = []
-    depth = 0
-    
-    for char in body:
-        if char == '(':
-            depth += 1
-            current.append(char)
-        elif char == ')':
-            depth -= 1
-            current.append(char)
-        elif char == ',' and depth == 0:
-            # Comma at depth 0 - this is a literal separator
-            literals.append(''.join(current).strip())
-            current = []
+def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2):
+    # use bias template generated in build_bk and create settings-specific bias files
+    for target_id in tqdm.tqdm(target_ids, desc="Building bias files for ChEBI classes"):
+        plain_bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k) # template bias file created in build_bk
+        if selection_mode is None:
+            assert os.path.exists(plain_bias_path), f"Bias template file {plain_bias_path} does not exist. Please run build_bk first to create the bias template before running build_bias."
         else:
-            current.append(char)
-    
-    # Don't forget the last literal
-    if current:
-        literals.append(''.join(current).strip())
-    
-    return literals
+            assert os.path.exists(plain_bias_path), f"Bias template file {plain_bias_path} does not exist. Please run predicate selection with selection_mode={selection_mode} and top_k={selection_k} first."
+
+        bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses)
+        # use bias.pl to generate settings-specific bias file
+        with open(plain_bias_path, "r") as f:
+            bias_content = f.read()
+        bias_content = bias_content.replace("%% max_vars(TODO).", f"max_vars({max_vars}).")
+        bias_content = bias_content.replace("%% max_body(TODO).", f"max_body({max_body}).")
+        bias_content = bias_content.replace("%% max_clauses(TODO).", f"max_clauses({max_clauses}).") 
+                
+        with open(bias_path, "w+") as f:
+            f.write(bias_content)
 
 
-def format_literal(literal_str):
-    predicate = literal_str.split('(')[0].strip()
-    args_str = literal_str.split('(')[1].rstrip(')').strip()
-    args = [f"_{arg}" for arg in args_str.split(',')]
-    return f"{predicate}({', '.join(args)})"
-
-def run_ilp_validation(chebi_id, rule, exs_file, bk_file):
-    # exs_file contains a list of pos(chebi_{chebi_id}(sample_id)) and neg(chebi_{chebi_id}(sample_id))
-    # bk_file contains the same background knowledge used for training (e.g. has_atom(sample_id, atom))
-    # rule has format "chebi_{chebi_id}(V0) :- body_literal1(V0, V1), body_literal2(V1), ..."   
-    consult(bk_file)
-    consult(exs_file)
-    test_pl_path = os.path.join("data", "test.pl")
-    consult(test_pl_path)
-    query_once('load_examples')
-
-    n_pos = query_once(f"findall(_ID, (pos_index(_ID, chebi_{chebi_id}(_V0))), S), length(S, N).")["N"]
-    n_neg = query_once(f"findall(_ID, (neg_index(_ID, chebi_{chebi_id}(_V0))), S), length(S, N).")["N"]
-
-    pos_covered, neg_covered = set(), set()
-    # Assert each clause separately to avoid Prolog syntax errors on multi-line rules.
-    clauses = [c.strip() for c in rule.replace("\r", "").split(".") if c.strip()]
-    for clause in clauses:
-        head, body = clause.split(":-")
-        # split pred1(V0, V1), pred2(V1) into separate literals and format each with format_literal
-        body = ",".join([format_literal(b) for b in split_prolog_literals(body)])
-        pos = query_once(f"findall(_ID, (pos_index(_ID, chebi_{chebi_id}(_V0)), {body}), S).")["S"]
-        pos_covered.update(pos)
-        neg = query_once(f"findall(_ID, (neg_index(_ID, chebi_{chebi_id}(_V0)), {body}), S).")["S"]
-        neg_covered.update(neg)
-
-    tps = len(pos_covered)
-    fps = len(neg_covered)
-    fns = n_pos - tps
-    tns = n_neg - fps
-    return {
-        "TP": tps,
-        "FP": fps,
-        "TN": tns,
-        "FN": fns,
+def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1):
+    if problem_dir is None:
+        problem_dir = os.path.join("data", "ilp_problems")
+    # Build settings parameters for Popper
+    settings_parameters = {
+        "noisy": True,
+        "anytime_solver": "nuwls",
+        "timeout": timeout,
     }
+    if mdl_weight_fn != 1 or mdl_weight_fp != 1 or mdl_weight_size != 1:
+        settings_parameters["mdl_weight_fn"] = mdl_weight_fn
+        settings_parameters["mdl_weight_fp"] = mdl_weight_fp
+        settings_parameters["mdl_weight_size"] = mdl_weight_size
 
-def run_ilp_validation_subprocess(chebi_id, rule, exs_file, bk_file, log_dir=None, timeout=300):
-    """Run ILP validation in a separate subprocess to isolate Prolog session."""
-    script = f'''
+    with open(os.path.join(results_dir, "config.yml"), "a+") as f:
+        f.write(f"problem_dir: {problem_dir}\n")
+        f.write(f"predicate_set: {predicate_set}\n")
+        f.write(f"selection_mode: {selection_mode}\n")
+        if selection_mode is not None:
+            f.write(f"selection_k: {selection_k}\n")
+        f.write(f"max_vars: {max_vars}\n")
+        f.write(f"max_body: {max_body}\n")
+        f.write(f"max_clauses: {max_clauses}\n")
+        f.write("popper_settings:\n")
+        for key, value in settings_parameters.items():
+            f.write(f"\t{key}: {value}\n")
 
-import json
-from janus_swi import consult, query_once
-from chebILP.ilp_classifier import run_ilp_validation
-res = run_ilp_validation("{chebi_id}", """{rule}""", r"{exs_file}", r"{bk_file}")
+    build_bias(problem_dir, predicate_set, classes_list, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses)
 
-print(json.dumps(res))
-'''
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        start_new_session=True,  # Start in a new session to isolate from parent process
-        cwd=os.getcwd(),
-        timeout=timeout,
-    )
-    if log_dir:
-        log_subprocess_output(log_dir, f"Validation: {chebi_id}", result)
-    # Parse only the last line (JSON output), ignore earlier lines (warnings/progress)
-    stdout_lines = result.stdout.strip().split('\n')
-    try:
-        output = json.loads(stdout_lines[-1])
-    except json.decoder.JSONDecodeError:
-        output = {"error": "Failed to parse JSON output"}
-    return output
+    for chebi_id in classes_list:
+        start_time = time.perf_counter()
+        # Run training in subprocess (isolated Prolog session)
+        print(f"Training ChEBI:{chebi_id}")
+        exs_path = get_exs_path(chebi_id, split="train", base_dir=problem_dir)
+        bk_path = get_bk_path(chebi_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k)
+        bias_path = get_bias_path(chebi_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses)
+        if not os.path.exists(exs_path) or not os.path.exists(bk_path) or not os.path.exists(bias_path):
+            print(f"Missing files for ChEBI:{chebi_id} - skipping. exs_path: {exs_path}, bk_path: {bk_path}, bias_path: {bias_path}")
+            continue
+        train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, settings_parameters, log_dir=results_dir)
+        prog_str = train_result["prog_str"]  # string representation for display/storage
+        score = train_result["score"]
+        if score:
+            tp, fn, tn, fp = score[0], score[1], score[2], score[3]
+            f1 = (2*tp / (2*tp + fn + fp)) if (tp + fn + fp) > 0 else 0.0
+            print(f"ChEBI:{chebi_id} - F1: {f1:.2f} (TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn})")
+        if prog_str:
+            print(f"    Learned program:\n    {prog_str}")
+        else:
+            print(f"ChEBI:{chebi_id} - No program learned.")
+
+        conf_matrix = None
+        if prog_str is not None:
+            # Run validation in subprocess (isolated Prolog session)
+            print(f"Validating ChEBI:{chebi_id}...")
+            try:
+                from chebILP.clingo_eval import run_ilp_validation_clingo
+                conf_matrix = run_ilp_validation_clingo(
+                    chebi_id, prog_str,
+                    exs_file=get_exs_path(chebi_id, split="validation", base_dir=problem_dir),
+                    bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split="validation", base_dir=problem_dir),
+                )
+                f1 = (2*conf_matrix["TP"] / (2*conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"])) if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0 else 0.0
+                print(f"    Validation F1: {f1:.2f} (TP: {conf_matrix['TP']}, FP: {conf_matrix['FP']}, TN: {conf_matrix['TN']}, FN: {conf_matrix['FN']})")
+            except Exception as e:
+                print(f"Validation failed for ChEBI:{chebi_id} with error: {e}")
+                traceback.print_exc()
+                conf_matrix = None
+
+        with open(os.path.join(results_dir, "results.json"), "a+") as f:
+            result_entry = {
+                "chebi_id": chebi_id,
+                "train_score": {"TP": tp, "FP": fp, "TN": tn, "FN": fn} if score else None,
+                "time_taken": time.perf_counter() - start_time,
+                "program": prog_str,
+                "validation_score": conf_matrix,
+            }
+            f.write(json.dumps(result_entry) + "\n")
+

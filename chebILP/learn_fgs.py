@@ -3,7 +3,7 @@ import os
 import pandas as pd
 
 from chebILP.ilp_path_manager import get_exs_path
-from chebILP.mol2ilp import ILPProblemBuilder
+from chebILP.ilp_problem_builder import ILPProblemBuilder
 
 # todo: this class is out of dat
 class FGILPProblemBuilder(ILPProblemBuilder):
