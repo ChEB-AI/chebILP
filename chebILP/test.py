@@ -38,7 +38,7 @@ def build_ilp_preds_tensor(
     """
     import tqdm
     from chebILP.clingo_eval import evaluate_with_clingo
-    from chebILP.mol2ilp import build_background_chemlog
+    from chebILP.ilp_problem_builder import build_background_chemlog
 
     ilp_class_ids = sorted(programs.keys())
     n_mols = len(mol_order)

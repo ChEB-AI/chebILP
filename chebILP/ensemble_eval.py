@@ -86,7 +86,7 @@ def get_dl_direct_neighbor_scores(dl_preds: pd.DataFrame, chebi_graph: nx.DiGrap
 
     Returns a dict: {class_id: conf_matrix or None if not computable}.
     """
-    from chebILP.mol2ilp import get_direct_neighbors
+    from chebILP.ilp_problem_builder import get_direct_neighbors
 
     scores = {}
     for cls_id in dl_preds.columns:

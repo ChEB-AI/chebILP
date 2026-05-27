@@ -6,7 +6,7 @@ import json
 import time
 import argparse
 
-from chebILP.mol2ilp import ILPProblemBuilder, AVAILABLE_PREDICATE_SETS
+from chebILP.ilp_problem_builder import ILPProblemBuilder, AVAILABLE_PREDICATE_SETS
 from chebILP.learn_fgs import FGILPProblemBuilder
 from chebILP.ilp_classifier import run_ilp_training_subprocess
 from chebILP.ilp_path_manager import get_exs_path, get_bk_path, get_bias_path
@@ -97,7 +97,7 @@ def _make_ilp_builder(args) -> ILPProblemBuilder:
     if isinstance(args, dict):
         fg_mode = args["fg_mode"]
         chebi_version = int(args.get("chebi_version", 248))
-        chebi_split = args["chebi_split"]
+        chebi_split = args.get("chebi_split")
         predicate_set = args["predicate_set"]
         max_vars = int(args.get("max_vars", 6))
         max_body = int(args.get("max_body", 8))
@@ -107,7 +107,7 @@ def _make_ilp_builder(args) -> ILPProblemBuilder:
     else:
         fg_mode = args.fg_mode
         chebi_version = args.chebi_version
-        chebi_split = args.chebi_split
+        chebi_split = getattr(args, "chebi_split", None)
         predicate_set = args.predicate_set
         max_vars = args.max_vars
         max_body = args.max_body
@@ -219,25 +219,6 @@ def _load_label_stats(path: str) -> list[str]:
     # CSV: first column is class ID, skip header
     return [line.split(",")[0] for line in lines[1:]]
 
-
-def _load_dl_val_scores(path: str) -> dict:
-    with open(path) as f:
-        lines = [line.strip().split(",") for line in f if line.strip()]
-        header = [h.lower() for h in lines[0]]
-        lines = lines[1:]
-        tp_idx = header.index("tp")
-        fp_idx = header.index("fp")
-        tn_idx = header.index("tn")
-        fn_idx = header.index("fn")
-    return {
-        line[0]: {
-            "TP": int(line[tp_idx]) if line[tp_idx] != "" else 0,
-            "FP": int(line[fp_idx]) if line[fp_idx] != "" else 0,
-            "TN": int(line[tn_idx]) if line[tn_idx] != "" else 0,
-            "FN": int(line[fn_idx]) if line[fn_idx] != "" else 0,
-        }
-        for line in lines
-    }
 
 
 def _handle_build_ilp_preds_for_ensemble(args):
@@ -427,11 +408,10 @@ def _add_common_args(parser: argparse.ArgumentParser):
     parser.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
     parser.add_argument("--chebi_split", type=str, required=True, help="Path to the ChEBI split file (mol_id,split CSV).")
     parser.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
-    parser.add_argument("--chebi_version", type=int, default=248, help="ChEBI version; used to derive default graph/molecule paths.")
-    parser.add_argument("--chebi_graph_path", type=str, default=None,
-                        help="Path to chebi_graph.pkl (default: data/chebi_v{version}/chebi_graph.pkl).")
-    parser.add_argument("--molecules_path", type=str, default=None,
-                        help="Path to molecules.pkl (default: data/chebi_v{version}/molecules.pkl).")
+    parser.add_argument("--chebi_graph_path", type=str, required=True,
+                        help="Path to chebi_graph.pkl.")
+    parser.add_argument("--molecules_path", type=str, default=True,
+                        help="Path to molecules.pkl.")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
     parser.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
     parser.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")

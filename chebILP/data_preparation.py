@@ -59,6 +59,7 @@ class ChEBIDataset:
         os.makedirs(self.raw_dir, exist_ok=True)
         self._download_if_needed()
         self.chebi_graph: nx.DiGraph = self._load_or_build_graph()
+        os.makedirs(self.processed_dir, exist_ok=True)
         self.molecules: pd.DataFrame = self._load_or_build_molecules()
         self._labeled_df: Optional[pd.DataFrame] = None  # cache set by select_labels
 
