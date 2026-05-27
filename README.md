@@ -1,8 +1,5 @@
 <<<<<<< Updated upstream
 # chebILP
-An Inductive Logic Programming framework for classifying chemical compound into ChEBI classes.
-=======
-# chebILP
 
 An Inductive Logic Programming (ILP) framework for classifying chemical compounds into [ChEBI](https://www.ebi.ac.uk/chebi/) classes. Rules are learned with [Popper](https://github.com/logic-and-learning-lab/Popper) and evaluated with [Clingo](https://potassco.org/clingo/) (Answer Set Programming).
 
@@ -10,15 +7,29 @@ An Inductive Logic Programming (ILP) framework for classifying chemical compound
 
 ## Installation
 
-**Prerequisites:** [SWI-Prolog](https://www.swi-prolog.org/Download.html) must be installed and on `PATH` (required by Popper).
+### Prerequesites
 
-Install the core package:
+[SWI-Prolog](https://www.swi-prolog.org/Download.html) must be installed and on `PATH` (required by Popper).
+Popper must be installed as well. You can either install the [latest version of Popper](https://github.com/logic-and-learning-lab/Popper) with
+```
+pip install https://github.com/logic-and-learning-lab/Popper
+```
+or a forked, slightly outdated version with
+```
+pip install https://github.com/sfluegel05/Popper
+```
+With the latter, you can use the `--mdl_weight_fn`, `--mdl_weight_fp` and `--mdl_weight_seize` options of the learn command.
+
+### Core package
+
 ```bash
-pip install ".[explain,llm]"
+pip install chebILP
 ```
 
-- `explain` adds `xclingo` and `Pillow` for the `explain` command
-- `llm` adds `anthropic`, `langsmith`, and `python-dotenv` for LLM-enhanced rule learning (`enhance_with_llms`)
+Extras:
+- `pip install chebILP[explain]` adds `xclingo` and `Pillow` for the `explain` command
+- `pip install chebILP[llm]` adds `anthropic`, `langsmith`, and `python-dotenv` for LLM-enhanced rule learning (`enhance_with_llms`, experimental)
+
 
 The `prepare_dl_preds` utility (one-time DL tensor extraction) additionally requires `torch`, which must be installed separately in an environment that has the DL model checkpoint.
 
@@ -95,6 +106,18 @@ python -m chebILP test \
   --test_on test
 ```
 
+**Optional: LLM-enhanced rules (experimental)**
+
+To improve learned programs with an LLM (requires `ANTHROPIC_API_KEY` in `.env`):
+```bash
+python -m chebILP.enhance_with_llms \
+  --input data/ilp_programs.csv \
+  --output data/enhanced_run \
+  --chebi_version 248
+```
+
+Input CSV must have columns `chebi_id`, `program`, `run_name`. The output directory is readable by the `test` command.
+
 ---
 
 ### 3. Building an ensemble (ILP + DL)
@@ -159,4 +182,3 @@ python -m chebILP explain \
   --label_parents_json data/class_parents.json \
   --output explanation.png
 ```
->>>>>>> Stashed changes

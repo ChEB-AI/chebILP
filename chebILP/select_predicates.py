@@ -13,7 +13,7 @@ from typing import Literal
 import networkx as nx
 
 from chebILP.ilp_path_manager import get_bias_path, get_bk_path
-from chebILP.mol2ilp import AVAILABLE_PREDICATE_SETS
+from chebILP.ilp_problem_builder import AVAILABLE_PREDICATE_SETS
 from chebi_utils import build_chebi_graph, download_chebi_obo
 
 def load_bias_predicates(bias_path: str) -> list[tuple[str, int]]:
