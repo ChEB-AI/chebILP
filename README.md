@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream
 # chebILP
 
 An Inductive Logic Programming (ILP) framework for classifying chemical compounds into [ChEBI](https://www.ebi.ac.uk/chebi/) classes. Rules are learned with [Popper](https://github.com/logic-and-learning-lab/Popper) and evaluated with [Clingo](https://potassco.org/clingo/) (Answer Set Programming).
