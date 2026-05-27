@@ -41,9 +41,11 @@ class ChEBIDataset:
     def __init__(
         self,
         chebi_version: int,
+        three_star_only: bool = True,
         data_dir: Optional[str] = None,
     ):
         self.chebi_version = chebi_version
+        self.three_star_only = three_star_only
         self.data_dir = data_dir or os.path.join("data", f"chebi_v{chebi_version}")
         self.raw_dir = os.path.join(self.data_dir, "raw")
         self.obo_path = os.path.join(self.raw_dir, "chebi.obo")
@@ -87,6 +89,9 @@ class ChEBIDataset:
         molecules = extract_molecules(self.sdf_path)
         molecules.index = molecules["chebi_id"].astype(str)
         molecules.index.name = None
+        # filter for 3-star subset
+        if self.three_star_only:
+            molecules = molecules[molecules["STAR"] == "3"]
         molecules.to_pickle(self.molecules_path)
         print(f"  Saved {len(molecules)} molecules to {self.molecules_path}")
         return molecules
@@ -178,6 +183,7 @@ class ChEBIDataset:
     def prepare(
         cls,
         chebi_version: int,
+        three_star_only: bool = True,
         data_dir: Optional[str] = None,
         min_pos_samples: int = 50,
         val_ratio: float = 0.1,
@@ -187,7 +193,7 @@ class ChEBIDataset:
         splits_path: Optional[str] = None,
     ) -> "ChEBIDataset":
         """Download, build caches, select labels, and save splits in one call."""
-        dataset = cls(chebi_version=chebi_version, data_dir=data_dir)
+        dataset = cls(chebi_version=chebi_version, three_star_only=three_star_only, data_dir=data_dir)
         processed = os.path.join(dataset.data_dir, f"min{min_pos_samples}")
         labels_out = labels_path or os.path.join(processed, "labels.txt")
         splits_out = splits_path or os.path.join(processed, "splits.csv")

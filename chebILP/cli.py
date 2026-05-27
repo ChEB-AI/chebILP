@@ -6,10 +6,11 @@ import json
 import time
 import argparse
 
-from chebILP.mol2ilp import ILPProblemBuilder, tee_output, AVAILABLE_PREDICATE_SETS
+from chebILP.mol2ilp import ILPProblemBuilder, AVAILABLE_PREDICATE_SETS
 from chebILP.learn_fgs import FGILPProblemBuilder
-from chebILP.ilp_classifier import run_ilp_training_subprocess, run_ilp_validation_subprocess
+from chebILP.ilp_classifier import run_ilp_training_subprocess
 from chebILP.ilp_path_manager import get_exs_path, get_bk_path, get_bias_path
+from chebILP.utils import tee_output
 
 
 
@@ -441,6 +442,7 @@ def _handle_prepare_dataset(args):
     from chebILP.data_preparation import ChEBIDataset
     ChEBIDataset.prepare(
         chebi_version=args.chebi_version,
+        three_star_only=not args.include_two_star,
         data_dir=args.data_dir,
         min_pos_samples=args.min_pos_samples,
         val_ratio=args.val_ratio,
@@ -465,6 +467,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_pd.add_argument("--chebi_version", type=int, required=True,
                        help="ChEBI ontology version (e.g. 248).")
+    sp_pd.add_argument("--include_two_star", action="store_true",
+                       help="Include classes with 2-star or 3-star annotation status (default: Only 3-star classes).")
     sp_pd.add_argument("--data_dir", type=str, default=None,
                        help="Root directory for raw and cached files "
                             "(default: data/chebi_v{version}).")
