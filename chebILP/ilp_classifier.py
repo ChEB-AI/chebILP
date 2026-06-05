@@ -9,7 +9,7 @@ import tqdm
 from typing import Literal, Optional
 
 from chebILP.ilp_path_manager import get_bias_path, get_bk_path, get_exs_path
-from chebILP.ilp_problem_builder import AVAILABLE_PREDICATE_SETS
+from chebILP.utils import AVAILABLE_PREDICATE_SETS
 
 def log_subprocess_output(log_dir, phase, result):
     """Write subprocess stdout/stderr to the run log with timestamp."""

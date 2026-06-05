@@ -1,6 +1,4 @@
 import os
-import subprocess
-import json
 from typing import Literal
 import networkx as nx
 
@@ -10,14 +8,13 @@ import tqdm
 from chebILP.mol_to_fol import mol_to_fol_atoms
 from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
 import pandas as pd
-import time
+from chebILP.utils import AVAILABLE_PREDICATE_SETS
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
 from chebILP.clingo_eval import evaluate_with_clingo
 
 
 CHEBI_FG_RULES_PATH = os.path.join("data", "chebi_fg_rules_from_smiles.pl")
 CHEBI_FG_LEARNED_RULES_PATH = os.path.join("data", "chebi_fg_learned_rules.pl")
-AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "chebi_fg_rules", "chebi_fg_learned_rules"]
 
 class ILPProblemBuilder:
 

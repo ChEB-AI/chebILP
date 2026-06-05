@@ -1,8 +1,10 @@
 
-
+from typing import Literal
 import sys
 from contextlib import contextmanager
 from datetime import datetime
+
+AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "chebi_fg_rules", "chebi_fg_learned_rules"]
 
 
 def split_prolog_literals(body):

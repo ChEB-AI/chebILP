@@ -1,15 +1,9 @@
 import os
-from typing import Literal
 import typing
-import json
 import time
 import argparse
 
-from chebILP.ilp_problem_builder import ILPProblemBuilder, AVAILABLE_PREDICATE_SETS
-from chebILP.learn_fgs import FGILPProblemBuilder
-from chebILP.ilp_classifier import run_ilp_training_subprocess
-from chebILP.ilp_path_manager import get_exs_path, get_bk_path, get_bias_path
-from chebILP.utils import tee_output
+from chebILP.utils import tee_output, AVAILABLE_PREDICATE_SETS
 
 from chebILP.ilp_classifier import learn_chebi_classes
 
@@ -22,7 +16,9 @@ def _load_classes(labels_file: str) -> list[str]:
         return [line.strip() for line in f.readlines() if line.strip()]
 
 
-def _make_ilp_builder(args) -> ILPProblemBuilder:
+def _make_ilp_builder(args):
+    from chebILP.learn_fgs import FGILPProblemBuilder
+    from chebILP.ilp_problem_builder import ILPProblemBuilder
     if isinstance(args, dict):
         fg_mode = args["fg_mode"]
         chebi_split = args.get("chebi_split")
@@ -479,7 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ── ensemble_construct ───────────────────────────────────────────────
     sp_ec = subparsers.add_parser(
         "ensemble_construct",
-        help="(EXP-006) Perform model selection and generate the ILP predictions tensor.",
+        help="Perform model selection and generate the ILP predictions tensor.",
     )
     sp_ec.add_argument("--chebi_version", type=int, default=248)
     sp_ec.add_argument("--chebi_split", type=str, required=True,
@@ -505,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     # ── ensemble_aggregate ───────────────────────────────────────────────
     sp_ea = subparsers.add_parser(
         "ensemble_aggregate",
-        help="(EXP-006) Aggregate pre-computed DL and ILP tensors into ensemble predictions.",
+        help="Aggregate pre-computed DL and ILP tensors into ensemble predictions.",
     )
     sp_ea.add_argument("--chebi_version", type=int, default=248)
     sp_ea.add_argument("--dl_preds_npy", type=str, required=True,
