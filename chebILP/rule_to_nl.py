@@ -215,12 +215,12 @@ def _literal_to_nl(pred: str, args: list[str]) -> Optional[str]:
 
     if pred in _ELEMENT_NAMES:
         name = _ELEMENT_NAMES[pred]
-        article = 'an' if name[0] in 'aeiou' else 'a'
+        article = _get_a_an(name)
         return f"{args[0]} is {article} {name} atom"
 
     if re.fullmatch(r'b[A-Z]+', pred):
         bond_type = pred[1:].lower()
-        article = 'an' if bond_type[0] in 'aeiou' else 'a'
+        article = _get_a_an(bond_type)
         return f"{args[0]} has {article} {bond_type} bond to {args[1]}"
 
     if pred == 'has_bond_to':
@@ -295,6 +295,10 @@ def _clause_to_nl(literals: list[str], mol_var: str, var_map: dict[str, str]) ->
     return ". ".join(parts) + "."
 
 
+def _get_a_an(word: str) -> str:
+    return 'an' if word[0].lower() in 'aeiou' or word.startswith(('s-', '-f')) else 'a'
+
+
 def translate_rule(rule: str, chebi_graph=None) -> str:
     """
     Translate one or more ILP rule clauses to a natural language description.
@@ -325,7 +329,8 @@ def translate_rule(rule: str, chebi_graph=None) -> str:
             parent_names.append(pdata.get("name", f"CHEBI:{pid}"))
 
     if chebi_name and chebi_id:
-        header = f"A compound is a {chebi_name} (CHEBI:{chebi_id}) if it"
+        a = _get_a_an(chebi_name)
+        header = f"A compound is {a} {chebi_name} (CHEBI:{chebi_id}) if it"
     elif chebi_id:
         header = f"A compound is a CHEBI:{chebi_id} entity if it"
     else:
@@ -335,7 +340,8 @@ def translate_rule(rule: str, chebi_graph=None) -> str:
     label = ord('a')
 
     for pid, pname in zip(parent_ids, parent_names):
-        lines.append(f"({chr(label)}) is a {pname} (CHEBI:{pid}) AND")
+        a = _get_a_an(pname)
+        lines.append(f"({chr(label)}) is {a} {pname} (CHEBI:{pid}) AND")
         label += 1
 
     sorted_clauses = [_sort_clause_literals(lits, mol_var) for lits in clauses]

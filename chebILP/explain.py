@@ -7,7 +7,7 @@ from xclingo import XclingoControl
 
 from chebILP.ilp_problem_builder import build_background_chemlog
 from chebILP.utils import split_prolog_literals
-from chebILP.rule_to_nl import _ELEMENT_NAMES, _num_word, _sort_clause_literals
+from chebILP.rule_to_nl import _ELEMENT_NAMES, _num_word, _sort_clause_literals, _get_a_an
 
 
 def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
@@ -17,7 +17,7 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
         call = f"{pred_name}({A})"
         if pred_name.lower() in _ELEMENT_NAMES:
             name = _ELEMENT_NAMES[pred_name.lower()]
-            article = "an" if name[0] in "aeiou" else "a"
+            article = _get_a_an(name)
             return f'%!trace {{"% is {article} {name} atom", {A}}} {call}.'
         if pred_name == "charge0":
             return f'%!trace {{"% has no formal charge", {A}}} {call}.'
@@ -63,7 +63,7 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
             return f'%!trace {{"% has a bond to %", {A1}, {A2}}} {call}.'
         if re.fullmatch(r"b[A-Z]+", pred_name):
             bond_type = pred_name[1:].lower()
-            article = "an" if bond_type[0] in "aeiou" else "a"
+            article = _get_a_an(bond_type)
             return f'%!trace {{"% has {article} {bond_type} bond to %", {A1}, {A2}}} {call}.'
         return f'%!trace {{"% is related to % via {pred_name}", {A1}, {A2}}} {call}.'
 
@@ -293,12 +293,14 @@ def explain_molecule(
         for pid in chebi_graph.successors(chebi_id):
             pdata = dict(chebi_graph.nodes.get(pid, {}))
             pname = pdata.get("name", f"CHEBI:{pid}")
-            p_conditions.append(f"the molecule is a {pname} (CHEBI:{pid}, not verified)")
+            article = _get_a_an(pname)
+            p_conditions.append(f"the molecule is {article} {pname} (CHEBI:{pid}, not verified)")
 
     conditions = p_conditions + conditions
 
+    article = _get_a_an(class_name)
     if not satisfies:
-        full_text = f"The molecule is not a {class_name} (CHEBI:{chebi_id})"
+        full_text = f"The molecule is not {article} {class_name} (CHEBI:{chebi_id})"
     else:
-        full_text = f"The molecule is a {class_name} (CHEBI:{chebi_id}) because it fulfills the following conditions:\n" + "\n".join(f"- {c}" for c in conditions)
+        full_text = f"The molecule is {article} {class_name} (CHEBI:{chebi_id}) because it satisfies the following conditions:\n" + "\n".join(f"- {c}" for c in conditions)
     return satisfies, full_text, image
