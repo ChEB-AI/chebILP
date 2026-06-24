@@ -57,9 +57,9 @@ python -m chebILP prepare_dataset \
 
 This writes to `data/chebi_v248/`:
 - `chebi_graph.pkl` — hierarchy graph (networkx DiGraph)
-- `molecules.pkl` — molecule DataFrame (index = ChEBI ID)
-- `min50/labels.txt` — selected class IDs (one per line)
-- `min50/splits.csv` — molecule-level train/val/test split
+- `ChEBI25_3_STAR/molecules.pkl` — molecule DataFrame (index = ChEBI ID)
+- `ChEBI25_3_STAR/labels.txt` — selected class IDs (one per line)
+- `ChEBI25_3_STAR/splits.csv` — molecule-level train/val/test split
 
 **Step 2 — Build ILP example files** (positive/negative molecules per class):
 ```bash
