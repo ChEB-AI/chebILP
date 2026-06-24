@@ -15,6 +15,7 @@ def build_ilp_preds_tensor(
     mol_order: list[str],
     output_npy_path: str,
     output_meta_path: str,
+    label_timeout: float = 60.0,
 ) -> pd.DataFrame:
     """
     Evaluate ILP programs against every molecule in mol_order and save the
@@ -33,6 +34,7 @@ def build_ilp_preds_tensor(
         mol_order:        ordered list of molecule IDs to evaluate.
         output_npy_path:  destination .npy file for the boolean tensor.
         output_meta_path: destination JSON file for mol_order / class_labels.
+        label_timeout:    per-label Clingo solving timeout in seconds (default 60).
 
     Returns a boolean DataFrame (index=mol_order, columns=sorted class IDs).
     """
@@ -61,15 +63,17 @@ def build_ilp_preds_tensor(
     if missing:
         print(f"  {missing} molecules missing from molecules_df — predicted False")
 
-    all_rules = [line for prog in programs.values() for line in prog.split("\n") if line.strip()]
-    all_target_labels = [f"chebi_{cls_id}" for cls_id in ilp_class_ids]
-
     print("Running Clingo for all ILP classes...")
     all_positives: dict[str, list[str]] = {}
-    for target_label in tqdm.tqdm(all_target_labels, desc="Clingo evaluation"):
-        rules = [line for line in all_rules if line.startswith(f"{target_label}(")]
+    for cls_id in tqdm.tqdm(ilp_class_ids, desc="Clingo evaluation"):
+        target_label = f"chebi_{cls_id}"
+        # Use the full program for this class so that every rule needed to define the
+        # label (including auxiliary predicates) is included.
+        rules = [line for line in programs[cls_id].split("\n") if line.strip()]
         try:
-            positives = evaluate_with_clingo(rules, all_bg_facts, [target_label], present_mol_ids)
+            positives = evaluate_with_clingo(
+                rules, all_bg_facts, [target_label], present_mol_ids, timeout=label_timeout
+            )
         except Exception as e:
             print(f"Clingo evaluation failed: {e}")
             positives = {}
@@ -79,7 +83,7 @@ def build_ilp_preds_tensor(
     tensor = np.zeros((n_mols, n_classes), dtype=bool)
     for col_idx, cls_id in enumerate(ilp_class_ids):
         label = f"chebi_{cls_id}"
-        for mol_id in positives.get(label, []):
+        for mol_id in all_positives.get(label, []):
             if mol_id in mol_idx:
                 tensor[mol_idx[mol_id], col_idx] = True
 
@@ -89,6 +93,77 @@ def build_ilp_preds_tensor(
     print(f"Saved ILP predictions tensor: {output_npy_path} ({n_mols} × {n_classes})")
 
     return pd.DataFrame(tensor, index=mol_order, columns=ilp_class_ids)
+
+
+def predict_smiles(
+    smiles_list: list[str],
+    rules_file: str,
+    target_predicates: list[str],
+    verbose: bool = False,
+) -> list[dict]:
+    """
+    Predict which target predicates each molecule (given as a SMILES string) satisfies.
+
+    Runs the same evaluation as ``test`` (build background knowledge, run the rule set
+    through Clingo, collect the target predicates entailed for the molecule), but it does
+    not depend on a previous run directory or pre-built problem files: background knowledge
+    is built from scratch for the supplied SMILES instead of running a validation/test split.
+
+    Each molecule is evaluated in its own Clingo run so that the time it takes can be
+    recorded individually.
+
+    Args:
+        smiles_list:       SMILES strings of the molecules to classify.
+        rules_file:        Path to a file containing one or more logic programs
+                           (Prolog/ASP rule clauses). Comment (``%``) and blank lines
+                           are ignored.
+        target_predicates: Head predicate names to check, e.g. ``"chebi_35341"``.
+        verbose:           If True, print the satisfied predicates for each molecule.
+
+    Returns:
+        list of dicts, one per input SMILES, each with keys:
+          - ``"SMILES"``: the input SMILES string.
+          - ``"labels"``: list of target predicates the molecule satisfies (empty if none
+            or if the SMILES is invalid).
+          - ``"time"``: time (seconds) the Clingo evaluation took, or None for invalid SMILES.
+    """
+    from rdkit import Chem
+    from chebILP.ilp_problem_builder import build_background_chemlog
+    from chebILP.clingo_eval import evaluate_with_clingo
+
+    with open(rules_file, "r") as f:
+        rules = [line.strip() for line in f if line.strip() and not line.strip().startswith("%")]
+
+    results: list[dict] = []
+    for smiles in smiles_list:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            print(f"Invalid SMILES (skipped): {smiles!r}")
+            results.append({"SMILES": smiles, "labels": [], "time": None})
+            continue
+
+        mol_id = "m0"
+        mol_df = pd.DataFrame([{"mol": mol}], index=[mol_id])
+        background_facts, _ = build_background_chemlog(mol_df)
+
+        start_time = time.perf_counter()
+        try:
+            positives = evaluate_with_clingo(rules, background_facts, target_predicates, [mol_id])
+        except Exception as e:
+            print(f"Clingo evaluation failed for {smiles!r}: {e}")
+            positives = {}
+        elapsed = time.perf_counter() - start_time
+
+        labels = [target for target in target_predicates if mol_id in positives.get(target, [])]
+        results.append({"SMILES": smiles, "labels": labels, "time": elapsed})
+
+    if verbose:
+        for entry in results:
+            labels = entry["labels"]
+            time_str = f"{entry['time']:.3f}s" if entry["time"] is not None else "n/a"
+            print(f"{entry['SMILES']} [{time_str}]: {', '.join(labels) if labels else '(none)'}")
+
+    return results
 
 
 def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, results_dir, selection_mode: Optional[str], selection_k: Optional[int], test_on: Literal["validation", "test"] = "test", verbose: bool = False, **kwargs):
