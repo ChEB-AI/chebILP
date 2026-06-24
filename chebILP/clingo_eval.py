@@ -14,7 +14,7 @@ def filter_impossible_rules(rules: list[str], predicates_in_bk: list[str]):
     print(f"Filtered out {len(rules) - len(rules_filtered)} impossible rules. Remaining rules: {len(rules_filtered)}")
     return rules_filtered
 
-def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_labels: list[int], examples: list, predicates_in_bk: list[str]|None=None):
+def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_labels: list[str], examples: list, predicates_in_bk: list[str]|None=None):
     import clingo
 
     if predicates_in_bk is not None:

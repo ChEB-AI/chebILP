@@ -53,6 +53,7 @@ def build_ilp_preds_tensor(
         mol_row = molecules_df[molecules_df.index == mol_id].dropna(subset=["mol"])
         if mol_row.empty:
             missing += 1
+            print(f"  Molecule {mol_id} missing from molecules_df — predicted False")
         else:
             lines, _ = build_background_chemlog(mol_row)
             all_bg_facts.extend(lines)
@@ -64,11 +65,15 @@ def build_ilp_preds_tensor(
     all_target_labels = [f"chebi_{cls_id}" for cls_id in ilp_class_ids]
 
     print("Running Clingo for all ILP classes...")
-    try:
-        positives = evaluate_with_clingo(all_rules, all_bg_facts, all_target_labels, present_mol_ids)
-    except Exception as e:
-        print(f"Clingo evaluation failed: {e}")
-        positives = {}
+    all_positives: dict[str, list[str]] = {}
+    for target_label in tqdm.tqdm(all_target_labels, desc="Clingo evaluation"):
+        rules = [line for line in all_rules if line.startswith(f"{target_label}(")]
+        try:
+            positives = evaluate_with_clingo(rules, all_bg_facts, [target_label], present_mol_ids)
+        except Exception as e:
+            print(f"Clingo evaluation failed: {e}")
+            positives = {}
+        all_positives[target_label] = positives.get(target_label, [])
 
     mol_idx = {mol_id: i for i, mol_id in enumerate(mol_order)}
     tensor = np.zeros((n_mols, n_classes), dtype=bool)
