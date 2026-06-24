@@ -2,17 +2,16 @@
 Dataset preparation: download ChEBI data, build and cache the hierarchy graph
 and molecule DataFrame, select label classes, and create train/val/test splits.
 
-Typical usage (CLI):
-    python -m chebILP prepare_dataset --chebi_version 248 --min_pos_samples 50
+Example usage:
+    python -m chebILP prepare_dataset --chebi_version 248 --min_pos_samples 25
 
 After running, the following files are ready for use by the ILP pipeline:
-    data/chebi_v248/chebi_graph.pkl          – networkx DiGraph (hierarchy subgraph)
-    data/chebi_v248/molecules.pkl            – pandas DataFrame  (index = ChEBI ID)
-    data/chebi_v248/min50/labels.txt         – one selected class ID per line
-    data/chebi_v248/min50/splits.csv         – mol_id,split  (train/validation/test)
+    data/chebi_v248/chebi_graph.pkl                 – networkx DiGraph (hierarchy subgraph)
+    data/chebi_v248/ChEBI25_3_STAR/molecules.pkl    – pandas DataFrame  (index = ChEBI ID)
+    data/chebi_v248/ChEBI25_3_STAR/labels.txt       – one selected class ID per line
+    data/chebi_v248/ChEBI25_3_STAR/splits.csv       – mol_id,split  (train/validation/test)
 """
 
-import argparse
 import os
 import pickle
 from typing import Optional
