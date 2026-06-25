@@ -10,6 +10,7 @@ AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "chebi_fg
 def split_prolog_literals(body):
     """Split a Prolog rule body into literals, respecting parenthesis depth."""
     literals, current, depth = [], [], 0
+    curly_depth = 0
     for char in body:
         if char == '(':
             depth += 1
@@ -17,7 +18,13 @@ def split_prolog_literals(body):
         elif char == ')':
             depth -= 1
             current.append(char)
-        elif char == ',' and depth == 0:
+        elif char == '{':
+            curly_depth += 1
+            current.append(char)
+        elif char == '}':
+            curly_depth -= 1
+            current.append(char)
+        elif char == ',' and depth == 0 and curly_depth == 0:
             literals.append(''.join(current).strip())
             current = []
         else:

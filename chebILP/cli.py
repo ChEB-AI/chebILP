@@ -162,7 +162,7 @@ def _handle_build_ilp_preds_for_ensemble(args):
     print(f"Building predictions for {len(mol_ids)} '{args.predict_on}' molecules")
 
     molecules_pkl = getattr(args, "molecules_path", None) or os.path.join(
-        "data", f"chebi_v{args.chebi_version}", "molecules.pkl"
+        "data", f"chebi_v{args.chebi_version}", "ChEBI25_3_STAR", "molecules.pkl"
     )
     print(f"Loading molecules from {molecules_pkl}...")
     molecules_df = pd.read_pickle(molecules_pkl)
@@ -171,7 +171,7 @@ def _handle_build_ilp_preds_for_ensemble(args):
     output_npy = os.path.join(args.run_dir, f"full_{prefix}_preds.npy")
     output_meta = os.path.join(args.run_dir, f"full_{prefix}_preds_metadata.json")
 
-    build_ilp_preds_tensor(programs, molecules_df, mol_ids, output_npy, output_meta)
+    build_ilp_preds_tensor(programs, molecules_df, mol_ids, output_npy, output_meta, label_timeout=args.label_timeout)
 
 
 def _handle_ensemble_construct(args):
@@ -322,6 +322,34 @@ def _handle_test(args):
         test_chebi_classes(args.run_to_evaluate, config["problem_dir"], config["predicate_set"], results_dir, selection_mode=config["selection_mode"], selection_k=config["selection_k"], test_on=args.test_on, verbose=args.verbose)
 
 
+def _handle_predict(args):
+    import json
+    from chebILP.test import predict_smiles
+
+    smiles_list = args.smiles
+    if smiles_list is None:
+        with open(args.smiles_file, "r") as f:
+            smiles_list = [line.strip() for line in f if line.strip()]
+
+    target_predicates = args.target_predicates
+    if target_predicates is None:
+        with open(args.targets_file, "r") as f:
+            target_predicates = [line.strip() for line in f if line.strip()]
+
+    results = predict_smiles(
+        smiles_list=smiles_list,
+        rules_file=args.rules_file,
+        target_predicates=target_predicates,
+        verbose=args.verbose,
+    )
+
+    if args.output:
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        with open(args.output, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"Predictions saved to {args.output}")
+
+
 # ── Argument parsing ─────────────────────────────────────────────────────────
 
 
@@ -452,6 +480,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp_test.add_argument("--verbose", action="store_true", help="Log classification result for up to 10 positive and negative samples per class.")
     sp_test.set_defaults(func=_handle_test)
 
+    # ── predict ──────────────────────────────────────────────────────────
+    sp_predict = subparsers.add_parser(
+        "predict",
+        help="Predict target predicates for a list of SMILES using a rule set, "
+             "without depending on a previous run or split.",
+    )
+    smiles_group_pred = sp_predict.add_mutually_exclusive_group(required=True)
+    smiles_group_pred.add_argument("--smiles", type=str, nargs="+", help="One or more SMILES strings to classify.")
+    smiles_group_pred.add_argument("--smiles_file", type=str, help="File with one SMILES string per line.")
+    sp_predict.add_argument("--rules_file", type=str, required=True, help="File containing logic programs (rule clauses).")
+    targets_group_pred = sp_predict.add_mutually_exclusive_group(required=True)
+    targets_group_pred.add_argument("--target_predicates", type=str, nargs="+", help="Target head predicate names (e.g. chebi_35341).")
+    targets_group_pred.add_argument("--targets_file", type=str, help="File with one target predicate name per line.")
+    sp_predict.add_argument("--output", type=str, default=None, help="Optional path to save predictions as JSON.")
+    sp_predict.add_argument("--verbose", action="store_true", help="Print satisfied predicates per molecule.")
+    sp_predict.set_defaults(func=_handle_predict)
+
     # ── build_ilp_preds_for_ensemble ─────────────────────────────────────
     sp_bipe = subparsers.add_parser(
         "build_ilp_preds_for_ensemble",
@@ -469,7 +514,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp_bipe.add_argument("--chebi_version", type=int, default=248,
                          help="ChEBI version; used to derive default molecules_path.")
     sp_bipe.add_argument("--molecules_path", type=str, default=None,
-                         help="Path to molecules.pkl (default: data/chebi_v{version}/molecules.pkl).")
+                         help="Path to molecules.pkl (default: data/chebi_v{version}/ChEBI25_3_STAR/molecules.pkl).")
+    sp_bipe.add_argument("--label_timeout", type=float, default=60.0,
+                         help="Per-label Clingo solving timeout in seconds (default: 60).")
     sp_bipe.set_defaults(func=_handle_build_ilp_preds_for_ensemble)
 
     # ── ensemble_construct ───────────────────────────────────────────────

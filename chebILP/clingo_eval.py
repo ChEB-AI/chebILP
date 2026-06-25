@@ -14,7 +14,7 @@ def filter_impossible_rules(rules: list[str], predicates_in_bk: list[str]):
     print(f"Filtered out {len(rules) - len(rules_filtered)} impossible rules. Remaining rules: {len(rules_filtered)}")
     return rules_filtered
 
-def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_labels: list[int], examples: list, predicates_in_bk: list[str]|None=None):
+def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_labels: list[str], examples: list, predicates_in_bk: list[str]|None=None, timeout: float|None=None):
     import clingo
 
     if predicates_in_bk is not None:
@@ -32,9 +32,19 @@ def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_l
     ctl.ground([("base", [])])
 
     atoms = set()
-    with ctl.solve(yield_=True) as handle:
-        for model in handle:
+    if timeout is None:
+        with ctl.solve(yield_=True) as handle:
+            for model in handle:
+                atoms.update(str(atom) for atom in model.symbols(atoms=True))
+    else:
+        def _on_model(model):
             atoms.update(str(atom) for atom in model.symbols(atoms=True))
+
+        with ctl.solve(on_model=_on_model, async_=True) as handle:
+            finished = handle.wait(timeout)
+            if not finished:
+                handle.cancel()
+                print(f"Clingo solving timed out after {timeout}s")
     positives = dict()
     for target_label in target_labels:
         for example in examples:
