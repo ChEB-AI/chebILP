@@ -84,6 +84,24 @@ def mol_to_fol_atoms(mol: Chem.Mol):
             stereo_pred = f"b{bond.GetStereo().name}"
             atom_extensions.setdefault(stereo_pred, []).extend([(left, right), (right, left)])
 
+    # Rings (any size).
+    #   ring{N}(A1, …, AN) – A1…AN form an N-membered ring, listed in cyclic
+    #                        order. Exactly one fact per ring (no rotations or
+    #                        reflections).
+    #   in_ring{N}(A)      – A belongs to some N-membered ring.
+    #   in_ring(A)         – A belongs to some ring of any size.
+    in_ring_atoms: set[int] = set()
+    in_ringN_atoms: dict[int, set[int]] = {}
+    for ring in mol.GetRingInfo().AtomRings():
+        n = len(ring)
+        atom_extensions.setdefault(f"ring{n}", []).append(tuple(ring))
+        in_ring_atoms.update(ring)
+        in_ringN_atoms.setdefault(n, set()).update(ring)
+    if in_ring_atoms:
+        atom_extensions["in_ring"] = sorted(in_ring_atoms)
+    for n, atoms in in_ringN_atoms.items():
+        atom_extensions[f"in_ring{n}"] = sorted(atoms)
+
     # Steroid nucleus positions (steroid_1 … steroid_17)
     steroid_match = mol.GetSubstructMatch(_GONANE_PATTERN, useChirality=False)
     if steroid_match:

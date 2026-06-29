@@ -18,7 +18,7 @@ CHEBI_FG_LEARNED_RULES_PATH = os.path.join("data", "chebi_fg_learned_rules.pl")
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms"):
+    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", max_vars=6, max_body=8, max_clauses=2):
         self.predicate_set = predicate_set
         self.problem_dir = os.path.join("data", "ilp_problems") if problem_dir is None else problem_dir
         os.makedirs(self.problem_dir, exist_ok=True)
@@ -272,16 +272,15 @@ def build_background_chemlog(rows):
                 predicate = "cip_code_" + predicate[-1].upper()
             if predicate in forbidden_predicates or not indices:
                 continue
-            is_binary = isinstance(indices[0], tuple)
+            is_tuple = isinstance(indices[0], tuple)
             if predicate not in lines_by_predicate:
                 lines_by_predicate[predicate] = []
             if predicate not in arities:
-                arities[predicate] = 2 if is_binary else 1
-            if is_binary:
-                for i, j in indices:
-                    lines_by_predicate[predicate].append(
-                        f"{predicate}({get_atom_id(i, row.Index)},{get_atom_id(j, row.Index)})."
-                    )
+                arities[predicate] = len(indices[0]) if is_tuple else 1
+            if is_tuple:
+                for args in indices:
+                    arg_str = ",".join(get_atom_id(a, row.Index) for a in args)
+                    lines_by_predicate[predicate].append(f"{predicate}({arg_str}).")
             else:
                 for idx in indices:
                     lines_by_predicate[predicate].append(f"{predicate}({get_atom_id(idx, row.Index)}).")
