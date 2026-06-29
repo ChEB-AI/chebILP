@@ -45,11 +45,11 @@ def run_ilp_training_subprocess(exs_file, bk_file, bias_file, settings_parameter
 import json
 import pickle
 import base64
-from popper.loop import learn_solution
+from popper.loop import popper
 from popper.util import Settings, format_prog
 
 settings = Settings(ex_file=r"{exs_file}", bk_file=r"{bk_file}", bias_file=r"{bias_file}", **{repr(settings_parameters)})
-prog, score, stats = learn_solution(settings)
+prog, score = popper(settings)
 prog_str = format_prog(prog) if prog else None
 
 result = {{"prog_str": prog_str, "score": list(score) if score else None}}
