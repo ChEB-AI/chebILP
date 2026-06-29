@@ -348,6 +348,8 @@ def _handle_predict(args):
         with open(args.output, "w") as f:
             json.dump(results, f, indent=2)
         print(f"Predictions saved to {args.output}")
+    else:
+        print(json.dumps(results, indent=2))
 
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
