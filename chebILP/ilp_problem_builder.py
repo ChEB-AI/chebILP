@@ -18,14 +18,11 @@ CHEBI_FG_LEARNED_RULES_PATH = os.path.join("data", "chebi_fg_learned_rules.pl")
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", max_vars=6, max_body=8, max_clauses=2):
+    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms"):
         self.predicate_set = predicate_set
         self.problem_dir = os.path.join("data", "ilp_problems") if problem_dir is None else problem_dir
         os.makedirs(self.problem_dir, exist_ok=True)
         self.muggleton = muggleton
-        self.max_vars = max_vars
-        self.max_body = max_body
-        self.max_clauses = max_clauses
 
         # --- Load pre-built ChEBI data -------------------------------------
         with open(chebi_graph_path, "rb") as f:

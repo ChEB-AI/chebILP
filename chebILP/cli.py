@@ -23,18 +23,12 @@ def _make_ilp_builder(args):
         fg_mode = args["fg_mode"]
         chebi_split = args.get("chebi_split")
         predicate_set = args["predicate_set"]
-        max_vars = int(args.get("max_vars", 6))
-        max_body = int(args.get("max_body", 8))
-        max_clauses = int(args.get("max_clauses", 2))
         chebi_graph_path = args.get("chebi_graph_path")
         molecules_path = args.get("molecules_path")
     else:
         fg_mode = args.fg_mode
         chebi_split = getattr(args, "chebi_split", None)
         predicate_set = args.predicate_set
-        max_vars = args.max_vars
-        max_body = args.max_body
-        max_clauses = args.max_clauses
         chebi_graph_path = getattr(args, "chebi_graph_path", None)
         molecules_path = getattr(args, "molecules_path", None)
 
@@ -45,9 +39,6 @@ def _make_ilp_builder(args):
             molecules_path=molecules_path,
             dataset_path=os.path.join("data", "chebi_fgs_dataset.pkl"),
             predicate_set=predicate_set,
-            max_vars=max_vars,
-            max_body=max_body,
-            max_clauses=max_clauses,
         )
     return ILPProblemBuilder(
         chebi_split=chebi_split,
@@ -55,9 +46,6 @@ def _make_ilp_builder(args):
         molecules_path=molecules_path,
         muggleton=False,
         predicate_set=predicate_set,
-        max_vars=max_vars,
-        max_body=max_body,
-        max_clauses=max_clauses,
     )
 
 
@@ -365,7 +353,7 @@ def _add_common_args(parser: argparse.ArgumentParser):
     parser.add_argument("--molecules_path", type=str, default=True,
                         help="Path to molecules.pkl.")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
-   
+
 
 def _handle_prepare_dataset(args):
     from chebILP.data_preparation import ChEBIDataset
@@ -478,7 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Evaluate learned programs on the test set using results from a previous run.",
     )
     sp_test.add_argument("--run_to_evaluate", type=str, required=True, help="Path to a previous run directory (must contain results.json and config.yml).")
-    sp_test.add_argument("--test_on", type=str, default="test", choices=["validation", "test"], help="Split to evaluate on: 'test' (default) or 'validation' (validation).")
+    sp_test.add_argument("--test_on", type=str, default="test", choices=["train", "validation", "test"], help="Split to evaluate on: 'test' (default), 'validation', or 'train'.")
     sp_test.add_argument("--verbose", action="store_true", help="Log classification result for up to 10 positive and negative samples per class.")
     sp_test.set_defaults(func=_handle_test)
 
