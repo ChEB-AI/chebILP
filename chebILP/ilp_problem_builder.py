@@ -180,7 +180,7 @@ class ILPProblemBuilder:
 
 
     def gather_samples_for_chebi_cls(self, target_id: str, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
-        descendants = list(self.hierarchy_graph.predecessors(target_id))
+        descendants = list(self.hierarchy_graph.predecessors(target_id)) + [target_id]
         # not all descendants are molecules (i.e., have a SMILES annotation) -> only take the ones that are in the samples_df (i.e. have a SMILES annotation and are in the 3_STAR subset)
 
         df_pos = self.molecules[[id in descendants for id in self.molecules.index]]
