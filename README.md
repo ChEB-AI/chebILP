@@ -76,7 +76,7 @@ python -m chebILP build_bk \
   --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
   --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
   --chebi_graph_path data/chebi_v248/chebi_graph.pkl \
-  --molecules_path data/chebi_v28/ChEBI25_3_STAR/molecules.pkl
+  --molecules_path data/chebi_v248/ChEBI25_3_STAR/molecules.pkl
 ```
 
 Steps 2 and 3 write files into `data/ilp_problems/` (one subdirectory per class). Available predicate sets: `atoms`, `chembl_fgs`, `chebi_fgs`, `chebi_fg_rules` and `chebi_fg_learned_rules`.
