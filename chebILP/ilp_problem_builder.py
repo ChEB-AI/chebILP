@@ -263,11 +263,10 @@ def build_background_chemlog(rows):
 
         atom_extensions, mol_extensions = mol_to_fol_atoms(row.mol)
 
-        forbidden_predicates = {"EQ", "atom", "*", "r", "r#", "r1"}
         for predicate, indices in atom_extensions.items():
             if predicate.startswith("cip_code_"):
                 predicate = "cip_code_" + predicate[-1].upper()
-            if predicate in forbidden_predicates or not indices:
+            if (predicate in {"EQ", "atom", "*", "r", "r#"} or (predicate.startswith("r") and predicate[1:].isdigit() and int(predicate[1:]) > 0) or not indices):
                 continue
             is_tuple = isinstance(indices[0], tuple)
             if predicate not in lines_by_predicate:
