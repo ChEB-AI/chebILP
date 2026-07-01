@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from typing import Callable, Literal
 
@@ -33,6 +34,15 @@ from rdkit import Chem
 
 AuxKind = Literal["atom_unary", "atom_binary", "molecule"]
 VALID_KINDS: set[str] = {"atom_unary", "atom_binary", "molecule"}
+
+# Default wall-clock budget (seconds) for a single predicate's ``extension(mol)``
+# call. LLM-generated programs occasionally contain pathological loops or
+# exponential substructure searches that would otherwise hang ``build_bk``.
+DEFAULT_AUX_TIMEOUT: float = 1.0
+
+
+class AuxiliaryPredicateTimeout(Exception):
+    """Raised when a predicate's ``extension(mol)`` exceeds its time budget."""
 
 
 @dataclass
@@ -44,6 +54,39 @@ class AuxiliaryPredicate:
     fn: Callable[[Chem.Mol], object]
     description: str = ""
     source_file: str = ""
+    # Set to ``True`` once the predicate has exceeded its timeout, so it is
+    # skipped for the remaining molecules of the same class instead of hanging
+    # on every one of them.
+    disabled: bool = False
+
+
+def _call_with_timeout(fn: Callable, mol, timeout: float | None):
+    """Run ``fn(mol)`` with a wall-clock ``timeout`` (seconds).
+
+    Uses a daemon thread so the call works on Windows (where ``signal.alarm``
+    is unavailable). If the call does not finish in time, ``AuxiliaryPredicateTimeout``
+    is raised; the worker thread is abandoned (it cannot be force-killed) but,
+    being a daemon, it will not keep the interpreter alive.
+    """
+    if timeout is None or timeout <= 0:
+        return fn(mol)
+
+    box: dict = {}
+
+    def _worker():
+        try:
+            box["value"] = fn(mol)
+        except BaseException as e:  # noqa: BLE001 - propagate to the caller thread
+            box["error"] = e
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise AuxiliaryPredicateTimeout(f"timed out after {timeout}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 def sanitize_predicate_name(raw_name: str) -> str:
@@ -150,42 +193,90 @@ def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[
     return predicates
 
 
-def apply_auxiliary_predicates(
-    predicates: list[AuxiliaryPredicate], mol: Chem.Mol
-) -> tuple[dict[str, list], set[str]]:
-    """Evaluate auxiliary predicates on one molecule.
+def _normalize_result(pred: AuxiliaryPredicate, result):
+    """Convert a predicate's raw ``extension`` result into BK-ready extensions.
 
-    Returns ``(atom_extensions, mol_extensions)`` in exactly the format produced
+    Returns ``("molecule", bool)``, ``("atom", list[int] | list[tuple])`` so the
+    caller can slot it into either the molecule- or atom-level extension maps.
+    """
+    if pred.kind == "molecule":
+        return "molecule", bool(result)
+    if pred.kind == "atom_unary":
+        return "atom", ([int(i) for i in result] if result else [])
+    # atom_binary
+    return "atom", ([(int(a), int(b)) for a, b in result] if result else [])
+
+
+def compute_auxiliary_extensions(
+    predicates: list[AuxiliaryPredicate],
+    mols: list[tuple[object, Chem.Mol]],
+    timeout: float | None = DEFAULT_AUX_TIMEOUT,
+) -> dict[object, tuple[dict[str, list], set[str]]]:
+    """Evaluate auxiliary predicates over many molecules at once.
+
+    ``mols`` is a list of ``(mol_id, mol)`` pairs. Returns a mapping
+    ``mol_id -> (atom_extensions, mol_extensions)`` in exactly the format produced
     by ``mol_to_fol_atoms`` so the results can be merged directly:
     - ``atom_extensions``: ``dict[name -> list[int]]`` (atom_unary) or
       ``dict[name -> list[tuple[int, int]]]`` (atom_binary).
     - ``mol_extensions``: ``set[name]`` for molecule-level predicates that hold.
 
-    Any predicate that raises is skipped for this molecule (logged once) so a
-    single buggy program cannot abort the whole background-knowledge build.
+    Each predicate's ``extension(mol)`` call is capped at ``timeout`` seconds
+    (pass ``None`` or a non-positive value to disable). A predicate that exceeds
+    the budget on *any* molecule is dropped **entirely**: it is marked
+    ``disabled`` and none of its facts are returned for any molecule, not even
+    the ones it had already been evaluated on successfully. This guarantees the
+    background knowledge never contains a partially-computed extension. Any
+    predicate that raises (without timing out) is merely skipped for the
+    offending molecule so a single buggy input cannot abort the whole build.
     """
-    atom_extensions: dict[str, list] = {}
-    mol_extensions: set[str] = set()
+    atom_ext_by_mol: dict[object, dict[str, list]] = {mol_id: {} for mol_id, _ in mols}
+    mol_ext_by_mol: dict[object, set[str]] = {mol_id: set() for mol_id, _ in mols}
 
     for pred in predicates:
-        try:
-            result = pred.fn(mol)
-        except Exception as e:
-            logging.warning(
-                "Auxiliary predicate %s crashed on a molecule, skipping: %s", pred.name, e
-            )
+        if pred.disabled:
+            # Already timed out on an earlier batch (e.g. a previous split);
+            # keep it dropped so the class stays internally consistent.
             continue
 
-        if pred.kind == "molecule":
-            if result:
-                mol_extensions.add(pred.name)
-        elif pred.kind == "atom_unary":
-            indices = [int(i) for i in result] if result else []
-            if indices:
-                atom_extensions[pred.name] = indices
-        elif pred.kind == "atom_binary":
-            pairs = [(int(a), int(b)) for a, b in result] if result else []
-            if pairs:
-                atom_extensions[pred.name] = pairs
+        # Buffer this predicate's results and only commit them once we know it
+        # survived every molecule, so a late timeout discards earlier successes.
+        pending_atom: dict[object, list] = {}
+        pending_mol: set[object] = set()
+        timed_out = False
 
-    return atom_extensions, mol_extensions
+        for mol_id, mol in mols:
+            try:
+                result = _call_with_timeout(pred.fn, mol, timeout)
+            except AuxiliaryPredicateTimeout as e:
+                pred.disabled = True
+                timed_out = True
+                logging.warning(
+                    "Auxiliary predicate %s %s; dropping it from the background knowledge "
+                    "(including molecules where it already succeeded).",
+                    pred.name,
+                    e,
+                )
+                break
+            except Exception as e:
+                logging.warning(
+                    "Auxiliary predicate %s crashed on a molecule, skipping: %s", pred.name, e
+                )
+                continue
+
+            level, value = _normalize_result(pred, result)
+            if level == "molecule":
+                if value:
+                    pending_mol.add(mol_id)
+            elif value:
+                pending_atom[mol_id] = value
+
+        if timed_out:
+            continue
+
+        for mol_id, ext in pending_atom.items():
+            atom_ext_by_mol[mol_id][pred.name] = ext
+        for mol_id in pending_mol:
+            mol_ext_by_mol[mol_id].add(pred.name)
+
+    return {mol_id: (atom_ext_by_mol[mol_id], mol_ext_by_mol[mol_id]) for mol_id, _ in mols}

@@ -6,7 +6,7 @@ import pickle
 
 import tqdm
 from chebILP.mol_to_fol import mol_to_fol_atoms
-from chebILP.auxiliary_predicates import load_auxiliary_predicates, apply_auxiliary_predicates
+from chebILP.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
 from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS
@@ -19,11 +19,13 @@ CHEBI_FG_LEARNED_RULES_PATH = os.path.join("data", "chebi_fg_learned_rules.pl")
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms"):
+    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT):
         self.predicate_set = predicate_set
         self.problem_dir = os.path.join("data", "ilp_problems") if problem_dir is None else problem_dir
         os.makedirs(self.problem_dir, exist_ok=True)
         self.muggleton = muggleton
+        # Per-call wall-clock budget for LLM-generated auxiliary predicates.
+        self.aux_timeout = aux_timeout
 
         # --- Load pre-built ChEBI data -------------------------------------
         with open(chebi_graph_path, "rb") as f:
@@ -105,7 +107,7 @@ class ILPProblemBuilder:
 
                 # standard bk is always added
                 prolog_lines = []
-                prolog_lines_atoms, body_predicates_atoms = build_background_muggleton(selected_rows) if self.muggleton else build_background_chemlog(selected_rows, aux_predicates=aux_predicates)
+                prolog_lines_atoms, body_predicates_atoms = build_background_muggleton(selected_rows) if self.muggleton else build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout)
                 prolog_lines += prolog_lines_atoms
                 body_predicates.update(body_predicates_atoms)
                 if self.predicate_set in ["chembl_fgs", "chebi_fgs"]:
@@ -261,10 +263,22 @@ def get_atom_id(atom: int, molecule_id):
     return "a" + str(molecule_id) + "_" + str(atom + 1)  # Prolog indices start at 1
 
 
-def build_background_chemlog(rows, aux_predicates=None):
+def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT):
     comments = []
     lines_by_predicate = {"has_atom": []}
     arities = {"has_atom": 2}  # hardcode has_atom predicate
+
+    # Evaluate LLM-generated auxiliary predicates up front over all molecules so
+    # that a predicate which times out on any single molecule can be dropped
+    # entirely (see compute_auxiliary_extensions) before any facts are emitted.
+    aux_ext_by_mol = {}
+    if aux_predicates:
+        aux_ext_by_mol = compute_auxiliary_extensions(
+            aux_predicates,
+            [(row.Index, row.mol) for row in rows.itertuples()],
+            timeout=aux_timeout,
+        )
+
     for row in rows.itertuples():
         for atom in row.mol.GetAtoms():
             atom_id = get_atom_id(atom.GetIdx(), row.Index)
@@ -275,7 +289,7 @@ def build_background_chemlog(rows, aux_predicates=None):
         # Merge LLM-generated auxiliary predicates. Their names are ``aux_``-prefixed,
         # so they never collide with the built-in extensions produced above.
         if aux_predicates:
-            aux_atom_ext, aux_mol_ext = apply_auxiliary_predicates(aux_predicates, row.mol)
+            aux_atom_ext, aux_mol_ext = aux_ext_by_mol.get(row.Index, ({}, set()))
             atom_extensions.update(aux_atom_ext)
             mol_extensions.update(aux_mol_ext)
 

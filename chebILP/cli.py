@@ -19,18 +19,21 @@ def _load_classes(labels_file: str) -> list[str]:
 def _make_ilp_builder(args):
     from chebILP.learn_fgs import FGILPProblemBuilder
     from chebILP.ilp_problem_builder import ILPProblemBuilder
+    from chebILP.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
     if isinstance(args, dict):
         fg_mode = args["fg_mode"]
         chebi_split = args.get("chebi_split")
         predicate_set = args["predicate_set"]
         chebi_graph_path = args.get("chebi_graph_path")
         molecules_path = args.get("molecules_path")
+        aux_timeout = args.get("aux_timeout", DEFAULT_AUX_TIMEOUT)
     else:
         fg_mode = args.fg_mode
         chebi_split = getattr(args, "chebi_split", None)
         predicate_set = args.predicate_set
         chebi_graph_path = getattr(args, "chebi_graph_path", None)
         molecules_path = getattr(args, "molecules_path", None)
+        aux_timeout = getattr(args, "aux_timeout", DEFAULT_AUX_TIMEOUT)
 
     if fg_mode:
         return FGILPProblemBuilder(
@@ -46,6 +49,7 @@ def _make_ilp_builder(args):
         molecules_path=molecules_path,
         muggleton=False,
         predicate_set=predicate_set,
+        aux_timeout=aux_timeout,
     )
 
 
@@ -424,6 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build background knowledge (bk.pl) and bias template (bias.pl) for the given ChEBI classes.",
     )
     _add_common_args(sp_bk)
+    sp_bk.add_argument("--aux_timeout", type=float, default=1.0, help="Timeout (seconds) for each auxiliary predicate's extension call (default: 1.0).")
     sp_bk.set_defaults(func=_handle_build_bk)
 
     # ── learn ────────────────────────────────────────────────────────────
