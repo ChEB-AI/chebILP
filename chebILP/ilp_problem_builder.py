@@ -6,6 +6,7 @@ import pickle
 
 import tqdm
 from chebILP.mol_to_fol import mol_to_fol_atoms
+from chebILP.auxiliary_predicates import load_auxiliary_predicates, apply_auxiliary_predicates
 from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS
@@ -83,6 +84,14 @@ class ILPProblemBuilder:
         
         for target_id in tqdm.tqdm(target_ids, desc="Building background knowledge for ChEBI classes"):
             print(f"Building background knowledge for ChEBI:{target_id}...")
+
+            # LLM-generated auxiliary predicates are specific to the target class,
+            # so they are loaded once per target and merged into the atom-level BK.
+            aux_predicates = None
+            if self.predicate_set == "llm_generated_fgs":
+                aux_predicates = load_auxiliary_predicates(target_id, problem_dir=self.problem_dir)
+                print(f"  Loaded {len(aux_predicates)} auxiliary predicate(s) for ChEBI:{target_id}")
+
             selected_ids_by_split = dict()
             prolog_lines_by_split = dict()
             body_predicates = set()
@@ -96,7 +105,7 @@ class ILPProblemBuilder:
 
                 # standard bk is always added
                 prolog_lines = []
-                prolog_lines_atoms, body_predicates_atoms = build_background_muggleton(selected_rows) if self.muggleton else build_background_chemlog(selected_rows)
+                prolog_lines_atoms, body_predicates_atoms = build_background_muggleton(selected_rows) if self.muggleton else build_background_chemlog(selected_rows, aux_predicates=aux_predicates)
                 prolog_lines += prolog_lines_atoms
                 body_predicates.update(body_predicates_atoms)
                 if self.predicate_set in ["chembl_fgs", "chebi_fgs"]:
@@ -252,7 +261,7 @@ def get_atom_id(atom: int, molecule_id):
     return "a" + str(molecule_id) + "_" + str(atom + 1)  # Prolog indices start at 1
 
 
-def build_background_chemlog(rows):
+def build_background_chemlog(rows, aux_predicates=None):
     comments = []
     lines_by_predicate = {"has_atom": []}
     arities = {"has_atom": 2}  # hardcode has_atom predicate
@@ -262,6 +271,13 @@ def build_background_chemlog(rows):
             lines_by_predicate["has_atom"].append(f"has_atom({row.Index},{atom_id}).")
 
         atom_extensions, mol_extensions = mol_to_fol_atoms(row.mol)
+
+        # Merge LLM-generated auxiliary predicates. Their names are ``aux_``-prefixed,
+        # so they never collide with the built-in extensions produced above.
+        if aux_predicates:
+            aux_atom_ext, aux_mol_ext = apply_auxiliary_predicates(aux_predicates, row.mol)
+            atom_extensions.update(aux_atom_ext)
+            mol_extensions.update(aux_mol_ext)
 
         for predicate, indices in atom_extensions.items():
             if predicate.startswith("cip_code_"):
