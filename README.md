@@ -79,7 +79,27 @@ python -m chebILP build_bk \
   --molecules_path data/chebi_v248/ChEBI25_3_STAR/molecules.pkl
 ```
 
-Steps 2 and 3 write files into `data/ilp_problems/` (one subdirectory per class). Available predicate sets: `atoms`, `chembl_fgs`, `chebi_fgs`, `chebi_fg_rules` and `chebi_fg_learned_rules`.
+Steps 2 and 3 write files into `data/ilp_problems/` (one subdirectory per class). Available predicate sets: `atoms`, `chembl_fgs`, `chebi_fgs`, `chebi_fg_rules`, `chebi_fg_learned_rules` and `llm_generated_fgs`.
+
+**Optional: LLM-generated auxiliary predicates (experimental)**
+
+The `llm_generated_fgs` predicate set augments the plain `atoms` predicates with
+class-specific *auxiliary predicates* invented by an LLM — either shortcuts for
+recurring functional groups or concepts that are hard to express with the atom/bond
+predicates (e.g. "molecule has exactly 40 carbons"). Each predicate is a small Python
+program (RDKit `Mol` → extension) stored under
+`data/ilp_problems/chebi_{id}/auxiliary_predicates/`.
+
+Generate them (requires `ANTHROPIC_API_KEY` in `.env`) before `build_bk`:
+```bash
+python -m chebILP.generate_auxiliary_predicates \
+  --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
+  --chebi_version 248 \
+  --n_predicates 8
+```
+Then run `build_bk` with `--predicate_set llm_generated_fgs`; the auxiliary
+predicates are merged into each class's background knowledge (predicate names are
+`aux_`-prefixed). Classes with no generated programs fall back to plain atom predicates.
 
 ---
 
