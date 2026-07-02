@@ -145,6 +145,21 @@ def _handle_build_ilp_preds_for_ensemble(args):
     programs = {cid: entry["program"] for cid, entry in results.items() if entry.get("program")}
     print(f"Loaded {len(programs)} ILP programs from {args.run_dir}")
 
+    # Recover which predicate set / problem dir the run used so the background knowledge
+    # matches what the programs were learned on. Explicit CLI flags override the config.
+    run_config = {}
+    config_path = os.path.join(args.run_dir, "config.yml")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                if ": " in line:
+                    key, value = line.strip().split(": ", 1)
+                    run_config[key] = value
+    predicate_set = args.predicate_set or run_config.get("predicate_set", "atoms")
+    problem_dir = args.problem_dir or run_config.get("problem_dir")
+    print(f"Using predicate_set='{predicate_set}'"
+          + (f", problem_dir='{problem_dir}'" if predicate_set == "llm_generated_fgs" else ""))
+
     mol_ids = []
     with open(args.chebi_split) as f:
         for line in f.readlines()[1:]:
@@ -163,7 +178,11 @@ def _handle_build_ilp_preds_for_ensemble(args):
     output_npy = os.path.join(args.run_dir, f"full_{prefix}_preds.npy")
     output_meta = os.path.join(args.run_dir, f"full_{prefix}_preds_metadata.json")
 
-    build_ilp_preds_tensor(programs, molecules_df, mol_ids, output_npy, output_meta, label_timeout=args.label_timeout)
+    build_ilp_preds_tensor(
+        programs, molecules_df, mol_ids, output_npy, output_meta,
+        predicate_set=predicate_set, aux_timeout=args.aux_timeout,
+        problem_dir=problem_dir, label_timeout=args.label_timeout,
+    )
 
 
 def _handle_ensemble_construct(args):
@@ -248,13 +267,17 @@ def _handle_ensemble_aggregate(args):
     import pickle as _pickle
     with open(os.path.join(data_dir, "chebi_graph.pkl"), "rb") as _f:
         chebi_graph = _pickle.load(_f)
+    
+    if trusted_model is not None and any(len(m) > 1 for m in trusted_model.values()):
+        raise ValueError("Not supported: multiple trusted models per class.")
+    single_trusted_model = {cls_id: models[0] for cls_id, models in trusted_model.items()} if trusted_model is not None else None
 
     aggregator = EnsembleAggregator(
         dl_preds=dl_preds,
         ilp_preds=ilp_preds,
         label_stats=labels,
         chebi_graph=chebi_graph,
-        trusted_model=trusted_model,
+        trusted_model=single_trusted_model,
         model_weights=model_weights_dict,
     )
 
@@ -512,6 +535,16 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Path to molecules.pkl (default: data/chebi_v{version}/ChEBI25_3_STAR/molecules.pkl).")
     sp_bipe.add_argument("--label_timeout", type=float, default=60.0,
                          help="Per-label Clingo solving timeout in seconds (default: 60).")
+    sp_bipe.add_argument("--predicate_set", type=str, default=None,
+                         choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
+                         help="Background-knowledge predicate set. Default: read from the run's config.yml "
+                              "(falling back to 'atoms'). Must match the set the programs were learned on.")
+    sp_bipe.add_argument("--problem_dir", type=str, default=None,
+                         help="ILP problem directory (only needed for the llm_generated_fgs predicate set to "
+                              "load auxiliary predicates). Default: read from the run's config.yml.")
+    sp_bipe.add_argument("--aux_timeout", type=float, default=None,
+                         help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
+                              "(llm_generated_fgs only). Default: library default.")
     sp_bipe.set_defaults(func=_handle_build_ilp_preds_for_ensemble)
 
     # ── ensemble_construct ───────────────────────────────────────────────

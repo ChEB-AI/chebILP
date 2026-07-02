@@ -490,8 +490,10 @@ class EnsembleAggregator:
                     counts[name] = counts.get(name, 0) + 1
             print("  Weighted model participation counts:", counts)
         else:
-            for m in self.trusted_model.values():
-                counts[m] = counts.get(m, 0) + 1
+            for model in self.trusted_model.values():
+                if model not in counts:
+                    counts[model] = 0
+                counts[model] = counts.get(model, 0) + 1
             print("  Trusted model counts:", counts)
 
 
