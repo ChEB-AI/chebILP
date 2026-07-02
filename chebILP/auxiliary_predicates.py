@@ -152,7 +152,7 @@ def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[
     """Load every auxiliary-predicate program for a ChEBI class.
 
     Programs live in ``<problem_dir>/chebi_{id}/auxiliary_predicates/*.py``.
-    Missing / empty directories yield an empty list (with a warning) rather than
+    Missing / empty directories yield an empty list (logged at debug level) rather than
     an error, so ``build_bk`` degrades gracefully to the plain atom predicates.
     Names are de-duplicated (first file wins) to keep the Prolog BK consistent.
     """
@@ -165,10 +165,11 @@ def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[
         if f.endswith(".py") and not f.startswith("_")
     )
     if not py_files:
-        logging.warning(
+        # Expected for classes that were never given auxiliary predicates; not a problem,
+        # so log at debug level to avoid spamming when scanning every class of a split.
+        logging.debug(
             "No auxiliary predicates found for CHEBI:%s in %s. "
-            "Falling back to plain atom predicates. "
-            "Run 'python -m chebILP.generate_auxiliary_predicates' first.",
+            "Falling back to plain atom predicates.",
             chebi_id,
             aux_dir,
         )
@@ -183,7 +184,7 @@ def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[
         if pred is None:
             continue
         if pred.name in seen:
-            logging.warning(
+            logging.debug(
                 "Duplicate auxiliary predicate name %s (from %s) skipped.", pred.name, path
             )
             continue
@@ -251,7 +252,9 @@ def compute_auxiliary_extensions(
             except AuxiliaryPredicateTimeout as e:
                 pred.disabled = True
                 timed_out = True
-                logging.warning(
+                # Expected for pathological predicates and repeated per molecule when
+                # extensions are computed one molecule at a time; log at debug level.
+                logging.debug(
                     "Auxiliary predicate %s %s; dropping it from the background knowledge "
                     "(including molecules where it already succeeded).",
                     pred.name,
@@ -259,7 +262,7 @@ def compute_auxiliary_extensions(
                 )
                 break
             except Exception as e:
-                logging.warning(
+                logging.debug(
                     "Auxiliary predicate %s crashed on a molecule, skipping: %s", pred.name, e
                 )
                 continue

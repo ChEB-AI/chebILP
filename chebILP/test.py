@@ -9,6 +9,13 @@ from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 
+
+def _silent_clingo_logger(code, message):
+    """Swallow Clingo's grounding messages.
+    """
+    pass
+
+
 def build_ilp_preds_tensor(
     programs: dict[str, str],
     molecules_df: pd.DataFrame,
@@ -69,91 +76,85 @@ def build_ilp_preds_tensor(
     if missing:
         print(f"  {missing} molecules missing from molecules_df — predicted False")
 
-    target_names = {f"chebi_{cls_id}": cls_id for cls_id in ilp_class_ids}
-    all_positives: dict[str, list[str]] = {name: [] for name in target_names}
+    # Column index per target label, and row index per molecule id.
+    col_of = {f"chebi_{cls_id}": j for j, cls_id in enumerate(ilp_class_ids)}
+    mol_idx = {mol_id: i for i, mol_id in enumerate(mol_order)}
+    tensor = np.zeros((n_mols, n_classes), dtype=bool)
 
+    # Parse-check every program once and join the valid ones into a single block; each
+    # program's only derived head is its unique chebi_{id} target, so they never interfere.
+    valid_programs = []
+    for cls_id in ilp_class_ids:
+        prog = "\n".join(line for line in programs[cls_id].split("\n") if line.strip())
+        try:
+            clingo.Control(logger=_silent_clingo_logger).add("t", [], prog)  # syntax check only
+            valid_programs.append(prog)
+        except RuntimeError as e:
+            print(f"  Skipping ChEBI:{cls_id} — failed to parse program: {e}")
+    programs_str = "\n".join(valid_programs)
+
+    # Auxiliary predicates (llm_generated_fgs) are molecule-independent definitions, so
+    # gather them once (first definition of each aux_ name wins, matching
+    # load_auxiliary_predicates' within-class de-duplication); their extensions are then
+    # computed per molecule inside the loop. Only keep predicates actually referenced by
+    # some program — computing the rest would just waste time per molecule.
+    aux_predicates = None
     if predicate_set == "llm_generated_fgs":
-        # LLM auxiliary predicates are class-specific and their aux_ names can clash
-        # across classes, so the BK cannot be shared and grounded once. Build the
-        # atom-level BK a single time and, per class, append only that class's
-        # auxiliary facts before evaluating its program on its own.
-        from chebILP.ilp_problem_builder import build_background_chemlog, format_aux_extensions
-        from chebILP.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions
-        from chebILP.clingo_eval import evaluate_with_clingo
+        import re
+        from chebILP.auxiliary_predicates import load_auxiliary_predicates
+        used_aux_names = set(re.findall(r"\baux_\w+", programs_str))
+        seen: dict[str, object] = {}
+        for cls_id in tqdm.tqdm(ilp_class_ids, desc="Loading auxiliary predicates"):
+            for pred in load_auxiliary_predicates(cls_id, problem_dir=problem_dir):
+                if pred.name in used_aux_names:
+                    seen.setdefault(pred.name, pred)
+        aux_predicates = list(seen.values())
+        print(f"Loaded {len(aux_predicates)} auxiliary predicate(s) used across "
+              f"{len(used_aux_names)} referenced name(s)")
 
-        print("Building shared atom-level background facts...")
-        base_facts, _ = build_background_chemlog(present_rows)
-        mols = [(row.Index, row.mol) for row in present_rows.itertuples()]
-
-        for cls_id in tqdm.tqdm(ilp_class_ids, desc="Clingo evaluation"):
-            target_label = f"chebi_{cls_id}"
-            aux_predicates = load_auxiliary_predicates(cls_id, problem_dir=problem_dir)
-            aux_facts = []
-            if aux_predicates:
-                aux_ext = compute_auxiliary_extensions(aux_predicates, mols, timeout=aux_timeout)
-                aux_facts = format_aux_extensions(aux_ext)
-            rules = [line for line in programs[cls_id].split("\n") if line.strip()]
-            try:
-                positives = evaluate_with_clingo(
-                    rules, base_facts + aux_facts, [target_label], present_mol_ids, timeout=label_timeout
-                )
-            except Exception as e:
-                print(f"Clingo evaluation failed for ChEBI:{cls_id}: {e}")
-                positives = {}
-            all_positives[target_label] = positives.get(target_label, [])
-    else:
-        print(f"Building shared background facts (predicate_set={predicate_set})...")
-        all_bg_facts = build_full_background(
-            present_rows, molecules_df, predicate_set=predicate_set, aux_timeout=aux_timeout,
+    # Molecules are independent, so evaluate them one at a time: this keeps each Clingo
+    # grounding tiny (one molecule's background knowledge + all programs) instead of
+    # grounding the whole split at once.
+    n_timeout = 0
+    n_error = 0
+    for row in tqdm.tqdm(present_rows.itertuples(), total=len(present_rows), desc="Molecules"):
+        row_df = present_rows.loc[[row.Index]]
+        bg_facts = build_full_background(
+            row_df, predicate_set=predicate_set,
+            aux_predicates=aux_predicates, aux_timeout=aux_timeout,
         )
-
-        # Evaluate every class in a single Clingo Control: the background knowledge is
-        # added and grounded only once (rather than re-parsing and re-grounding the whole
-        # split for each of the ~1500 classes). Every program's only derived head is its
-        # own unique chebi_{id} target, so the programs cannot interfere with one another —
-        # each class program is added as its own subprogram and a single solve over the
-        # combined (positive, non-recursive) program yields all per-class positives.
-        print("Running Clingo for all ILP classes (grounding background knowledge once)...")
-        ctl = clingo.Control()
-        ctl.add("bk", [], "\n".join(all_bg_facts))
-        parts = [("bk", [])]
-        for i, cls_id in enumerate(tqdm.tqdm(ilp_class_ids, desc="Adding programs")):
-            # Use the full program for this class so that every rule needed to define the
-            # label is included.
-            rules = "\n".join(line for line in programs[cls_id].split("\n") if line.strip())
-            part = f"p{i}"
-            try:
-                ctl.add(part, [], rules)
-                parts.append((part, []))
-            except RuntimeError as e:
-                print(f"  Skipping ChEBI:{cls_id} — failed to parse program: {e}")
-
-        print(f"Grounding background knowledge + {len(parts) - 1} programs...")
-        ctl.ground(parts)
-
-        print("Solving...")
+        fired: set[str] = set()
 
         def _on_model(model):
             for atom in model.symbols(atoms=True):
-                if atom.name in target_names and atom.arguments:
-                    all_positives[atom.name].append(str(atom.arguments[0]))
+                if atom.name in col_of:
+                    fired.add(atom.name)
 
-        if label_timeout and label_timeout > 0:
-            with ctl.solve(on_model=_on_model, async_=True) as handle:
-                finished = handle.wait(label_timeout)
-                if not finished:
-                    handle.cancel()
-                    print(f"Clingo solving timed out after {label_timeout}s — results may be incomplete")
-        else:
-            ctl.solve(on_model=_on_model)
+        try:
+            ctl = clingo.Control(logger=_silent_clingo_logger)
+            ctl.add("base", [], "\n".join(bg_facts) + "\n" + programs_str)
+            ctl.ground([("base", [])])
+            if label_timeout and label_timeout > 0:
+                with ctl.solve(on_model=_on_model, async_=True) as handle:
+                    if not handle.wait(label_timeout):
+                        handle.cancel()
+                        n_timeout += 1
+            else:
+                ctl.solve(on_model=_on_model)
+        except Exception as e:
+            n_error += 1
+            print(f"  Clingo evaluation failed for molecule {row.Index}: {e}")
+            continue
 
-    mol_idx = {mol_id: i for i, mol_id in enumerate(mol_order)}
-    tensor = np.zeros((n_mols, n_classes), dtype=bool)
-    for col_idx, cls_id in enumerate(ilp_class_ids):
-        label = f"chebi_{cls_id}"
-        for mol_id in all_positives.get(label, []):
-            if mol_id in mol_idx:
-                tensor[mol_idx[mol_id], col_idx] = True
+        i = mol_idx.get(str(row.Index))
+        if i is not None:
+            for name in fired:
+                tensor[i, col_of[name]] = True
+
+    if n_timeout:
+        print(f"  {n_timeout} molecule(s) hit the {label_timeout}s solving timeout — those rows may be incomplete")
+    if n_error:
+        print(f"  {n_error} molecule(s) failed to evaluate — predicted False")
 
     np.save(output_npy_path, tensor)
     with open(output_meta_path, "w") as f:

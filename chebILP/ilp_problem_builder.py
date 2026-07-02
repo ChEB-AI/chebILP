@@ -321,53 +321,24 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
     return comments + [line for lines in lines_by_predicate.values() for line in lines], [(pred, arities[pred]) for pred in arities.keys()]
 
 
-def format_aux_extensions(aux_ext_by_mol: dict) -> list[str]:
-    """Turn the output of ``compute_auxiliary_extensions`` into Prolog fact lines.
-
-    ``aux_ext_by_mol`` maps ``mol_id -> (atom_extensions, mol_extensions)`` exactly as
-    returned by :func:`compute_auxiliary_extensions`. This produces the same fact lines
-    that ``build_background_chemlog`` would emit for the merged auxiliary predicates, so
-    a shared atom-level BK can be built once and each class's ``aux_`` facts appended on
-    top without recomputing the (expensive) atom predicates per class.
-    """
-    lines: list[str] = []
-    for mol_id, (atom_ext, mol_ext) in aux_ext_by_mol.items():
-        for predicate, indices in atom_ext.items():
-            if not indices:
-                continue
-            if isinstance(indices[0], tuple):
-                for args in indices:
-                    arg_str = ",".join(get_atom_id(a, mol_id) for a in args)
-                    lines.append(f"{predicate}({arg_str}).")
-            else:
-                for idx in indices:
-                    lines.append(f"{predicate}({get_atom_id(idx, mol_id)}).")
-        for predicate in mol_ext:
-            lines.append(f"{predicate}({mol_id}).")
-    return lines
-
-
 def build_full_background(
     rows: pd.DataFrame,
-    molecules_df: pd.DataFrame,
     predicate_set: AVAILABLE_PREDICATE_SETS = "atoms",
     aux_predicates=None,
     aux_timeout: float = DEFAULT_AUX_TIMEOUT,
 ) -> list[str]:
-    """Build one flat background-knowledge fact list for every molecule in ``rows``.
+    """Build one flat background-knowledge fact list for the molecules in ``rows``.
 
-    Mirrors :meth:`ILPProblemBuilder.build_bk` for a single (whole-split) set of
-    molecules so that prediction tensors are evaluated against exactly the same BK the
-    programs were learned on, rather than always the plain ``atoms`` set. For the
-    ``chebi_fg_rules`` / ``chebi_fg_learned_rules`` sets the functional-group rule clauses
-    are added to the BK directly (rather than pre-evaluated into facts): the caller
-    grounds and solves the combined program once, which derives those predicates.
+    Mirrors :meth:`ILPProblemBuilder.build_bk` so prediction tensors are evaluated
+    against exactly the same BK the programs were learned on, rather than always the
+    plain ``atoms`` set. For the ``chebi_fg_rules`` / ``chebi_fg_learned_rules`` sets the
+    functional-group rule clauses are added to the BK directly (rather than pre-evaluated
+    into facts): the caller grounds and solves the combined program, which derives them.
 
-    ``molecules_df`` is the full molecule table (needed to derive functional-group data
-    for the ``chembl_fgs`` / ``chebi_fgs`` sets). ``aux_predicates`` are merged into the
-    atom-level BK for ``llm_generated_fgs``; because those are class-specific the caller
-    must build the BK once per class for that predicate set (see
-    :func:`format_aux_extensions` for the incremental alternative).
+    All work is scoped to ``rows``, so this can be called per molecule (e.g. to bound
+    Clingo grounding memory). ``aux_predicates`` (for ``llm_generated_fgs``) are the
+    name-deduplicated predicates gathered across all classes; their extensions are
+    evaluated on ``rows`` here.
     """
     prolog_lines, _ = build_background_chemlog(
         rows, aux_predicates=aux_predicates, aux_timeout=aux_timeout
@@ -375,7 +346,7 @@ def build_full_background(
     prolog_lines = list(prolog_lines)
 
     if predicate_set in ("chembl_fgs", "chebi_fgs"):
-        fg_data = get_chembl_fgs(molecules_df) if predicate_set == "chembl_fgs" else get_chebi_fgs(molecules_df)
+        fg_data = get_chembl_fgs(rows) if predicate_set == "chembl_fgs" else get_chebi_fgs(rows)
         fg_lines, _ = build_background_fg_data(fg_data, rows, source=predicate_set)
         prolog_lines += fg_lines
 
