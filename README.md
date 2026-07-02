@@ -146,9 +146,9 @@ Combine ILP rules with a deep learning (DL) model for hierarchical multi-label c
 **Step 1 — Build full ILP prediction tensors** (run once per ILP run, for the validation and/or test split):
 ```bash
 python -m chebILP build_ilp_preds_for_ensemble \
-  --run_dir data/results_val/run_20260101_120000 \
+  --run_dir data/results/run_20260101_120000 \
   --predict_on validation \
-  --chebi_split data/chebi_v248/ChEBI25_3_STAR/processed/splits.csv \
+  --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
   --chebi_version 248
 ```
 
@@ -157,11 +157,11 @@ This writes `full_val_preds.npy` and `full_val_preds_metadata.json` into the run
 **Step 2 — Model selection and ILP tensor assembly:**
 ```bash
 python -m chebILP ensemble_construct \
-  --chebi_split data/chebi_v248/ChEBI25_3_STAR/processed/splits.csv \
+  --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
   --dl_val_preds_npy data/preds/val_preds.npy \
   --dl_val_preds_meta data/preds/val_preds_metadata.json \
   --ilp_val_runs data/results_val/run_A data/results_val/run_B \
-  --label_stats data/chebi_v248/ChEBI25_3_STAR/processed/class_stats.csv \
+  --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
   --predict_on test \
   --output data/ensemble_predictions/ensemble
 ```

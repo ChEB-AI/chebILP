@@ -170,8 +170,8 @@ def _handle_ensemble_construct(args):
     """Perform model selection and generate the ILP predictions tensor."""
     from chebILP.ensemble_eval import EnsembleConstructor, load_dl_preds
 
-    label_stats = _load_label_stats(args.label_stats)
-    print(f"Label stats: {len(label_stats)} labels")
+    labels = _load_label_stats(args.labels_file)
+    print(f"Label stats: {len(labels)} labels")
 
     dl_val_preds = load_dl_preds(args.dl_val_preds_npy, args.dl_val_preds_meta)
     print(f"DL val predictions: {dl_val_preds.shape[0]} molecules x {dl_val_preds.shape[1]} classes")
@@ -185,7 +185,7 @@ def _handle_ensemble_construct(args):
     constructor = EnsembleConstructor(
         ilp_val_runs=ilp_val_run_dirs,
         dl_val_preds=dl_val_preds,
-        label_stats=label_stats,
+        label_stats=labels,
         chebi_graph=chebi_graph,
         predict_on=args.predict_on,
     )
@@ -220,7 +220,7 @@ def _handle_ensemble_aggregate(args):
     from chebILP.ensemble_eval import EnsembleAggregator, load_dl_preds, load_ilp_preds
     import numpy as np, json as _json, pandas as pd
 
-    label_stats = _load_label_stats(args.label_stats)
+    labels = _load_label_stats(args.labels_file)
 
     dl_preds = load_dl_preds(args.dl_preds_npy, args.dl_preds_meta)
     print(f"DL predictions: {dl_preds.shape[0]} molecules x {dl_preds.shape[1]} labels")
@@ -252,7 +252,7 @@ def _handle_ensemble_aggregate(args):
     aggregator = EnsembleAggregator(
         dl_preds=dl_preds,
         ilp_preds=ilp_preds,
-        label_stats=label_stats,
+        label_stats=labels,
         chebi_graph=chebi_graph,
         trusted_model=trusted_model,
         model_weights=model_weights_dict,
@@ -533,7 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Validation-run directories (output of 'test --test_on validation'). "
                             "Each must contain full_val_preds.npy + full_val_preds_metadata.json "
                             "and results.json (for ILP programs).")
-    sp_ec.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
+    sp_ec.add_argument("--labels_file", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "labels.txt"),
                        help="Class statistics CSV (label list + has_negatives flag).")
     sp_ec.add_argument("--output", type=str,
                        default=os.path.join("data", "ensemble_predictions", "ensemble_f1"),
@@ -556,8 +556,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Metadata JSON for --ilp_preds_npy.")
     sp_ea.add_argument("--trusted_models", type=str, required=True,
                        help="Trusted models CSV (_trusted_models.csv) or model weights CSV (_model_weights.csv) from ensemble_construct.")
-    sp_ea.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
-                       help="Class statistics CSV (label list + has_negatives flag).")
+    sp_ea.add_argument("--labels_file", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "labels.txt"),
+                       help="File containing the list of labels.")
     sp_ea.add_argument("--output", type=str,
                        default=os.path.join("data", "ensemble_predictions", "ensemble_predictions.npy"),
                        help="Output .npy path; a matching _metadata.json is written alongside.")
