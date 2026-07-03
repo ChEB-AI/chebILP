@@ -149,7 +149,7 @@ def _evaluate_molecule(payload):
         bg_facts = build_full_background(
             row_df, predicate_set=st["predicate_set"],
             aux_predicates=st["aux_predicates"], aux_timeout=st["aux_timeout"],
-            aux_failures=aux_failures,
+            aux_failures=aux_failures, fowl_smarts=st.get("fowl_smarts"),
         )
         if mol_id == "76440":
             print(f"DEBUG: Built background knowledge for molecule {mol_id}: {len(bg_facts)} facts")
@@ -279,13 +279,23 @@ def build_ilp_preds_tensor(
         print(f"{len(aux_specs)} distinct auxiliary predicate implementation(s) referenced "
               f"by programs")
 
+    # fowl predicates are class-specific (fowl_<cls_id>) and derived from a shared
+    # SMARTS table. Gather the patterns for the classes being predicted so the same
+    # facts the programs were learned on are emitted into each molecule's background.
+    fowl_smarts = None
+    if predicate_set == "fowl":
+        from chebILP.ilp_problem_builder import load_fowl_smarts
+        all_fowl_smarts = load_fowl_smarts()
+        fowl_smarts = {cls_id: all_fowl_smarts[cls_id] for cls_id in valid_programs if cls_id in all_fowl_smarts}
+        print(f"{len(fowl_smarts)} fowl SMARTS pattern(s) referenced by programs")
+
     programs_str = "\n".join(valid_programs.values())
 
     # Shared, read-only config handed to each molecule evaluation (main process for the
     # serial path, or every pool worker via the initializer).
     worker_state = dict(
         programs_str=programs_str, col_of=col_of, predicate_set=predicate_set,
-        aux_timeout=aux_timeout, label_timeout=label_timeout,
+        aux_timeout=aux_timeout, label_timeout=label_timeout, fowl_smarts=fowl_smarts,
     )
 
     # Ship mols as RDKit binary with all properties so nothing (stereo/CIP perception,
@@ -431,6 +441,15 @@ def predict_smiles(
                     seen.setdefault(pred.name, pred)
         aux_predicates = list(seen.values())
 
+    # fowl predicates are class-specific: gather the SMARTS patterns for the target
+    # classes so the background emits the fowl_<cls_id> facts the rules reference.
+    fowl_smarts = None
+    if predicate_set == "fowl":
+        from chebILP.ilp_problem_builder import load_fowl_smarts
+        all_fowl_smarts = load_fowl_smarts()
+        class_ids = [t[len("chebi_"):] for t in target_predicates if t.startswith("chebi_")]
+        fowl_smarts = {cls_id: all_fowl_smarts[cls_id] for cls_id in class_ids if cls_id in all_fowl_smarts}
+
     results: list[dict] = []
     for smiles in smiles_list:
         mol = Chem.MolFromSmiles(smiles)
@@ -444,6 +463,7 @@ def predict_smiles(
         background_facts = build_full_background(
             mol_df, predicate_set=predicate_set,
             aux_predicates=aux_predicates, aux_timeout=aux_timeout,
+            fowl_smarts=fowl_smarts,
         )
 
         start_time = time.perf_counter()

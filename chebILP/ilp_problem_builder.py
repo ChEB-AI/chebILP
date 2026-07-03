@@ -8,6 +8,7 @@ import tqdm
 from chebILP.mol_to_fol import mol_to_fol_atoms, mol_to_fol_fgs
 from chebILP.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
 from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
+from chebILP.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
@@ -16,6 +17,30 @@ from chebILP.clingo_eval import evaluate_with_clingo
 
 CHEBI_FG_RULES_PATH = os.path.join("data", "chebi_fg_rules_from_smiles.pl")
 CHEBI_FG_LEARNED_RULES_PATH = os.path.join("data", "chebi_fg_learned_rules.pl")
+# SMARTS patterns (one per ChEBI class that has a wildcard-bearing molecule) used
+# by the "fowl" predicate set, produced by fowl_predicates.build_fowl_smarts.
+FOWL_SMARTS_PATH = os.path.join("data", "fowl_smarts.csv")
+
+
+def load_fowl_smarts(path=FOWL_SMARTS_PATH) -> dict[str, str]:
+    """Load the fowl SMARTS CSV (``chebi_id,SMARTS``) into ``{chebi_id: smarts}``.
+
+    Returns an empty dict if the file is missing so ``build_bk`` degrades to the
+    plain atom predicates for classes without a fowl pattern. Only a subset of
+    classes have an entry (those whose molecule carries a ``*``/R wildcard).
+    """
+    if not os.path.exists(path):
+        return {}
+    mapping: dict[str, str] = {}
+    with open(path, "r") as f:
+        next(f, None)  # skip header
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            chebi_id, smarts = line.split(",", 1)
+            mapping[chebi_id.strip()] = smarts.strip()
+    return mapping
 
 class ILPProblemBuilder:
 
@@ -94,6 +119,20 @@ class ILPProblemBuilder:
                 aux_predicates = load_auxiliary_predicates(target_id, problem_dir=self.problem_dir)
                 print(f"  Loaded {len(aux_predicates)} auxiliary predicate(s) for ChEBI:{target_id}")
 
+            # The fowl set adds a single class-specific predicate, fowl_<target_id>,
+            # derived from a SMARTS pattern, on top of the atom predicates. Not every
+            # class has a pattern; those fall back to the plain atom predicates.
+            fowl_smarts = None
+            if self.predicate_set == "fowl":
+                if not hasattr(self, "_fowl_smarts"):
+                    self._fowl_smarts = load_fowl_smarts()
+                smarts = self._fowl_smarts.get(target_id)
+                if smarts is None:
+                    print(f"  No fowl SMARTS for ChEBI:{target_id}; falling back to plain atom predicates.")
+                else:
+                    print(f"  Loaded fowl SMARTS for ChEBI:{target_id}: {smarts}")
+                    fowl_smarts = {target_id: smarts}
+
             selected_ids_by_split = dict()
             prolog_lines_by_split = dict()
             body_predicates = set()
@@ -107,7 +146,7 @@ class ILPProblemBuilder:
 
                 # standard bk is always added
                 prolog_lines = []
-                prolog_lines_atoms, body_predicates_atoms = build_background_muggleton(selected_rows) if self.muggleton else build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set)
+                prolog_lines_atoms, body_predicates_atoms = build_background_muggleton(selected_rows) if self.muggleton else build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set, fowl_smarts=fowl_smarts)
                 prolog_lines += prolog_lines_atoms
                 body_predicates.update(body_predicates_atoms)
                 if self.predicate_set in ["chembl_fgs", "chebi_fgs"]:
@@ -263,7 +302,7 @@ def get_atom_id(atom: int, molecule_id):
     return "a" + str(molecule_id) + "_" + str(atom + 1)  # Prolog indices start at 1
 
 
-def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT, aux_failures=None, predicate_set="atoms"):
+def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT, aux_failures=None, predicate_set="atoms", fowl_smarts=None):
     comments = []
     if predicate_set == "farm_fgs":
         lines_by_predicate = {"has_fg": []}
@@ -306,6 +345,21 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
             atom_extensions.update(aux_atom_ext)
             mol_extensions.update(aux_mol_ext)
 
+        # fowl: class-specific SMARTS-match predicates (fowl_<chebi_id>) added on
+        # top of the atom predicates. Each match binds the pattern's wildcard
+        # atoms, so the arity equals the number of wildcards; the tuples are
+        # emitted as atom-id arguments by the extension loop below.
+        if fowl_smarts:
+            for cls_id, smarts in fowl_smarts.items():
+                predicate_name, _ = build_fowl_predicate(smarts, cls_id)
+                try:
+                    matches = calculate_fowl_predicate(smarts, row.mol)
+                except Exception as e:
+                    print(f"Warning: failed to compute {predicate_name} for CHEBI:{row.Index}: {e}")
+                    continue
+                if matches:
+                    atom_extensions.setdefault(predicate_name, []).extend(matches)
+
         for predicate, indices in {**atom_extensions, **fg_extensions}.items():
             if predicate.startswith("cip_code_"):
                 predicate = "cip_code_" + predicate[-1].upper()
@@ -341,6 +395,7 @@ def build_full_background(
     aux_predicates=None,
     aux_timeout: float = DEFAULT_AUX_TIMEOUT,
     aux_failures=None,
+    fowl_smarts=None,
 ) -> list[str]:
     """Build one flat background-knowledge fact list for the molecules in ``rows``.
 
@@ -357,7 +412,7 @@ def build_full_background(
     """
     prolog_lines, _ = build_background_chemlog(
         rows, aux_predicates=aux_predicates, aux_timeout=aux_timeout, aux_failures=aux_failures,
-        predicate_set=predicate_set,
+        predicate_set=predicate_set, fowl_smarts=fowl_smarts,
     )
     prolog_lines = list(prolog_lines)
 

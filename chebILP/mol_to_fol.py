@@ -141,7 +141,11 @@ def mol_to_fol_fgs(mol: Chem.Mol):
     from chebai_graph.preprocessing.reader.augmented_reader import AtomFGReader_WithFGEdges_NoGraphNode
     reader = AtomFGReader_WithFGEdges_NoGraphNode()
 
-    augmented_graph = reader._augment_graph_structure(mol)  
+    try:
+        augmented_graph = reader._augment_graph_structure(mol)  
+    except Exception as e:
+        print(f"Error occurred while augmenting graph structure: {e}")
+        return {}
 
     nodes = augmented_graph["node_info"]["fg_nodes"]
 
@@ -162,3 +166,4 @@ def mol_to_fol_fgs(mol: Chem.Mol):
         fg_extensions.setdefault("is_fg_neighbor", []).append((right, left))
 
     return fg_extensions
+
