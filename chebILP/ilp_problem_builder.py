@@ -5,7 +5,7 @@ import networkx as nx
 import pickle
 
 import tqdm
-from chebILP.mol_to_fol import mol_to_fol_atoms
+from chebILP.mol_to_fol import mol_to_fol_atoms, mol_to_fol_fgs
 from chebILP.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
 from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
 import pandas as pd
@@ -107,7 +107,7 @@ class ILPProblemBuilder:
 
                 # standard bk is always added
                 prolog_lines = []
-                prolog_lines_atoms, body_predicates_atoms = build_background_muggleton(selected_rows) if self.muggleton else build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout)
+                prolog_lines_atoms, body_predicates_atoms = build_background_muggleton(selected_rows) if self.muggleton else build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set)
                 prolog_lines += prolog_lines_atoms
                 body_predicates.update(body_predicates_atoms)
                 if self.predicate_set in ["chembl_fgs", "chebi_fgs"]:
@@ -263,15 +263,15 @@ def get_atom_id(atom: int, molecule_id):
     return "a" + str(molecule_id) + "_" + str(atom + 1)  # Prolog indices start at 1
 
 
-def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT, aux_failures=None):
+def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT, aux_failures=None, predicate_set="atoms"):
     comments = []
-    lines_by_predicate = {"has_atom": []}
-    arities = {"has_atom": 2}  # hardcode has_atom predicate
+    if predicate_set == "farm_fgs":
+        lines_by_predicate = {"has_fg": []}
+        arities = {"has_fg": 2}  # hardcode has_fg predicate
+    else:
+        lines_by_predicate = {"has_atom": []}
+        arities = {"has_atom": 2}  # hardcode has_atom predicate
 
-    # Evaluate LLM-generated auxiliary predicates up front over all molecules so
-    # that a predicate which times out on any single molecule can be dropped
-    # entirely (see compute_auxiliary_extensions) before any facts are emitted.
-    # ``aux_failures`` (if given) collects the names that could not be computed.
     aux_ext_by_mol = {}
     if aux_predicates:
         aux_ext_by_mol = compute_auxiliary_extensions(
@@ -282,11 +282,22 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
         )
 
     for row in rows.itertuples():
-        for atom in row.mol.GetAtoms():
-            atom_id = get_atom_id(atom.GetIdx(), row.Index)
-            lines_by_predicate["has_atom"].append(f"has_atom({row.Index},{atom_id}).")
+        atom_extensions, fg_extensions, mol_extensions = {}, {}, set()
+        if predicate_set == "farm_fgs":
+            # Functional-group level model: entities are FARM functional-group
+            # nodes rather than atoms. has_fg links the molecule to its FG nodes.
+            fg_extensions = mol_to_fol_fgs(row.mol)
+            node_ids = sorted({id for ids in fg_extensions.values()  for nid in ids for id in (nid if isinstance(nid, tuple) else (nid,))})  # flatten tuples
+            for node_id in node_ids:
+                fg_id = get_atom_id(node_id, row.Index)
+                lines_by_predicate["has_fg"].append(
+                    f"has_fg({row.Index},{fg_id}).")
+        else:
+            for atom in row.mol.GetAtoms():
+                atom_id = get_atom_id(atom.GetIdx(), row.Index)
+                lines_by_predicate["has_atom"].append(f"has_atom({row.Index},{atom_id}).")
 
-        atom_extensions, mol_extensions = mol_to_fol_atoms(row.mol)
+            atom_extensions, mol_extensions = mol_to_fol_atoms(row.mol)
 
         # Merge LLM-generated auxiliary predicates. Their names are ``aux_``-prefixed,
         # so they never collide with the built-in extensions produced above.
@@ -295,11 +306,12 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
             atom_extensions.update(aux_atom_ext)
             mol_extensions.update(aux_mol_ext)
 
-        for predicate, indices in atom_extensions.items():
+        for predicate, indices in {**atom_extensions, **fg_extensions}.items():
             if predicate.startswith("cip_code_"):
                 predicate = "cip_code_" + predicate[-1].upper()
             if (predicate in {"EQ", "atom", "*", "r", "r#"} or (predicate.startswith("r") and predicate[1:].isdigit() and int(predicate[1:]) > 0) or not indices):
                 continue
+        
             is_tuple = isinstance(indices[0], tuple)
             if predicate not in lines_by_predicate:
                 lines_by_predicate[predicate] = []
@@ -344,7 +356,8 @@ def build_full_background(
     evaluated on ``rows`` here.
     """
     prolog_lines, _ = build_background_chemlog(
-        rows, aux_predicates=aux_predicates, aux_timeout=aux_timeout, aux_failures=aux_failures
+        rows, aux_predicates=aux_predicates, aux_timeout=aux_timeout, aux_failures=aux_failures,
+        predicate_set=predicate_set,
     )
     prolog_lines = list(prolog_lines)
 

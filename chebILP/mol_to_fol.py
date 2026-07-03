@@ -134,3 +134,31 @@ def mol_to_fol_atoms(mol: Chem.Mol):
         mol_extensions.add("aliphatic")
 
     return atom_extensions, mol_extensions
+
+def mol_to_fol_fgs(mol: Chem.Mol):
+    # extract functional groups with the FARM algorithm
+
+    from chebai_graph.preprocessing.reader.augmented_reader import AtomFGReader_WithFGEdges_NoGraphNode
+    reader = AtomFGReader_WithFGEdges_NoGraphNode()
+
+    augmented_graph = reader._augment_graph_structure(mol)  
+
+    nodes = augmented_graph["node_info"]["fg_nodes"]
+
+    fg_extensions = {}
+
+    for node_id, node in nodes.items():
+        fg_type = node["FG"]
+        fg_extensions.setdefault(fg_type, []).append(node_id)
+        #ring_size = node["RING"]
+        #if ring_size != 0:
+        #    fg_extensions.setdefault(f"fg_ring{ring_size}", []).append(node_id)
+
+    for edge in augmented_graph["edge_info"]["atom_fg_lvl"]:
+        left, right = edge.split("_")
+        left = int(left)
+        right = int(right)
+        fg_extensions.setdefault("is_fg_neighbor", []).append((left, right))
+        fg_extensions.setdefault("is_fg_neighbor", []).append((right, left))
+
+    return fg_extensions
