@@ -16,6 +16,94 @@ def _silent_clingo_logger(code, message):
     pass
 
 
+# Per-process configuration for the molecule workers. Populated once (in the main
+# process for the serial path, or by each pool worker's initializer) so that the
+# large, read-only bits (all programs, auxiliary predicates) are not re-shipped or
+# re-parsed for every molecule.
+_WORKER_STATE: dict = {}
+
+
+def _load_used_aux_predicates(ilp_class_ids, used_aux_names, problem_dir):
+    """Load the auxiliary predicates actually referenced by some program.
+
+    First definition of each ``aux_`` name wins, matching
+    ``load_auxiliary_predicates``' within-class de-duplication.
+    """
+    from chebILP.auxiliary_predicates import load_auxiliary_predicates
+
+    seen: dict[str, object] = {}
+    for cls_id in ilp_class_ids:
+        for pred in load_auxiliary_predicates(cls_id, problem_dir=problem_dir):
+            if pred.name in used_aux_names:
+                seen.setdefault(pred.name, pred)
+    return list(seen.values())
+
+
+def _worker_init(state, aux_load_args):
+    """Pool initializer: stash the shared config and (re)load auxiliary predicates.
+
+    ``aux_load_args`` is ``(ilp_class_ids, used_aux_names, problem_dir)`` or ``None``.
+    The predicates' ``extension`` functions are ``exec``-compiled and therefore not
+    picklable, so each worker reloads them from disk rather than receiving them.
+    """
+    global _WORKER_STATE
+    _WORKER_STATE = dict(state)
+    _WORKER_STATE["aux_predicates"] = (
+        _load_used_aux_predicates(*aux_load_args) if aux_load_args is not None else None
+    )
+
+
+def _evaluate_molecule(payload):
+    """Evaluate every program against a single molecule.
+
+    ``payload`` is ``(mol_id, mol_binary)`` where ``mol_binary`` is the RDKit
+    ``Mol.ToBinary(AllProps)`` blob (kept picklable and property-complete across the
+    process boundary). Returns ``(mol_id, fired_names, status)`` with ``status`` one
+    of ``""`` (ok), ``"timeout"`` (partial result still returned) or ``"error: ..."``.
+    """
+    import clingo
+    import pandas as pd
+    from rdkit import Chem
+    from chebILP.ilp_problem_builder import build_full_background
+
+    mol_id, mol_binary = payload
+    st = _WORKER_STATE
+    row_df = pd.DataFrame({"mol": [Chem.Mol(mol_binary)]}, index=[mol_id])
+
+    try:
+        bg_facts = build_full_background(
+            row_df, predicate_set=st["predicate_set"],
+            aux_predicates=st["aux_predicates"], aux_timeout=st["aux_timeout"],
+        )
+    except Exception as e:  # noqa: BLE001
+        return mol_id, [], f"error: {e}"
+
+    col_of = st["col_of"]
+    fired: set[str] = set()
+
+    def _on_model(model):
+        for atom in model.symbols(atoms=True):
+            if atom.name in col_of:
+                fired.add(atom.name)
+
+    label_timeout = st["label_timeout"]
+    try:
+        ctl = clingo.Control(logger=_silent_clingo_logger)
+        ctl.add("base", [], "\n".join(bg_facts) + "\n" + st["programs_str"])
+        ctl.ground([("base", [])])
+        if label_timeout and label_timeout > 0:
+            with ctl.solve(on_model=_on_model, async_=True) as handle:
+                if not handle.wait(label_timeout):
+                    handle.cancel()
+                    return mol_id, sorted(fired), "timeout"
+        else:
+            ctl.solve(on_model=_on_model)
+    except Exception as e:  # noqa: BLE001
+        return mol_id, [], f"error: {e}"
+
+    return mol_id, sorted(fired), ""
+
+
 def build_ilp_preds_tensor(
     programs: dict[str, str],
     molecules_df: pd.DataFrame,
@@ -26,6 +114,7 @@ def build_ilp_preds_tensor(
     aux_timeout: float | None = None,
     problem_dir: str | None = None,
     label_timeout: float = 60.0,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     """
     Evaluate ILP programs against every molecule in mol_order and save the
@@ -52,13 +141,16 @@ def build_ilp_preds_tensor(
         problem_dir:      ILP problem directory (needed to load auxiliary
                           predicates for llm_generated_fgs).
         label_timeout:    Clingo solving timeout in seconds (default 60).
+        n_jobs:           number of worker processes to evaluate molecules in
+                          parallel. 1 (default) runs serially in-process; <= 0
+                          uses all available CPU cores. Molecules are independent,
+                          so this scales close to linearly with cores.
 
     Returns a boolean DataFrame (index=mol_order, columns=sorted class IDs).
     """
     import tqdm
     import clingo
     from chebILP.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
-    from chebILP.ilp_problem_builder import build_full_background
 
     if aux_timeout is None:
         aux_timeout = DEFAULT_AUX_TIMEOUT
@@ -94,62 +186,72 @@ def build_ilp_preds_tensor(
     programs_str = "\n".join(valid_programs)
 
     # Auxiliary predicates (llm_generated_fgs) are molecule-independent definitions, so
-    # gather them once (first definition of each aux_ name wins, matching
-    # load_auxiliary_predicates' within-class de-duplication); their extensions are then
-    # computed per molecule inside the loop. Only keep predicates actually referenced by
-    # some program — computing the rest would just waste time per molecule.
-    aux_predicates = None
+    # gather only the names actually referenced by some program — computing the rest
+    # would just waste time per molecule. The predicates themselves are loaded once per
+    # worker (their exec-compiled extension functions are not picklable, so they cannot
+    # be shipped from here); ``aux_load_args`` carries what a worker needs to reload them.
+    aux_load_args = None
     if predicate_set == "llm_generated_fgs":
         import re
-        from chebILP.auxiliary_predicates import load_auxiliary_predicates
         used_aux_names = set(re.findall(r"\baux_\w+", programs_str))
-        seen: dict[str, object] = {}
-        for cls_id in tqdm.tqdm(ilp_class_ids, desc="Loading auxiliary predicates"):
-            for pred in load_auxiliary_predicates(cls_id, problem_dir=problem_dir):
-                if pred.name in used_aux_names:
-                    seen.setdefault(pred.name, pred)
-        aux_predicates = list(seen.values())
-        print(f"Loaded {len(aux_predicates)} auxiliary predicate(s) used across "
-              f"{len(used_aux_names)} referenced name(s)")
+        aux_load_args = (ilp_class_ids, used_aux_names, problem_dir)
+        print(f"{len(used_aux_names)} auxiliary predicate name(s) referenced by programs")
 
-    # Molecules are independent, so evaluate them one at a time: this keeps each Clingo
-    # grounding tiny (one molecule's background knowledge + all programs) instead of
-    # grounding the whole split at once.
+    # Shared, read-only config handed to each molecule evaluation (main process for the
+    # serial path, or every pool worker via the initializer).
+    worker_state = dict(
+        programs_str=programs_str, col_of=col_of, predicate_set=predicate_set,
+        aux_timeout=aux_timeout, label_timeout=label_timeout,
+    )
+
+    # Ship mols as RDKit binary with all properties so nothing (stereo/CIP perception,
+    # cached descriptors) is lost when they cross the process boundary.
+    from rdkit import Chem
+    all_props = Chem.PropertyPickleOptions.AllProps
+    payloads = [
+        (str(row.Index), row.mol.ToBinary(all_props)) for row in present_rows.itertuples()
+    ]
+
     n_timeout = 0
     n_error = 0
-    for row in tqdm.tqdm(present_rows.itertuples(), total=len(present_rows), desc="Molecules"):
-        row_df = present_rows.loc[[row.Index]]
-        bg_facts = build_full_background(
-            row_df, predicate_set=predicate_set,
-            aux_predicates=aux_predicates, aux_timeout=aux_timeout,
-        )
-        fired: set[str] = set()
 
-        def _on_model(model):
-            for atom in model.symbols(atoms=True):
-                if atom.name in col_of:
-                    fired.add(atom.name)
-
-        try:
-            ctl = clingo.Control(logger=_silent_clingo_logger)
-            ctl.add("base", [], "\n".join(bg_facts) + "\n" + programs_str)
-            ctl.ground([("base", [])])
-            if label_timeout and label_timeout > 0:
-                with ctl.solve(on_model=_on_model, async_=True) as handle:
-                    if not handle.wait(label_timeout):
-                        handle.cancel()
-                        n_timeout += 1
-            else:
-                ctl.solve(on_model=_on_model)
-        except Exception as e:
+    def _apply(result):
+        nonlocal n_timeout, n_error
+        mol_id, fired, status = result
+        if status == "timeout":
+            n_timeout += 1
+        elif status.startswith("error"):
             n_error += 1
-            print(f"  Clingo evaluation failed for molecule {row.Index}: {e}")
-            continue
-
-        i = mol_idx.get(str(row.Index))
+            print(f"  Clingo evaluation failed for molecule {mol_id}: {status[len('error: '):]}")
+            return
+        i = mol_idx.get(mol_id)
         if i is not None:
             for name in fired:
                 tensor[i, col_of[name]] = True
+
+    # Molecules are independent, so each is evaluated against its own tiny Clingo
+    # grounding (one molecule's background knowledge + all programs). With n_jobs != 1
+    # these are farmed out to worker processes for near-linear speedup.
+    if n_jobs is None or n_jobs <= 0:
+        n_jobs = os.cpu_count() or 1
+
+    if n_jobs == 1:
+        _worker_init(worker_state, aux_load_args)
+        for payload in tqdm.tqdm(payloads, desc="Molecules"):
+            _apply(_evaluate_molecule(payload))
+    else:
+        from concurrent.futures import ProcessPoolExecutor
+
+        print(f"Evaluating {len(payloads)} molecules across {n_jobs} worker process(es)")
+        with ProcessPoolExecutor(
+            max_workers=n_jobs, initializer=_worker_init,
+            initargs=(worker_state, aux_load_args),
+        ) as ex:
+            for result in tqdm.tqdm(
+                ex.map(_evaluate_molecule, payloads, chunksize=8),
+                total=len(payloads), desc="Molecules",
+            ):
+                _apply(result)
 
     if n_timeout:
         print(f"  {n_timeout} molecule(s) hit the {label_timeout}s solving timeout — those rows may be incomplete")

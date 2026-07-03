@@ -182,6 +182,7 @@ def _handle_build_ilp_preds_for_ensemble(args):
         programs, molecules_df, mol_ids, output_npy, output_meta,
         predicate_set=predicate_set, aux_timeout=args.aux_timeout,
         problem_dir=problem_dir, label_timeout=args.label_timeout,
+        n_jobs=args.n_jobs,
     )
 
 
@@ -545,6 +546,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp_bipe.add_argument("--aux_timeout", type=float, default=None,
                          help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
                               "(llm_generated_fgs only). Default: library default.")
+    sp_bipe.add_argument("--n_jobs", type=int, default=1,
+                         help="Worker processes for evaluating molecules in parallel. "
+                              "1 (default) runs serially; <= 0 uses all CPU cores.")
     sp_bipe.set_defaults(func=_handle_build_ilp_preds_for_ensemble)
 
     # ── ensemble_construct ───────────────────────────────────────────────
