@@ -263,7 +263,7 @@ def get_atom_id(atom: int, molecule_id):
     return "a" + str(molecule_id) + "_" + str(atom + 1)  # Prolog indices start at 1
 
 
-def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT):
+def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT, aux_failures=None):
     comments = []
     lines_by_predicate = {"has_atom": []}
     arities = {"has_atom": 2}  # hardcode has_atom predicate
@@ -271,12 +271,14 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
     # Evaluate LLM-generated auxiliary predicates up front over all molecules so
     # that a predicate which times out on any single molecule can be dropped
     # entirely (see compute_auxiliary_extensions) before any facts are emitted.
+    # ``aux_failures`` (if given) collects the names that could not be computed.
     aux_ext_by_mol = {}
     if aux_predicates:
         aux_ext_by_mol = compute_auxiliary_extensions(
             aux_predicates,
             [(row.Index, row.mol) for row in rows.itertuples()],
             timeout=aux_timeout,
+            failures=aux_failures,
         )
 
     for row in rows.itertuples():
@@ -326,6 +328,7 @@ def build_full_background(
     predicate_set: AVAILABLE_PREDICATE_SETS = "atoms",
     aux_predicates=None,
     aux_timeout: float = DEFAULT_AUX_TIMEOUT,
+    aux_failures=None,
 ) -> list[str]:
     """Build one flat background-knowledge fact list for the molecules in ``rows``.
 
@@ -341,7 +344,7 @@ def build_full_background(
     evaluated on ``rows`` here.
     """
     prolog_lines, _ = build_background_chemlog(
-        rows, aux_predicates=aux_predicates, aux_timeout=aux_timeout
+        rows, aux_predicates=aux_predicates, aux_timeout=aux_timeout, aux_failures=aux_failures
     )
     prolog_lines = list(prolog_lines)
 

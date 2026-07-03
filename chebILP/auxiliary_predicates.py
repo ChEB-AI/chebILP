@@ -32,6 +32,8 @@ from typing import Callable, Literal
 
 from rdkit import Chem
 
+logger = logging.getLogger(__name__)
+
 AuxKind = Literal["atom_unary", "atom_binary", "molecule"]
 VALID_KINDS: set[str] = {"atom_unary", "atom_binary", "molecule"}
 
@@ -119,7 +121,7 @@ def load_program_source(source: str, source_file: str = "<string>") -> Auxiliary
     try:
         exec(compile(source, source_file, "exec"), namespace)
     except Exception as e:
-        logging.warning("Auxiliary predicate %s failed to compile: %s", source_file, e)
+        logger.warning("Auxiliary predicate %s failed to compile: %s", source_file, e)
         return None
 
     raw_name = namespace.get("PREDICATE_NAME")
@@ -127,13 +129,13 @@ def load_program_source(source: str, source_file: str = "<string>") -> Auxiliary
     fn = namespace.get("extension")
 
     if not isinstance(raw_name, str) or not raw_name.strip():
-        logging.warning("Auxiliary predicate %s is missing a PREDICATE_NAME.", source_file)
+        logger.warning("Auxiliary predicate %s is missing a PREDICATE_NAME.", source_file)
         return None
     if kind not in VALID_KINDS:
-        logging.warning("Auxiliary predicate %s has invalid KIND %r.", source_file, kind)
+        logger.warning("Auxiliary predicate %s has invalid KIND %r.", source_file, kind)
         return None
     if not callable(fn):
-        logging.warning("Auxiliary predicate %s is missing an extension() function.", source_file)
+        logger.warning("Auxiliary predicate %s is missing an extension() function.", source_file)
         return None
 
     doc = (fn.__doc__ or namespace.get("__doc__") or "").strip().splitlines()
@@ -167,7 +169,7 @@ def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[
     if not py_files:
         # Expected for classes that were never given auxiliary predicates; not a problem,
         # so log at debug level to avoid spamming when scanning every class of a split.
-        logging.debug(
+        logger.debug(
             "No auxiliary predicates found for CHEBI:%s in %s. "
             "Falling back to plain atom predicates.",
             chebi_id,
@@ -184,7 +186,7 @@ def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[
         if pred is None:
             continue
         if pred.name in seen:
-            logging.debug(
+            logger.debug(
                 "Duplicate auxiliary predicate name %s (from %s) skipped.", pred.name, path
             )
             continue
@@ -212,6 +214,7 @@ def compute_auxiliary_extensions(
     predicates: list[AuxiliaryPredicate],
     mols: list[tuple[object, Chem.Mol]],
     timeout: float | None = DEFAULT_AUX_TIMEOUT,
+    failures: dict[str, str] | None = None,
 ) -> dict[object, tuple[dict[str, list], set[str]]]:
     """Evaluate auxiliary predicates over many molecules at once.
 
@@ -230,6 +233,10 @@ def compute_auxiliary_extensions(
     background knowledge never contains a partially-computed extension. Any
     predicate that raises (without timing out) is merely skipped for the
     offending molecule so a single buggy input cannot abort the whole build.
+
+    If ``failures`` is provided, predicate names that could not be computed are
+    recorded into it as ``name -> "timeout" | "error"`` (``"timeout"`` wins, since
+    a timed-out predicate is dropped entirely) so callers can report them.
     """
     atom_ext_by_mol: dict[object, dict[str, list]] = {mol_id: {} for mol_id, _ in mols}
     mol_ext_by_mol: dict[object, set[str]] = {mol_id: set() for mol_id, _ in mols}
@@ -252,9 +259,11 @@ def compute_auxiliary_extensions(
             except AuxiliaryPredicateTimeout as e:
                 pred.disabled = True
                 timed_out = True
+                if failures is not None:
+                    failures[pred.name] = "timeout"
                 # Expected for pathological predicates and repeated per molecule when
                 # extensions are computed one molecule at a time; log at debug level.
-                logging.debug(
+                logger.debug(
                     "Auxiliary predicate %s %s; dropping it from the background knowledge "
                     "(including molecules where it already succeeded).",
                     pred.name,
@@ -262,7 +271,9 @@ def compute_auxiliary_extensions(
                 )
                 break
             except Exception as e:
-                logging.debug(
+                if failures is not None:
+                    failures.setdefault(pred.name, "error")
+                logger.debug(
                     "Auxiliary predicate %s crashed on a molecule, skipping: %s", pred.name, e
                 )
                 continue

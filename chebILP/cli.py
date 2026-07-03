@@ -357,6 +357,9 @@ def _handle_predict(args):
         rules_file=args.rules_file,
         target_predicates=target_predicates,
         verbose=args.verbose,
+        predicate_set=args.predicate_set,
+        problem_dir=args.problem_dir,
+        aux_timeout=args.aux_timeout,
     )
 
     if args.output:
@@ -514,6 +517,16 @@ def build_parser() -> argparse.ArgumentParser:
     targets_group_pred.add_argument("--targets_file", type=str, help="File with one target predicate name per line.")
     sp_predict.add_argument("--output", type=str, default=None, help="Optional path to save predictions as JSON.")
     sp_predict.add_argument("--verbose", action="store_true", help="Print satisfied predicates per molecule.")
+    sp_predict.add_argument("--predicate_set", type=str, default="atoms",
+                            choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
+                            help="Background-knowledge predicate set (must match the set the rules "
+                                 "were learned on). Default: atoms.")
+    sp_predict.add_argument("--problem_dir", type=str, default=None,
+                            help="ILP problem directory (only needed for the llm_generated_fgs "
+                                 "predicate set, to load auxiliary predicates).")
+    sp_predict.add_argument("--aux_timeout", type=float, default=None,
+                            help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
+                                 "(llm_generated_fgs only). Default: library default.")
     sp_predict.set_defaults(func=_handle_predict)
 
     # ── build_ilp_preds_for_ensemble ─────────────────────────────────────
