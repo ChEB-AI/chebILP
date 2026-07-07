@@ -94,9 +94,6 @@ def mol_to_fol_atoms(mol: Chem.Mol):
     #                        reflections). Only for N <= MAX_RING_SIZE.
     #   in_ring{N}(A)      – A belongs to some N-membered ring (N <= MAX_RING_SIZE).
     #   in_ring(A)         – A belongs to some ring of any size.
-    # Size-specific predicates are capped at MAX_RING_SIZE to keep the highest
-    # body-predicate arity (and thus the ILP hypothesis space) bounded; larger
-    # rings still contribute to the generic unary in_ring.
     in_ring_atoms: set[int] = set()
     in_ringN_atoms: dict[int, set[int]] = {}
     for ring in mol.GetRingInfo().AtomRings():
@@ -152,7 +149,7 @@ def mol_to_fol_fgs(mol: Chem.Mol):
     fg_extensions = {}
 
     for node_id, node in nodes.items():
-        fg_type = node["FG"]
+        fg_type = node["FG"].lower()
         fg_extensions.setdefault(fg_type, []).append(node_id)
         #ring_size = node["RING"]
         #if ring_size != 0:

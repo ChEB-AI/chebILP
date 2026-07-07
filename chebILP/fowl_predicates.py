@@ -25,7 +25,7 @@ def build_fowl_smarts(molecules_df, target_labels, output_path):
         f.write("chebi_id,SMARTS\n")
         for chebi_id, smarts_str in smarts.items():
             f.write(f"{chebi_id},{smarts_str}\n")
-
+            
 
 def build_fowl_predicate(smarts: str, chebi_id: str):
     # predicate has arity number of wildcard atoms in the SMARTS
