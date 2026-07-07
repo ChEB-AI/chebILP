@@ -304,12 +304,13 @@ def get_atom_id(atom: int, molecule_id):
 
 def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT, aux_failures=None, predicate_set="atoms", fowl_smarts=None):
     comments = []
-    if predicate_set == "farm_fgs":
-        lines_by_predicate = {"has_fg": []}
-        arities = {"has_fg": 2}  # hardcode has_fg predicate
-    else:
-        lines_by_predicate = {"has_atom": []}
-        arities = {"has_atom": 2}  # hardcode has_atom predicate
+    lines_by_predicate, arities = {}, {}
+    if "farm_fgs" in predicate_set:
+        lines_by_predicate["has_fg"] = []
+        arities["has_fg"] = 2
+    if "atoms" in predicate_set or "farm_fgs" not in predicate_set:
+        lines_by_predicate["has_atom"] = []
+        arities["has_atom"] = 2 
 
     aux_ext_by_mol = {}
     if aux_predicates:
@@ -322,16 +323,17 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
 
     for row in rows.itertuples():
         atom_extensions, fg_extensions, mol_extensions = {}, {}, set()
-        if predicate_set == "farm_fgs":
+        if "farm_fgs" in predicate_set:
             # Functional-group level model: entities are FARM functional-group
             # nodes rather than atoms. has_fg links the molecule to its FG nodes.
-            fg_extensions = mol_to_fol_fgs(row.mol)
+            fg_extensions = mol_to_fol_fgs(row.mol, add_fg_atom_predicates="atoms" in predicate_set)
             node_ids = sorted({id for ids in fg_extensions.values()  for nid in ids for id in (nid if isinstance(nid, tuple) else (nid,))})  # flatten tuples
             for node_id in node_ids:
-                fg_id = get_atom_id(node_id, row.Index)
-                lines_by_predicate["has_fg"].append(
-                    f"has_fg({row.Index},{fg_id}).")
-        else:
+                 if node_id >= row.mol.GetNumAtoms():
+                    fg_id = get_atom_id(node_id, row.Index)
+                    lines_by_predicate["has_fg"].append(
+                        f"has_fg({row.Index},{fg_id}).")
+        if "atoms" in predicate_set or "farm_fgs" not in predicate_set:
             for atom in row.mol.GetAtoms():
                 atom_id = get_atom_id(atom.GetIdx(), row.Index)
                 lines_by_predicate["has_atom"].append(f"has_atom({row.Index},{atom_id}).")
