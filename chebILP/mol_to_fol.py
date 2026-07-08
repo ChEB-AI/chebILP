@@ -150,6 +150,8 @@ def mol_to_fol_fgs(mol: Chem.Mol, add_fg_atom_predicates: bool = False):
 
     for node_id, node in nodes.items():
         fg_type = node["FG"].lower()
+        if not fg_type[0].isalpha():
+            fg_type = f"fg_{fg_type}"
         fg_extensions.setdefault(fg_type, []).append(node_id)
         #ring_size = node["RING"]
         #if ring_size != 0:
