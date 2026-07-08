@@ -139,8 +139,6 @@ def _evaluate_molecule(payload):
     from chebILP.ilp_problem_builder import build_full_background
 
     mol_id, mol_binary = payload
-    if mol_id == "76440":
-        print(f"DEBUG: Evaluating molecule {mol_id}...")
     st = _WORKER_STATE
     row_df = pd.DataFrame({"mol": [Chem.Mol(mol_binary)]}, index=[mol_id])
 
@@ -151,10 +149,6 @@ def _evaluate_molecule(payload):
             aux_predicates=st["aux_predicates"], aux_timeout=st["aux_timeout"],
             aux_failures=aux_failures, fowl_smarts=st.get("fowl_smarts"),
         )
-        if mol_id == "76440":
-            print(f"DEBUG: Built background knowledge for molecule {mol_id}: {len(bg_facts)} facts")
-            with open(f"debug_bg_facts_{mol_id}.pl", "w") as f:
-                f.write("\n".join(bg_facts))
     except Exception as e:  # noqa: BLE001
         return mol_id, [], f"error: {e}", aux_failures
 
@@ -180,9 +174,6 @@ def _evaluate_molecule(payload):
             ctl.solve(on_model=_on_model)
     except Exception as e:  # noqa: BLE001
         return mol_id, [], f"error: {e}", aux_failures
-    if mol_id == "76440":
-        print(f"DEBUG: Evaluated molecule {mol_id}: {len(fired)} target predicates fired")
-        print(f"failures: {aux_failures}")
     return mol_id, sorted(fired), "", aux_failures
 
 
