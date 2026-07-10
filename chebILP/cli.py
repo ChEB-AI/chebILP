@@ -51,11 +51,8 @@ def _make_ilp_builder(args):
         molecules_path=molecules_path,
         muggleton=False,
         predicate_set=predicate_set,
-<<<<<<< feature/llm-enhanced
         aux_timeout=aux_timeout,
         aux_library_dir=aux_library_dir,
-=======
->>>>>>> dev
     )
 
 
