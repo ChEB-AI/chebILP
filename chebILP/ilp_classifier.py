@@ -106,9 +106,9 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         "timeout": timeout,
     }
     if mdl_weight_fn != 1 or mdl_weight_fp != 1 or mdl_weight_size != 1:
-        settings_parameters["mdl_weight_fn"] = mdl_weight_fn
-        settings_parameters["mdl_weight_fp"] = mdl_weight_fp
-        settings_parameters["mdl_weight_size"] = mdl_weight_size
+        settings_parameters["fn_weight"] = mdl_weight_fn
+        settings_parameters["fp_weight"] = mdl_weight_fp
+        settings_parameters["size_weight"] = mdl_weight_size
 
     with open(os.path.join(results_dir, "config.yml"), "a+") as f:
         f.write(f"problem_dir: {problem_dir}\n")
