@@ -51,8 +51,11 @@ def _make_ilp_builder(args):
         molecules_path=molecules_path,
         muggleton=False,
         predicate_set=predicate_set,
+<<<<<<< feature/llm-enhanced
         aux_timeout=aux_timeout,
         aux_library_dir=aux_library_dir,
+=======
+>>>>>>> dev
     )
 
 
@@ -449,6 +452,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_samples.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive samples per class.")
     sp_samples.add_argument("--min_neg_samples", type=int, default=25, help="Minimum negative samples per class.")
     sp_samples.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
+
 
     sp_samples.set_defaults(func=_handle_build_samples)
 
