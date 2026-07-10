@@ -15,17 +15,24 @@ def get_exs_path(chebi_id, split: Split, base_dir=None):
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
     return os.path.join(problem_dir, "exs.pl")
 
-def get_aux_predicates_dir(chebi_id, base_dir=None):
-    """Directory holding LLM-generated auxiliary-predicate programs for a class.
 
-    Unlike bk/bias/exs paths this is not split-specific: the generated Python
-    programs apply to every molecule regardless of split.
-    """
-    if base_dir is None:
-        base_dir = os.path.join("data", "ilp_problems")
-    aux_dir = os.path.join(base_dir, f"chebi_{chebi_id}", "auxiliary_predicates")
-    os.makedirs(aux_dir, exist_ok=True)
-    return aux_dir
+def get_aux_programs_dir(base_dir):
+    """Directory holding one canonical ``<aux_name>.py`` per unique predicate."""
+    programs_dir = os.path.join(base_dir, "programs")
+    os.makedirs(programs_dir, exist_ok=True)
+    return programs_dir
+
+
+def get_aux_class_map_path(base_dir):
+    """JSON file mapping ``chebi_id -> [aux_name, ...]`` (predicates used by each class)."""
+    return os.path.join(base_dir, "class_map.json")
+
+
+def get_aux_generation_log_path(chebi_id, base_dir):
+    """Per-class LLM exchange log, now kept inside the library."""
+    logs_dir = os.path.join(base_dir, "generation_logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    return os.path.join(logs_dir, f"chebi_{chebi_id}.md")
 
 def get_bk_path(chebi_id, split: Split, predicate_set, base_dir=None, selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None):
     problem_dir = get_problem_dir(chebi_id, split, base_dir)

@@ -1,9 +1,19 @@
 """Load and apply LLM-generated auxiliary predicates.
 
 Auxiliary predicates are extra molecule- or atom-level properties that the LLM
-proposes for a specific ChEBI class (see ``generate_auxiliary_predicates.py``).
-Each predicate is stored as a standalone Python program in
-``data/ilp_problems/chebi_{id}/auxiliary_predicates/`` and follows this contract:
+proposes to help tell a ChEBI class apart from its siblings (see
+``generate_auxiliary_predicates.py``).
+
+Storage (EXP-014): predicates are **not** stored per class any more. They live once
+in a shared library and each class records which of them it uses:
+
+    <problem_dir>/_aux_predicate_library/
+        programs/<aux_name>.py      # one canonical program per unique predicate
+        class_map.json              # { "<chebi_id>": ["aux_name", ...] }
+        generation_logs/chebi_<id>.md
+
+``load_auxiliary_predicates(chebi_id)`` looks up the class's names in ``class_map.json``
+and loads those programs from ``programs/``. Each program follows this contract:
 
     \"\"\"<one-line description of what the predicate captures>\"\"\"
     PREDICATE_NAME = "carboxylic_acid"
@@ -24,8 +34,10 @@ Prolog atoms.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from typing import Callable, Literal
@@ -150,45 +162,165 @@ def load_program_source(source: str, source_file: str = "<string>") -> Auxiliary
     )
 
 
-def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[AuxiliaryPredicate]:
-    """Load every auxiliary-predicate program for a ChEBI class.
+def aux_program_path(name: str, problem_dir: str | None = None) -> str:
+    """Path of a predicate's canonical program in the shared library."""
+    from chebILP.ilp_path_manager import get_aux_programs_dir
 
-    Programs live in ``<problem_dir>/chebi_{id}/auxiliary_predicates/*.py``.
-    Missing / empty directories yield an empty list (logged at debug level) rather than
-    an error, so ``build_bk`` degrades gracefully to the plain atom predicates.
-    Names are de-duplicated (first file wins) to keep the Prolog BK consistent.
+    return os.path.join(get_aux_programs_dir(base_dir=problem_dir), f"{sanitize_predicate_name(name)}.py")
+
+
+def load_class_map(problem_dir: str | None = None) -> dict[str, list[str]]:
+    """Read ``class_map.json`` (``chebi_id -> [aux_name, ...]``); ``{}`` if absent."""
+    from chebILP.ilp_path_manager import get_aux_class_map_path
+
+    path = get_aux_class_map_path(base_dir=problem_dir)
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_class_map(class_map: dict[str, list[str]], problem_dir: str) -> str:
+    """Write ``class_map.json`` (keys sorted for stable diffs). Returns the path."""
+    from chebILP.ilp_path_manager import get_aux_class_map_path
+
+    path = get_aux_class_map_path(base_dir=problem_dir)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({k: class_map[k] for k in sorted(class_map)}, f, indent=2)
+    return path
+
+
+def set_class_predicates(chebi_id, names: list[str], problem_dir: str) -> None:
+    """Record (overwriting) the auxiliary predicates a class uses, de-duplicated in order."""
+    class_map = load_class_map(problem_dir)
+    seen: set[str] = set()
+    ordered = [n for n in names if not (n in seen or seen.add(n))]
+    class_map[str(chebi_id)] = ordered
+    save_class_map(class_map, problem_dir)
+
+
+def _rewrite_predicate_name(source: str, new_name: str) -> str:
+    """Rewrite the program's ``PREDICATE_NAME`` string literal to ``new_name`` (first only)."""
+    pattern = re.compile(r'(PREDICATE_NAME\s*=\s*)(["\']).*?\2')
+    new_source, n = pattern.subn(lambda m: f'{m.group(1)}"{new_name}"', source, count=1)
+    return new_source if n else source
+
+
+def add_program_to_library(source: str, problem_dir: str, chebi_id=None):
+    """Add a predicate program to the shared library, de-duplicating by content.
+
+    Returns ``(stem, predicate)`` where ``stem`` is the library file name (without ``.py``)
+    to record in ``class_map.json``, or ``None`` if the program is invalid.
+
+    A byte-identical program already in the library is reused. If the program's sanitized
+    name already backs a *different* program, the new one is disambiguated with the class
+    id (``aux_has_carboxyl_group`` -> ``aux_has_carboxyl_group_<chebi_id>``). The rewrite is
+    applied to the program's ``PREDICATE_NAME`` too, so the predicate is unique in the
+    background knowledge, not just on disk — an existing predicate is never overwritten.
     """
-    from chebILP.ilp_path_manager import get_aux_predicates_dir
+    from chebILP.ilp_path_manager import get_aux_programs_dir
 
-    aux_dir = get_aux_predicates_dir(chebi_id, base_dir=problem_dir)
-    py_files = sorted(
-        os.path.join(aux_dir, f)
-        for f in os.listdir(aux_dir)
-        if f.endswith(".py") and not f.startswith("_")
-    )
-    if not py_files:
+    pred = load_program_source(source)
+    if pred is None:
+        return None
+
+    programs_dir = get_aux_programs_dir(base_dir=problem_dir)
+
+    def _stem_path(stem: str) -> str:
+        return os.path.join(programs_dir, f"{stem}.py")
+
+    content = source.rstrip() + "\n"
+    stem = pred.name  # already aux_-prefixed and sanitized
+
+    # No file under this name yet: store it as-is.
+    if not os.path.exists(_stem_path(stem)):
+        with open(_stem_path(stem), "w", encoding="utf-8") as f:
+            f.write(content)
+        return stem, pred
+    # Same name, identical code: reuse the existing library program.
+    with open(_stem_path(stem), encoding="utf-8") as f:
+        if f.read() == content:
+            return stem, pred
+
+    # Same name, different code: disambiguate with the class id and rewrite PREDICATE_NAME.
+    desired = f"{pred.name}_{chebi_id}" if chebi_id is not None else f"{pred.name}__2"
+    source = _rewrite_predicate_name(source, desired)
+    pred = load_program_source(source) or pred
+    stem = pred.name
+    content = source.rstrip() + "\n"
+
+    # In the rare event the disambiguated name is also taken by different code (e.g. a
+    # re-run of the same class with changed output), fall back to a numeric suffix.
+    suffix = 2
+    while os.path.exists(_stem_path(stem)):
+        with open(_stem_path(stem), encoding="utf-8") as f:
+            if f.read() == content:
+                return stem, pred  # identical already present
+        candidate = f"{desired}__{suffix}"
+        suffix += 1
+        source = _rewrite_predicate_name(source, candidate)
+        pred = load_program_source(source) or pred
+        stem = pred.name
+        content = source.rstrip() + "\n"
+
+    with open(_stem_path(stem), "w", encoding="utf-8") as f:
+        f.write(content)
+    return stem, pred
+
+
+def load_library_predicates(base_dir: str) -> list[AuxiliaryPredicate]:
+    """Load every unique predicate in the shared library (for retrieval / inspection)."""
+    from chebILP.ilp_path_manager import get_aux_programs_dir
+
+    programs_dir = get_aux_programs_dir(base_dir=base_dir)
+    predicates: list[AuxiliaryPredicate] = []
+    for fname in sorted(os.listdir(programs_dir)):
+        if not fname.endswith(".py") or fname.startswith("_"):
+            continue
+        path = os.path.join(programs_dir, fname)
+        with open(path, "r", encoding="utf-8") as f:
+            pred = load_program_source(f.read(), source_file=path)
+        if pred is not None:
+            predicates.append(pred)
+    return predicates
+
+
+def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[AuxiliaryPredicate]:
+    """Load the auxiliary-predicate programs a ChEBI class uses.
+
+    Looks up the class's predicate names in ``class_map.json`` and loads each one's
+    canonical program from the shared library's ``programs/`` directory. A class with no
+    entry (or a missing library) yields an empty list — logged at debug level — so
+    ``build_bk`` degrades gracefully to the plain atom predicates. Names are
+    de-duplicated (first occurrence wins) to keep the Prolog BK consistent.
+    """
+    names = load_class_map(problem_dir).get(str(chebi_id), [])
+    if not names:
         # Expected for classes that were never given auxiliary predicates; not a problem,
         # so log at debug level to avoid spamming when scanning every class of a split.
         logger.debug(
-            "No auxiliary predicates found for CHEBI:%s in %s. "
+            "No auxiliary predicates recorded for CHEBI:%s. "
             "Falling back to plain atom predicates.",
             chebi_id,
-            aux_dir,
         )
         return []
 
     predicates: list[AuxiliaryPredicate] = []
     seen: set[str] = set()
-    for path in py_files:
+    for name in names:
+        path = aux_program_path(name, problem_dir)
+        if not os.path.exists(path):
+            logger.warning(
+                "Auxiliary predicate %s used by CHEBI:%s is missing from the library (%s).",
+                name, chebi_id, path,
+            )
+            continue
         with open(path, "r", encoding="utf-8") as f:
-            source = f.read()
-        pred = load_program_source(source, source_file=path)
+            pred = load_program_source(f.read(), source_file=path)
         if pred is None:
             continue
         if pred.name in seen:
-            logger.debug(
-                "Duplicate auxiliary predicate name %s (from %s) skipped.", pred.name, path
-            )
+            logger.debug("Duplicate auxiliary predicate name %s skipped.", pred.name)
             continue
         seen.add(pred.name)
         predicates.append(pred)

@@ -1,13 +1,18 @@
-# Pipeline: for each ChEBI class, ask an LLM to invent auxiliary predicates that
-# help ILP tell the class apart from its siblings. Each auxiliary predicate is a
-# small self-contained Python program mapping an RDKit Mol to a predicate
-# extension (see chebILP.auxiliary_predicates for the contract). Programs are
-# written to data/ilp_problems/chebi_{id}/auxiliary_predicates/ so that
-# `build_bk --predicate_set llm_generated_fgs` can merge them into the BK.
+# Pipeline: for each ChEBI class, ask an LLM to choose auxiliary predicates that help
+# ILP tell the class apart from its siblings. Each auxiliary predicate is a small
+# self-contained Python program mapping an RDKit Mol to a predicate extension (see
+# chebILP.auxiliary_predicates for the contract).
 #
-# Input to the LLM: the ChEBI class name/definition, its superclasses, and the
-# predicates already available from mol_to_fol_atoms (so it proposes
-# complementary properties rather than duplicating existing ones).
+# EXP-014: predicates are kept in ONE shared library instead of being regenerated per
+# class. For each class we first RETRIEVE the most relevant existing predicates (hybrid
+# BM25 + dense, see chebILP.predicate_retrieval) and offer them to the LLM, which may
+# reuse any of them and/or invent new ones. Reused + new predicates are recorded for the
+# class in class_map.json; new programs are added to the library. `build_bk
+# --predicate_set llm_generated_fgs` then loads each class's chosen programs.
+#
+# Input to the LLM: the ChEBI class name/definition, its superclasses, the predicates
+# already available from mol_to_fol_atoms (so it proposes complementary properties), and
+# the retrieved reuse candidates from the shared library.
 #
 # Usage:
 #   python -m chebILP.generate_auxiliary_predicates \
@@ -29,8 +34,9 @@ from rdkit import Chem
 # (and which is painfully slow when the venv lives on a WSL /mnt/c mount).
 from chebi_utils.obo_extractor import build_chebi_graph
 from chebi_utils.downloader import download_chebi_obo
-from chebILP.auxiliary_predicates import load_program_source
-from chebILP.ilp_path_manager import get_aux_predicates_dir
+from chebILP.auxiliary_predicates import add_program_to_library, load_program_source, set_class_predicates
+from chebILP.ilp_path_manager import get_aux_generation_log_path
+from chebILP.predicate_retrieval import HybridPredicateRetriever
 
 
 # Reuse the exact predicate reference the enhancement pipeline shows the model,
@@ -51,8 +57,13 @@ _EXISTING_PREDICATES = """\
 
 _SYSTEM_PROMPT = """\
 You are an expert in cheminformatics, RDKit, and Inductive Logic Programming (ILP).
-Your task is to invent AUXILIARY PREDICATES that help an ILP system distinguish a
+Your task is to select AUXILIARY PREDICATES that help an ILP system distinguish a
 ChEBI chemical class from its sibling classes under the same parent.
+
+There is a SHARED LIBRARY of auxiliary predicates already written for other classes.
+You will be shown the most relevant existing predicates for the target class. Prefer to
+REUSE those that fit rather than writing near-duplicates; only invent NEW predicates for
+properties the reuse candidates do not already cover.
 
 An auxiliary predicate is a short, self-contained Python program that maps an RDKit
 Mol object to a predicate extension. Two kinds are useful:
@@ -63,7 +74,7 @@ Mol object to a predicate extension. Two kinds are useful:
      atom/bond predicates (e.g. "molecule has exactly 40 carbon atoms",
      "molecular weight above 500", "contains at least 3 rings").
 
-Each program MUST follow this exact contract:
+Each NEW program MUST follow this exact contract:
 
     \"\"\"<one short line describing what the predicate captures>\"\"\"
     PREDICATE_NAME = "snake_case_name"
@@ -75,6 +86,37 @@ Each program MUST follow this exact contract:
         # KIND == "atom_unary"  -> return a list of 0-based atom indices
         # KIND == "atom_binary" -> return a list of (i, j) 0-based atom-index pairs
         ...
+
+Two worked examples — a molecule-level predicate and an atom_binary one:
+
+    \"\"\"Molecule has a carbon chain of length 23 to 27.\"\"\"
+    PREDICATE_NAME = "carbon_chain_23_27"
+    KIND = "molecule"
+
+    def extension(mol):
+        max_len = 0
+        for atom in mol.GetAtoms():
+            queue = [(atom, 0, {atom.GetIdx()})]  # (atom, length so far, visited)
+            while queue:
+                cur, length, visited = queue.pop(0)
+                for nb in cur.GetNeighbors():
+                    if nb.GetAtomicNum() == 6 and nb.GetIdx() not in visited:
+                        max_len = max(max_len, length + 1)
+                        if max_len > 27:
+                            return False
+                        queue.append((nb, length + 1, visited | {nb.GetIdx()}))
+        return 23 <= max_len <= 27
+
+    \"\"\"Pairs of atoms joined by an amide bond: (carbonyl carbon, amide nitrogen).\"\"\"
+    PREDICATE_NAME = "amide_bond"
+    KIND = "atom_binary"
+
+    def extension(mol):
+        pairs = []
+        patt = Chem.MolFromSmarts("[CX3](=O)[NX3]")
+        for c_idx, o_idx, n_idx in mol.GetSubstructMatches(patt):
+            pairs.append((c_idx, n_idx))  # return the C-N pair, not the =O oxygen
+        return pairs
 
 Rules:
 - Use only the RDKit API. `Chem`, `rdMolDescriptors`, and `Descriptors` are already
@@ -102,7 +144,7 @@ def _get_class_info(chebi_graph, chebi_id: str) -> dict:
     }
 
 
-def _build_prompt(chebi_id: str, info: dict, n_predicates: int) -> str:
+def _build_prompt(chebi_id: str, info: dict, n_predicates: int, candidates: list[dict]) -> str:
     parent_str = ""
     if info["parents"]:
         parts = "\n".join(
@@ -113,17 +155,35 @@ def _build_prompt(chebi_id: str, info: dict, n_predicates: int) -> str:
 
     definition_str = f"Definition: {info['definition']}\n" if info["definition"] else ""
 
+    if candidates:
+        cand_lines = "\n".join(
+            f"[{i}] {c['name']} ({c['kind']}): {c['description'] or 'no description'}"
+            for i, c in enumerate(candidates, 1)
+        )
+        candidate_str = (
+            "Reuse candidates from the shared library (most relevant first):\n"
+            f"{cand_lines}\n"
+        )
+    else:
+        candidate_str = "Reuse candidates from the shared library: (none yet)\n"
+
     return f"""\
 Target class: {info['name']} (CHEBI:{chebi_id})
 {definition_str}{parent_str}
 Predicates ALREADY available (do NOT duplicate these):
 {_EXISTING_PREDICATES}
 
-Propose up to {n_predicates} auxiliary predicates that would help distinguish
-"{info['name']}" from its sibling classes. Favour a mix of shortcut substructures
-and hard-to-express global concepts grounded in the definition above.
+{candidate_str}
+Choose up to {n_predicates} auxiliary predicates that would help distinguish
+"{info['name']}" from its sibling classes. REUSE the candidates above wherever they fit;
+only write NEW programs for properties they do not already cover. Favour a mix of
+shortcut substructures and hard-to-express global concepts grounded in the definition.
 
-Output ONLY the Python programs, each in its own fenced code block:
+Output EXACTLY two sections and nothing else:
+
+REUSE: a comma-separated list of the candidate numbers you are reusing (or "none").
+
+NEW: one fenced ```python code block per new predicate (omit the section if none):
 
 ```python
 \"\"\"...\"\"\"
@@ -133,9 +193,20 @@ KIND = "..."
 def extension(mol):
     ...
 ```
-
-No prose before, between, or after the code blocks.
 """
+
+
+def _parse_reuse_numbers(text: str, n_candidates: int) -> list[int]:
+    """Parse the ``REUSE: 1, 3, 7`` line into valid 1-based candidate indices."""
+    m = re.search(r"^\s*REUSE\s*:\s*(.*)$", text, re.MULTILINE | re.IGNORECASE)
+    if not m:
+        return []
+    picked = []
+    for tok in re.findall(r"\d+", m.group(1)):
+        idx = int(tok)
+        if 1 <= idx <= n_candidates and idx not in picked:
+            picked.append(idx)
+    return picked
 
 
 # A few structurally diverse molecules used to smoke-test generated programs.
@@ -198,13 +269,17 @@ def _generate_one(client, prompt, model, max_retries=5) -> str:
     raise last_exc
 
 
-def _write_generation_log(aux_dir, chebi_id, info, model, prompt, raw):
-    """Persist the full LLM exchange (system + user prompt + raw response) for one class."""
-    log_path = os.path.join(aux_dir, "generation_log.md")
+def _write_generation_log(chebi_id, info, model, prompt, raw, problem_dir, selection):
+    """Persist the full LLM exchange (prompts + raw response + resolved selection)."""
+    log_path = get_aux_generation_log_path(chebi_id, base_dir=problem_dir)
     with open(log_path, "w", encoding="utf-8") as f:
         f.write(f"# Auxiliary-predicate generation log — CHEBI:{chebi_id} ({info['name']})\n\n")
         f.write(f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"- Model: {model}\n\n")
+        if selection is not None:
+            f.write("## Resolved selection\n\n")
+            f.write(f"- Reused from library: {', '.join(selection['reused']) or '(none)'}\n")
+            f.write(f"- New predicates added: {', '.join(selection['new']) or '(none)'}\n\n")
         f.write("## System prompt\n\n```\n")
         f.write(_SYSTEM_PROMPT)
         f.write("\n```\n\n## User prompt\n\n```\n")
@@ -215,38 +290,39 @@ def _write_generation_log(aux_dir, chebi_id, info, model, prompt, raw):
     return log_path
 
 
-def generate_for_class(client, chebi_id, info, problem_dir, model, n_predicates) -> int:
-    """Generate, validate and persist auxiliary predicates for one ChEBI class.
+def generate_for_class(client, chebi_id, info, problem_dir, model, n_predicates, retriever, top_k) -> int:
+    """Select auxiliary predicates for one ChEBI class: reuse library ones + invent new.
 
-    Also writes ``generation_log.md`` (the full prompt + raw response) into the
-    class's ``auxiliary_predicates/`` folder for later inspection.
+    Retrieves the most relevant library predicates, asks the LLM to reuse and/or extend
+    them, validates any new programs, adds them to the shared library, and records the
+    class's full predicate list in ``class_map.json``. Also writes the LLM exchange log.
 
-    Returns the number of programs successfully written.
+    Returns the number of predicates recorded for the class (reused + new).
     """
-    aux_dir = get_aux_predicates_dir(chebi_id, base_dir=problem_dir)
-    prompt = _build_prompt(chebi_id, info, n_predicates)
+    candidates = retriever.retrieve(f"{info['name']} {info['definition'] or ''}", top_k=top_k)
+    prompt = _build_prompt(chebi_id, info, n_predicates, candidates)
 
     raw = None
+    selection = None
     try:
         raw = _generate_one(client, prompt, model)
     finally:
-        # Log the exchange even if the request ultimately failed.
-        log_path = _write_generation_log(aux_dir, chebi_id, info, model, prompt, raw)
+        # Log the exchange even if the request ultimately failed (selection filled below).
+        log_path = _write_generation_log(chebi_id, info, model, prompt, raw, problem_dir, selection)
         print(f"    logged full exchange to {log_path}")
 
-    blocks = _parse_code_blocks(raw)
-    if not blocks:
-        print(f"  -> No code blocks parsed from LLM response for CHEBI:{chebi_id}")
-        return 0
+    # Reused predicates: map the chosen candidate numbers back to library file stems.
+    reuse_idx = _parse_reuse_numbers(raw, len(candidates))
+    reused_stems: list[str] = []
+    for idx in reuse_idx:
+        cand = candidates[idx - 1]
+        reused_stems.append(cand["stem"])
+        print(f"    reused [{idx}] {cand['name']} ({cand['kind']})")
 
-    # Clear any previous generation so stale programs don't linger.
-    for existing in os.listdir(aux_dir):
-        if existing.endswith(".py"):
-            os.remove(os.path.join(aux_dir, existing))
-
-    written = 0
+    # New predicates: validate, add to the library, collect their stems.
+    new_stems: list[str] = []
     seen_names: set[str] = set()
-    for i, block in enumerate(blocks):
+    for i, block in enumerate(_parse_code_blocks(raw)):
         label = f"chebi_{chebi_id}_block_{i}"
         if not _validate(block, label):
             continue
@@ -254,22 +330,33 @@ def generate_for_class(client, chebi_id, info, problem_dir, model, n_predicates)
         if pred is None or pred.name in seen_names:
             continue
         seen_names.add(pred.name)
-        out_path = os.path.join(aux_dir, f"{pred.name}.py")
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(block.rstrip() + "\n")
-        written += 1
-        print(f"    wrote {pred.name} ({pred.kind}): {pred.description}")
+        added = add_program_to_library(block, problem_dir=problem_dir, chebi_id=chebi_id)
+        if added is None:
+            continue
+        stem, saved = added  # ``saved`` reflects any chebi_id disambiguation of the name
+        new_stems.append(stem)
+        retriever.add_entry({"name": saved.name, "description": saved.description, "kind": saved.kind, "stem": stem})
+        print(f"    new {saved.name} ({saved.kind}) -> library/{stem}.py: {saved.description}")
 
-    return written
+    stems = reused_stems + new_stems
+    set_class_predicates(chebi_id, stems, problem_dir=problem_dir)
+
+    # Rewrite the log now that the selection is resolved.
+    selection = {"reused": reused_stems, "new": new_stems}
+    _write_generation_log(chebi_id, info, model, prompt, raw, problem_dir, selection)
+
+    return len(stems)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate LLM auxiliary predicates for ChEBI classes.")
     parser.add_argument("--labels_file", required=True, help="File with one ChEBI ID per line.")
     parser.add_argument("--chebi_version", type=int, default=248)
-    parser.add_argument("--problem_dir", default=None, help="Base ILP problems directory.")
-    parser.add_argument("--model", default="claude-sonnet-4-6", help="Claude model to use.")
-    parser.add_argument("--n_predicates", type=int, default=8, help="Target number of predicates per class.")
+    parser.add_argument("--predicate_dir", default=os.path.join("data", "llm_generated_predicates"), help="Directory for storing generated predicates.")
+    parser.add_argument("--model", default="claude-haiku-4-5", help="Claude model to use.")
+    parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
+    parser.add_argument("--top_k", type=int, default=16,
+                        help="Reuse candidates retrieved from the shared library per class.")
     args = parser.parse_args()
 
     load_dotenv()
@@ -289,19 +376,27 @@ def main():
         chebi_ids = [line.strip() for line in f if line.strip()]
     print(f"Generating auxiliary predicates for {len(chebi_ids)} class(es).")
 
-    problem_dir = args.problem_dir or os.path.join("data", "ilp_problems")
+    # Build the hybrid retriever once over the current shared library. Predicates added
+    # during this run are appended to it (add_entry) so later classes can reuse them too.
+    print("Building retrieval index over the shared predicate library...")
+    retriever = HybridPredicateRetriever.from_library(base_dir=args.predicate_dir)
+    print(f"  {len(retriever)} predicate(s) in the library.")
+
     total = 0
     for chebi_id in chebi_ids:
         info = _get_class_info(chebi_graph, chebi_id)
         print(f"CHEBI:{chebi_id} ({info['name']})...")
         try:
-            n = generate_for_class(client, chebi_id, info, problem_dir, args.model, args.n_predicates)
+            n = generate_for_class(
+                client, chebi_id, info, args.predicate_dir, args.model, args.n_predicates,
+                retriever, args.top_k,
+            )
             total += n
-            print(f"  -> {n} auxiliary predicate(s) written")
+            print(f"  -> {n} auxiliary predicate(s) recorded")
         except Exception as e:
             print(f"  -> Failed: {e}")
 
-    print(f"Done. Wrote {total} auxiliary predicate program(s) across {len(chebi_ids)} class(es).")
+    print(f"Done. Recorded {total} auxiliary predicate selection(s) across {len(chebi_ids)} class(es).")
 
 
 if __name__ == "__main__":
