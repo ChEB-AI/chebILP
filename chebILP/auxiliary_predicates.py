@@ -54,6 +54,10 @@ VALID_KINDS: set[str] = {"atom_unary", "atom_binary", "molecule"}
 # exponential substructure searches that would otherwise hang ``build_bk``.
 DEFAULT_AUX_TIMEOUT: float = 1.0
 
+# Shared auxiliary-predicate library (``programs/`` + ``class_map.json``), kept
+# separate from the per-class ILP problem directory.
+DEFAULT_AUX_LIBRARY_DIR: str = os.path.join("data", "llm_generated_predicates")
+
 
 class AuxiliaryPredicateTimeout(Exception):
     """Raised when a predicate's ``extension(mol)`` exceeds its time budget."""
@@ -162,14 +166,14 @@ def load_program_source(source: str, source_file: str = "<string>") -> Auxiliary
     )
 
 
-def aux_program_path(name: str, problem_dir: str | None = None) -> str:
+def aux_program_path(name: str, problem_dir: str) -> str:
     """Path of a predicate's canonical program in the shared library."""
     from chebILP.ilp_path_manager import get_aux_programs_dir
 
     return os.path.join(get_aux_programs_dir(base_dir=problem_dir), f"{sanitize_predicate_name(name)}.py")
 
 
-def load_class_map(problem_dir: str | None = None) -> dict[str, list[str]]:
+def load_class_map(problem_dir) -> dict[str, list[str]]:
     """Read ``class_map.json`` (``chebi_id -> [aux_name, ...]``); ``{}`` if absent."""
     from chebILP.ilp_path_manager import get_aux_class_map_path
 
@@ -285,7 +289,7 @@ def load_library_predicates(base_dir: str) -> list[AuxiliaryPredicate]:
     return predicates
 
 
-def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[AuxiliaryPredicate]:
+def load_auxiliary_predicates(chebi_id, library_dir: str | None = None) -> list[AuxiliaryPredicate]:
     """Load the auxiliary-predicate programs a ChEBI class uses.
 
     Looks up the class's predicate names in ``class_map.json`` and loads each one's
@@ -293,8 +297,20 @@ def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[
     entry (or a missing library) yields an empty list — logged at debug level — so
     ``build_bk`` degrades gracefully to the plain atom predicates. Names are
     de-duplicated (first occurrence wins) to keep the Prolog BK consistent.
+
+    ``library_dir`` is the shared library location; defaults to
+    ``DEFAULT_AUX_LIBRARY_DIR``. Raises ``FileNotFoundError`` if no ``class_map.json``
+    exists there, rather than silently building empty background knowledge.
     """
-    names = load_class_map(problem_dir).get(str(chebi_id), [])
+    from chebILP.ilp_path_manager import get_aux_class_map_path
+
+    library_dir = library_dir or DEFAULT_AUX_LIBRARY_DIR
+    if not os.path.exists(get_aux_class_map_path(base_dir=library_dir)):
+        raise FileNotFoundError(
+            f"No auxiliary-predicate library found at {library_dir!r} (missing class_map.json). "
+            "Generate predicates first, or pass --predicate_dir with the library location."
+        )
+    names = load_class_map(library_dir).get(str(chebi_id), [])
     if not names:
         # Expected for classes that were never given auxiliary predicates; not a problem,
         # so log at debug level to avoid spamming when scanning every class of a split.
@@ -308,7 +324,7 @@ def load_auxiliary_predicates(chebi_id, problem_dir: str | None = None) -> list[
     predicates: list[AuxiliaryPredicate] = []
     seen: set[str] = set()
     for name in names:
-        path = aux_program_path(name, problem_dir)
+        path = aux_program_path(name, library_dir)
         if not os.path.exists(path):
             logger.warning(
                 "Auxiliary predicate %s used by CHEBI:%s is missing from the library (%s).",

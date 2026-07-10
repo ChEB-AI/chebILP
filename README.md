@@ -86,20 +86,24 @@ Steps 2 and 3 write files into `data/ilp_problems/` (one subdirectory per class)
 The `llm_generated_fgs` predicate set augments the plain `atoms` predicates with
 class-specific *auxiliary predicates* invented by an LLM — either shortcuts for
 recurring functional groups or concepts that are hard to express with the atom/bond
-predicates (e.g. "molecule has exactly 40 carbons"). Each predicate is a small Python
-program (RDKit `Mol` → extension) stored under
-`data/ilp_problems/chebi_{id}/auxiliary_predicates/`.
+predicates (e.g. "molecule has exactly 40 carbons"). Predicates live in a shared
+library — one `programs/<aux_name>.py` file per distinct program (RDKit `Mol` →
+extension) plus a `class_map.json` recording which predicates each class uses — kept
+separate from the ILP problem directory (default `data/llm_generated_predicates`).
 
 Generate them (requires `ANTHROPIC_API_KEY` in `.env`) before `build_bk`:
 ```bash
 python -m chebILP.generate_auxiliary_predicates \
   --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
   --chebi_version 248 \
-  --n_predicates 8
+  --n_predicates 8 \
+  --predicate_dir data/llm_generated_predicates
 ```
-Then run `build_bk` with `--predicate_set llm_generated_fgs`; the auxiliary
-predicates are merged into each class's background knowledge (predicate names are
-`aux_`-prefixed). Classes with no generated programs fall back to plain atom predicates.
+Then run `build_bk` with `--predicate_set llm_generated_fgs --predicate_dir <library>`;
+the predicates a class uses are merged into its background knowledge (predicate names are
+`aux_`-prefixed). `--predicate_dir` defaults to `data/llm_generated_predicates` and
+`build_bk` errors if no library exists there. Classes with no recorded programs fall back
+to plain atom predicates.
 
 ---
 

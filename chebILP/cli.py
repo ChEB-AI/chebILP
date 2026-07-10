@@ -27,6 +27,7 @@ def _make_ilp_builder(args):
         chebi_graph_path = args.get("chebi_graph_path")
         molecules_path = args.get("molecules_path")
         aux_timeout = args.get("aux_timeout", DEFAULT_AUX_TIMEOUT)
+        aux_library_dir = args.get("predicate_dir")
     else:
         fg_mode = args.fg_mode
         chebi_split = getattr(args, "chebi_split", None)
@@ -34,6 +35,7 @@ def _make_ilp_builder(args):
         chebi_graph_path = getattr(args, "chebi_graph_path", None)
         molecules_path = getattr(args, "molecules_path", None)
         aux_timeout = getattr(args, "aux_timeout", DEFAULT_AUX_TIMEOUT)
+        aux_library_dir = getattr(args, "predicate_dir", None)
 
     if fg_mode:
         return FGILPProblemBuilder(
@@ -50,6 +52,7 @@ def _make_ilp_builder(args):
         muggleton=False,
         predicate_set=predicate_set,
         aux_timeout=aux_timeout,
+        aux_library_dir=aux_library_dir,
     )
 
 
@@ -156,9 +159,9 @@ def _handle_build_ilp_preds_for_ensemble(args):
                     key, value = line.strip().split(": ", 1)
                     run_config[key] = value
     predicate_set = args.predicate_set or run_config.get("predicate_set", "atoms")
-    problem_dir = args.problem_dir or run_config.get("problem_dir")
+    aux_library_dir = args.predicate_dir or run_config.get("predicate_dir")
     print(f"Using predicate_set='{predicate_set}'"
-          + (f", problem_dir='{problem_dir}'" if predicate_set == "llm_generated_fgs" else ""))
+          + (f", predicate_dir='{aux_library_dir}'" if predicate_set == "llm_generated_fgs" else ""))
 
     mol_ids = []
     with open(args.chebi_split) as f:
@@ -181,7 +184,7 @@ def _handle_build_ilp_preds_for_ensemble(args):
     build_ilp_preds_tensor(
         programs, molecules_df, mol_ids, output_npy, output_meta,
         predicate_set=predicate_set, aux_timeout=args.aux_timeout,
-        problem_dir=problem_dir, label_timeout=args.label_timeout,
+        aux_library_dir=aux_library_dir, label_timeout=args.label_timeout,
         n_jobs=args.n_jobs,
     )
 
@@ -358,7 +361,7 @@ def _handle_predict(args):
         target_predicates=target_predicates,
         verbose=args.verbose,
         predicate_set=args.predicate_set,
-        problem_dir=args.problem_dir,
+        aux_library_dir=args.predicate_dir,
         aux_timeout=args.aux_timeout,
     )
 
@@ -456,6 +459,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_args(sp_bk)
     sp_bk.add_argument("--aux_timeout", type=float, default=1.0, help="Timeout (seconds) for each auxiliary predicate's extension call (default: 1.0).")
+    sp_bk.add_argument("--predicate_dir", type=str, default=None,
+                       help="Shared auxiliary-predicate library directory (llm_generated_fgs only). "
+                            "Default: data/llm_generated_predicates.")
     sp_bk.set_defaults(func=_handle_build_bk)
 
     # ── learn ────────────────────────────────────────────────────────────
@@ -521,9 +527,9 @@ def build_parser() -> argparse.ArgumentParser:
                             choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
                             help="Background-knowledge predicate set (must match the set the rules "
                                  "were learned on). Default: atoms.")
-    sp_predict.add_argument("--problem_dir", type=str, default=None,
-                            help="ILP problem directory (only needed for the llm_generated_fgs "
-                                 "predicate set, to load auxiliary predicates).")
+    sp_predict.add_argument("--predicate_dir", type=str, default=None,
+                            help="Shared auxiliary-predicate library directory (only needed for the "
+                                 "llm_generated_fgs predicate set). Default: data/llm_generated_predicates.")
     sp_predict.add_argument("--aux_timeout", type=float, default=None,
                             help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
                                  "(llm_generated_fgs only). Default: library default.")
@@ -553,9 +559,10 @@ def build_parser() -> argparse.ArgumentParser:
                          choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
                          help="Background-knowledge predicate set. Default: read from the run's config.yml "
                               "(falling back to 'atoms'). Must match the set the programs were learned on.")
-    sp_bipe.add_argument("--problem_dir", type=str, default=None,
-                         help="ILP problem directory (only needed for the llm_generated_fgs predicate set to "
-                              "load auxiliary predicates). Default: read from the run's config.yml.")
+    sp_bipe.add_argument("--predicate_dir", type=str, default=None,
+                         help="Shared auxiliary-predicate library directory (only needed for the "
+                              "llm_generated_fgs predicate set). Default: read from the run's config.yml, "
+                              "falling back to data/llm_generated_predicates.")
     sp_bipe.add_argument("--aux_timeout", type=float, default=None,
                          help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
                               "(llm_generated_fgs only). Default: library default.")

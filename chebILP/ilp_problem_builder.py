@@ -44,13 +44,14 @@ def load_fowl_smarts(path=FOWL_SMARTS_PATH) -> dict[str, str]:
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT):
+    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None):
         self.predicate_set = predicate_set
         self.problem_dir = os.path.join("data", "ilp_problems") if problem_dir is None else problem_dir
         os.makedirs(self.problem_dir, exist_ok=True)
         self.muggleton = muggleton
         # Per-call wall-clock budget for LLM-generated auxiliary predicates.
         self.aux_timeout = aux_timeout
+        self.aux_library_dir = aux_library_dir
 
         # --- Load pre-built ChEBI data -------------------------------------
         with open(chebi_graph_path, "rb") as f:
@@ -116,7 +117,7 @@ class ILPProblemBuilder:
             # so they are loaded once per target and merged into the atom-level BK.
             aux_predicates = None
             if self.predicate_set == "llm_generated_fgs":
-                aux_predicates = load_auxiliary_predicates(target_id, problem_dir=self.problem_dir)
+                aux_predicates = load_auxiliary_predicates(target_id, library_dir=self.aux_library_dir)
                 print(f"  Loaded {len(aux_predicates)} auxiliary predicate(s) for ChEBI:{target_id}")
 
             # The fowl set adds a single class-specific predicate, fowl_<target_id>,

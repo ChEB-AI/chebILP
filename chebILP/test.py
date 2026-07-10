@@ -23,7 +23,7 @@ def _silent_clingo_logger(code, message):
 _WORKER_STATE: dict = {}
 
 
-def _qualify_aux_predicates(programs, problem_dir):
+def _qualify_aux_predicates(programs, aux_library_dir):
     """Namespace auxiliary-predicate references per class so they cannot collide.
 
     Auxiliary predicate names (e.g. ``aux_long_aliphatic_chain``) are NOT unique
@@ -52,7 +52,7 @@ def _qualify_aux_predicates(programs, problem_dir):
         # Map this class's own sanitized aux names to their source files.
         name_to_source = {
             p.name: p.source_file
-            for p in load_auxiliary_predicates(cls_id, problem_dir=problem_dir)
+            for p in load_auxiliary_predicates(cls_id, library_dir=aux_library_dir)
         }
         rename: dict[str, str] = {}
         for name in used:
@@ -185,7 +185,7 @@ def build_ilp_preds_tensor(
     output_meta_path: str,
     predicate_set: str = "atoms",
     aux_timeout: float | None = None,
-    problem_dir: str | None = None,
+    aux_library_dir: str | None = None,
     label_timeout: float = 60.0,
     n_jobs: int = 1,
 ) -> pd.DataFrame:
@@ -211,8 +211,9 @@ def build_ilp_preds_tensor(
                           (must match the run being predicted for).
         aux_timeout:      per-predicate timeout for LLM auxiliary predicates
                           (llm_generated_fgs only); None → library default.
-        problem_dir:      ILP problem directory (needed to load auxiliary
-                          predicates for llm_generated_fgs).
+        aux_library_dir:  shared auxiliary-predicate library directory (needed
+                          to load predicates for llm_generated_fgs); None →
+                          DEFAULT_AUX_LIBRARY_DIR.
         label_timeout:    Clingo solving timeout in seconds (default 60).
         n_jobs:           number of worker processes to evaluate molecules in
                           parallel. 1 (default) runs serially in-process; <= 0
@@ -265,7 +266,7 @@ def build_ilp_preds_tensor(
     # list a worker needs to reload them.
     aux_load_args = None
     if predicate_set == "llm_generated_fgs":
-        valid_programs, aux_specs = _qualify_aux_predicates(valid_programs, problem_dir)
+        valid_programs, aux_specs = _qualify_aux_predicates(valid_programs, aux_library_dir)
         aux_load_args = aux_specs
         print(f"{len(aux_specs)} distinct auxiliary predicate implementation(s) referenced "
               f"by programs")
@@ -370,7 +371,7 @@ def predict_smiles(
     target_predicates: list[str],
     verbose: bool = False,
     predicate_set: str = "atoms",
-    problem_dir: str | None = None,
+    aux_library_dir: str | None = None,
     aux_timeout: float | None = None,
 ) -> list[dict]:
     """
@@ -393,8 +394,8 @@ def predict_smiles(
         verbose:           If True, print the satisfied predicates for each molecule.
         predicate_set:     Which background-knowledge predicate set to build (must match
                            the set the rules were learned on), via build_full_background.
-        problem_dir:       ILP problem directory (only needed for the llm_generated_fgs
-                           predicate set, to load class-specific auxiliary predicates).
+        aux_library_dir:   shared auxiliary-predicate library directory (only needed for the
+                           llm_generated_fgs predicate set); None → DEFAULT_AUX_LIBRARY_DIR.
         aux_timeout:       Per-predicate timeout for LLM auxiliary predicates
                            (llm_generated_fgs only); None → library default.
 
@@ -427,7 +428,7 @@ def predict_smiles(
         class_ids = [t[len("chebi_"):] for t in target_predicates if t.startswith("chebi_")]
         seen: dict[str, object] = {}
         for cls_id in class_ids:
-            for pred in load_auxiliary_predicates(cls_id, problem_dir=problem_dir):
+            for pred in load_auxiliary_predicates(cls_id, library_dir=aux_library_dir):
                 if pred.name in used_aux_names:
                     seen.setdefault(pred.name, pred)
         aux_predicates = list(seen.values())
