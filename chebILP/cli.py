@@ -23,18 +23,12 @@ def _make_ilp_builder(args):
         fg_mode = args["fg_mode"]
         chebi_split = args.get("chebi_split")
         predicate_set = args["predicate_set"]
-        max_vars = int(args.get("max_vars", 6))
-        max_body = int(args.get("max_body", 8))
-        max_clauses = int(args.get("max_clauses", 2))
         chebi_graph_path = args.get("chebi_graph_path")
         molecules_path = args.get("molecules_path")
     else:
         fg_mode = args.fg_mode
         chebi_split = getattr(args, "chebi_split", None)
         predicate_set = args.predicate_set
-        max_vars = args.max_vars
-        max_body = args.max_body
-        max_clauses = args.max_clauses
         chebi_graph_path = getattr(args, "chebi_graph_path", None)
         molecules_path = getattr(args, "molecules_path", None)
 
@@ -45,9 +39,6 @@ def _make_ilp_builder(args):
             molecules_path=molecules_path,
             dataset_path=os.path.join("data", "chebi_fgs_dataset.pkl"),
             predicate_set=predicate_set,
-            max_vars=max_vars,
-            max_body=max_body,
-            max_clauses=max_clauses,
         )
     return ILPProblemBuilder(
         chebi_split=chebi_split,
@@ -55,9 +46,6 @@ def _make_ilp_builder(args):
         molecules_path=molecules_path,
         muggleton=False,
         predicate_set=predicate_set,
-        max_vars=max_vars,
-        max_body=max_body,
-        max_clauses=max_clauses,
     )
 
 
@@ -425,6 +413,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_samples.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive samples per class.")
     sp_samples.add_argument("--min_neg_samples", type=int, default=25, help="Minimum negative samples per class.")
     sp_samples.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
+
 
     sp_samples.set_defaults(func=_handle_build_samples)
 

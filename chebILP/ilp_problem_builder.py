@@ -23,9 +23,6 @@ class ILPProblemBuilder:
         self.problem_dir = os.path.join("data", "ilp_problems") if problem_dir is None else problem_dir
         os.makedirs(self.problem_dir, exist_ok=True)
         self.muggleton = muggleton
-        self.max_vars = max_vars
-        self.max_body = max_body
-        self.max_clauses = max_clauses
 
         # --- Load pre-built ChEBI data -------------------------------------
         with open(chebi_graph_path, "rb") as f:
