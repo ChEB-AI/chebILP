@@ -89,9 +89,7 @@ def mol_to_fol_atoms(mol: Chem.Mol):
             atom_extensions.setdefault(stereo_pred, []).extend([(left, right), (right, left)])
 
     # Rings.
-    #   ring{N}(A1, …, AN) – A1…AN form an N-membered ring, listed in cyclic
-    #                        order. Exactly one fact per ring (no rotations or
-    #                        reflections). Only for N <= MAX_RING_SIZE.
+    #   ring{N}(A1, …, AN) – A1…AN form an N-membered ring (all permutations) Only for N <= MAX_RING_SIZE.
     #   in_ring{N}(A)      – A belongs to some N-membered ring (N <= MAX_RING_SIZE).
     #   in_ring(A)         – A belongs to some ring of any size.
     in_ring_atoms: set[int] = set()
@@ -100,7 +98,10 @@ def mol_to_fol_atoms(mol: Chem.Mol):
         n = len(ring)
         in_ring_atoms.update(ring)
         if n <= MAX_RING_SIZE:
-            atom_extensions.setdefault(f"ring{n}", []).append(tuple(ring))
+            for start_atom in range(n):
+                ring_permutation = ring[start_atom:] + ring[:start_atom]
+                atom_extensions.setdefault(f"ring{n}", []).append(tuple(ring_permutation))
+                atom_extensions[f"ring{n}"].append(tuple(reversed(ring_permutation)))
             in_ringN_atoms.setdefault(n, set()).update(ring)
     if in_ring_atoms:
         atom_extensions["in_ring"] = sorted(in_ring_atoms)
