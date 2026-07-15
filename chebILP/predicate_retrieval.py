@@ -132,6 +132,25 @@ class HybridPredicateRetriever:
         ]
         return cls(entries, **kwargs)
 
+    @classmethod
+    def from_rule_library(cls, base_dir: str, **kwargs) -> "HybridPredicateRetriever":
+        """Build a retriever over an ASP rule library (``.pl`` programs)."""
+        import os
+
+        from chebILP.auxiliary_rules import load_library_rules
+
+        entries = [
+            {
+                "name": p.name,
+                "description": p.description,
+                "kind": "rule",
+                # Library file stem (without .pl); what class_map.json records for reuse.
+                "stem": os.path.splitext(os.path.basename(p.source_file))[0],
+            }
+            for p in load_library_rules(base_dir)
+        ]
+        return cls(entries, **kwargs)
+
     def __len__(self) -> int:
         return len(self.entries)
 

@@ -7,6 +7,7 @@ import pickle
 import tqdm
 from chebILP.mol_to_fol import mol_to_fol_atoms, mol_to_fol_fgs
 from chebILP.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
+from chebILP.auxiliary_rules import derive_rule_extensions, load_class_rules
 from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
 from chebILP.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
@@ -44,7 +45,7 @@ def load_fowl_smarts(path=FOWL_SMARTS_PATH) -> dict[str, str]:
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None):
+    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = False):
         self.predicate_set = predicate_set
         self.problem_dir = os.path.join("data", "ilp_problems") if problem_dir is None else problem_dir
         os.makedirs(self.problem_dir, exist_ok=True)
@@ -52,6 +53,10 @@ class ILPProblemBuilder:
         # Per-call wall-clock budget for LLM-generated auxiliary predicates.
         self.aux_timeout = aux_timeout
         self.aux_library_dir = aux_library_dir
+        # When set, molecular-weight and ring-size facts are computed and made
+        # available to llm_generated_rules during rule evaluation, but never
+        # written to bk.pl (only the derived aux_* extensions are).
+        self.computed_facts = computed_facts
 
         # --- Load pre-built ChEBI data -------------------------------------
         with open(chebi_graph_path, "rb") as f:
@@ -120,6 +125,14 @@ class ILPProblemBuilder:
                 aux_predicates = load_auxiliary_predicates(target_id, library_dir=self.aux_library_dir)
                 print(f"  Loaded {len(aux_predicates)} auxiliary predicate(s) for ChEBI:{target_id}")
 
+            # llm_generated_rules: the class's auxiliary predicates are ASP rules,
+            # evaluated (below) against the atom facts plus optional computed facts.
+            # Only the derived aux_* extensions are written to bk.pl.
+            rule_programs = None
+            if self.predicate_set == "llm_generated_rules":
+                rule_programs = load_class_rules(target_id, library_dir=self.aux_library_dir)
+                print(f"  Loaded {len(rule_programs)} auxiliary rule(s) for ChEBI:{target_id}")
+
             # The fowl set adds a single class-specific predicate, fowl_<target_id>,
             # derived from a SMARTS pattern, on top of the atom predicates. Not every
             # class has a pattern; those fall back to the plain atom predicates.
@@ -136,6 +149,7 @@ class ILPProblemBuilder:
 
             selected_ids_by_split = dict()
             prolog_lines_by_split = dict()
+            computed_lines_by_split = dict()
             body_predicates = set()
             for split in ["train", "validation", "test"]:
                 exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split=split)
@@ -161,7 +175,12 @@ class ILPProblemBuilder:
                     prolog_lines += prolog_lines_fgs
                     body_predicates.update(body_predicates_fgs)
                 prolog_lines_by_split[split] = prolog_lines
-                
+
+                # Computed facts (molecular weight, ring size) feed rule evaluation
+                # only; they are intentionally kept out of prolog_lines (bk.pl).
+                if self.predicate_set == "llm_generated_rules" and self.computed_facts:
+                    computed_lines_by_split[split] = build_computed_facts(selected_rows)
+
             # for evaluating rules, merge alls splits, separate results afterwards
             if self.predicate_set in ["chebi_fg_rules", "chebi_fg_learned_rules"]:
                 all_selected_ids = [id for split in ["train", "validation", "test"] for id in selected_ids_by_split[split]]
@@ -177,6 +196,32 @@ class ILPProblemBuilder:
                                     body_predicates.add((pred, 1))
                                     in_split[split] = True
                                 prolog_lines_by_split[split].append(f"{pred}({example}).")
+
+            # llm_generated_rules: ground each class rule against the atom facts plus
+            # computed facts (all splits merged), then write only the derived aux_*
+            # extensions back into each split. The computed facts are never written.
+            if self.predicate_set == "llm_generated_rules" and rule_programs:
+                all_selected_ids = [id for split in ["train", "validation", "test"] for id in selected_ids_by_split[split]]
+                eval_facts = [line for split in ["train", "validation", "test"] for line in prolog_lines_by_split[split]]
+                if self.computed_facts:
+                    eval_facts += [line for split in ["train", "validation", "test"] for line in computed_lines_by_split.get(split, [])]
+                # The class's rules are grounded as one program, so a rule may use a predicate
+                # another of its rules defines. The head may be of any arity; each derived
+                # atom is written to the split of the molecule it belongs to.
+                extensions = derive_rule_extensions(rule_programs, eval_facts, all_selected_ids)
+                for rp in rule_programs:
+                    emitted = {split: set() for split in ["train", "validation", "test"]}
+                    for example, arg_tuples in extensions.get(rp.name, {}).items():
+                        for split in ["train", "validation", "test"]:
+                            if example not in selected_ids_by_split[split]:
+                                continue
+                            for args in arg_tuples:
+                                line = f"{rp.name}({','.join(args)})."
+                                if line in emitted[split]:
+                                    continue
+                                emitted[split].add(line)
+                                body_predicates.add((rp.name, len(args)))
+                                prolog_lines_by_split[split].append(line)
 
             for split in ["train", "validation", "test"]:
                 prolog_lines = prolog_lines_by_split[split]
@@ -392,6 +437,24 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
     return comments + [line for lines in lines_by_predicate.values() for line in lines], [(pred, arities[pred]) for pred in arities.keys()]
 
 
+def build_computed_facts(rows):
+    """Molecular-weight and ring-size facts used only to evaluate llm_generated_rules.
+
+    Emits ``mol_weight(Mol, Wint)`` (rounded ``Descriptors.MolWt``) and one
+    ``ring_size(Mol, Size)`` per SSSR ring. These facts are fed to Clingo when a
+    class's auxiliary rules are grounded, but are never written to ``bk.pl`` — only
+    the derived ``aux_*`` extensions are persisted. Returns a flat list of Prolog lines.
+    """
+    from rdkit.Chem import Descriptors
+
+    lines = []
+    for row in rows.itertuples():
+        lines.append(f"mol_weight({row.Index},{round(Descriptors.MolWt(row.mol))}).")
+        for ring in row.mol.GetRingInfo().AtomRings():
+            lines.append(f"ring_size({row.Index},{len(ring)}).")
+    return lines
+
+
 def build_full_background(
     rows: pd.DataFrame,
     predicate_set: AVAILABLE_PREDICATE_SETS = "atoms",
@@ -399,6 +462,8 @@ def build_full_background(
     aux_timeout: float = DEFAULT_AUX_TIMEOUT,
     aux_failures=None,
     fowl_smarts=None,
+    rule_programs=None,
+    computed_facts: bool = False,
 ) -> list[str]:
     """Build one flat background-knowledge fact list for the molecules in ``rows``.
 
@@ -429,6 +494,25 @@ def build_full_background(
             CHEBI_FG_RULES_PATH if predicate_set == "chebi_fg_rules" else CHEBI_FG_LEARNED_RULES_PATH
         )
         prolog_lines += rule_lines
+
+    # llm_generated_rules: recompute the class's aux_* extensions exactly as build_bk
+    # does (ground each rule over atom + computed facts) and append them as facts, so a
+    # learned program's aux_* body literals resolve. Computed facts stay local to the
+    # grounding and are not added to the returned BK.
+    if predicate_set == "llm_generated_rules" and rule_programs:
+        eval_facts = list(prolog_lines)
+        if computed_facts:
+            eval_facts += build_computed_facts(rows)
+        mol_ids = [str(i) for i in rows.index]
+        extensions = derive_rule_extensions(rule_programs, eval_facts, mol_ids)
+        for rp in rule_programs:
+            emitted = set()
+            for arg_tuples in extensions.get(rp.name, {}).values():
+                for args in arg_tuples:
+                    line = f"{rp.name}({','.join(args)})."
+                    if line not in emitted:
+                        emitted.add(line)
+                        prolog_lines.append(line)
 
     return prolog_lines
 

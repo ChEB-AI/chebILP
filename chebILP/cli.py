@@ -28,6 +28,7 @@ def _make_ilp_builder(args):
         molecules_path = args.get("molecules_path")
         aux_timeout = args.get("aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = args.get("predicate_dir")
+        computed_facts = args.get("computed_facts", False)
     else:
         fg_mode = args.fg_mode
         chebi_split = getattr(args, "chebi_split", None)
@@ -36,6 +37,7 @@ def _make_ilp_builder(args):
         molecules_path = getattr(args, "molecules_path", None)
         aux_timeout = getattr(args, "aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = getattr(args, "predicate_dir", None)
+        computed_facts = getattr(args, "computed_facts", False)
 
     if fg_mode:
         return FGILPProblemBuilder(
@@ -53,6 +55,7 @@ def _make_ilp_builder(args):
         predicate_set=predicate_set,
         aux_timeout=aux_timeout,
         aux_library_dir=aux_library_dir,
+        computed_facts=computed_facts,
     )
 
 
@@ -181,11 +184,13 @@ def _handle_build_ilp_preds_for_ensemble(args):
     output_npy = os.path.join(args.run_dir, f"full_{prefix}_preds.npy")
     output_meta = os.path.join(args.run_dir, f"full_{prefix}_preds_metadata.json")
 
+    computed_facts = getattr(args, "computed_facts", False) or run_config.get("computed_facts") == "True"
+
     build_ilp_preds_tensor(
         programs, molecules_df, mol_ids, output_npy, output_meta,
         predicate_set=predicate_set, aux_timeout=args.aux_timeout,
         aux_library_dir=aux_library_dir, label_timeout=args.label_timeout,
-        n_jobs=args.n_jobs,
+        n_jobs=args.n_jobs, computed_facts=computed_facts,
     )
 
 
@@ -363,6 +368,7 @@ def _handle_predict(args):
         predicate_set=args.predicate_set,
         aux_library_dir=args.predicate_dir,
         aux_timeout=args.aux_timeout,
+        computed_facts=getattr(args, "computed_facts", False),
     )
 
     if args.output:
@@ -461,8 +467,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_args(sp_bk)
     sp_bk.add_argument("--aux_timeout", type=float, default=1.0, help="Timeout (seconds) for each auxiliary predicate's extension call (default: 1.0).")
     sp_bk.add_argument("--predicate_dir", type=str, default=None,
-                       help="Shared auxiliary-predicate library directory (llm_generated_fgs only). "
-                            "Default: data/llm_generated_predicates.")
+                       help="Shared auxiliary-predicate library directory (llm_generated_fgs: "
+                            "data/llm_generated_predicates; llm_generated_rules: data/llm_generated_rules).")
+    sp_bk.add_argument("--computed_facts", action="store_true",
+                       help="For llm_generated_rules: compute mol_weight/ring_size facts to evaluate "
+                            "the rules against (kept out of bk.pl; only aux_* extensions are saved).")
     sp_bk.set_defaults(func=_handle_build_bk)
 
     # ── learn ────────────────────────────────────────────────────────────
@@ -534,6 +543,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp_predict.add_argument("--aux_timeout", type=float, default=None,
                             help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
                                  "(llm_generated_fgs only). Default: library default.")
+    sp_predict.add_argument("--computed_facts", action="store_true",
+                            help="For llm_generated_rules: recompute mol_weight/ring_size facts when "
+                                 "grounding the rules (must match how the rules were built).")
     sp_predict.set_defaults(func=_handle_predict)
 
     # ── build_ilp_preds_for_ensemble ─────────────────────────────────────
@@ -567,6 +579,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp_bipe.add_argument("--aux_timeout", type=float, default=None,
                          help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
                               "(llm_generated_fgs only). Default: library default.")
+    sp_bipe.add_argument("--computed_facts", action="store_true",
+                         help="For llm_generated_rules: recompute mol_weight/ring_size facts when "
+                              "grounding the rules. Default: read from the run's config.yml.")
     sp_bipe.add_argument("--n_jobs", type=int, default=1,
                          help="Worker processes for evaluating molecules in parallel. "
                               "1 (default) runs serially; <= 0 uses all CPU cores.")

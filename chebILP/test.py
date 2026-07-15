@@ -68,6 +68,55 @@ def _qualify_aux_predicates(programs, aux_library_dir):
     return rewritten, list(specs.items())
 
 
+def _qualify_aux_rules(programs, rule_library_dir):
+    """Namespace auxiliary-RULE references per class (llm_generated_rules).
+
+    Like :func:`_qualify_aux_predicates`, but for ASP rule programs: the same sanitized
+    ``aux_`` name can back different rules in different classes, and every class's program
+    is grounded against one shared background knowledge. Rewrite each program's aux
+    references to a class-qualified name (``<name>_<class_id>``) and return the matching
+    qualified :class:`RuleProgram` objects so the background emits each class's own
+    extension under that name.
+
+    Returns ``(rewritten_programs, qualified_rule_programs)``. Rule programs carry only
+    strings, so (unlike Python aux predicates) they are picklable and shipped to workers
+    directly rather than reloaded from disk.
+
+    EVERY aux name a class's programs mention is renamed, not just the heads the learned
+    program uses, and the class's whole rule set is returned rather than the subset it uses.
+    Both are required because the programs are grounded together: a head the learned program
+    never mentions may still be the helper another head depends on, and an unqualified helper
+    would otherwise merge with a same-named helper from a different class.
+    """
+    import re
+    from chebILP.auxiliary_rules import RuleProgram, load_class_rules
+
+    rewritten: dict = {}
+    qualified: dict[str, RuleProgram] = {}
+    for cls_id, prog in programs.items():
+        if not re.search(r"\baux_\w+", prog):
+            rewritten[cls_id] = prog
+            continue
+        rps = load_class_rules(cls_id, library_dir=rule_library_dir)
+        rename = {
+            name: f"{name}_{cls_id}"
+            for rp in rps
+            for name in re.findall(r"\baux_\w+", rp.source)
+        }
+        substitute = lambda text: re.sub(r"\baux_\w+", lambda m: rename.get(m.group(0), m.group(0)), text)
+        for rp in rps:
+            qname = rename[rp.name]
+            if qname not in qualified:
+                qualified[qname] = RuleProgram(
+                    name=qname,
+                    description=rp.description,
+                    source=substitute(rp.source),
+                    source_file=rp.source_file,
+                )
+        rewritten[cls_id] = substitute(prog)
+    return rewritten, list(qualified.values())
+
+
 def _load_qualified_aux(specs):
     """Reload auxiliary predicates for a worker under their class-qualified names.
 
@@ -148,6 +197,7 @@ def _evaluate_molecule(payload):
             row_df, predicate_set=st["predicate_set"],
             aux_predicates=st["aux_predicates"], aux_timeout=st["aux_timeout"],
             aux_failures=aux_failures, fowl_smarts=st.get("fowl_smarts"),
+            rule_programs=st.get("rule_programs"), computed_facts=st.get("computed_facts", False),
         )
     except Exception as e:  # noqa: BLE001
         return mol_id, [], f"error: {e}", aux_failures
@@ -188,6 +238,7 @@ def build_ilp_preds_tensor(
     aux_library_dir: str | None = None,
     label_timeout: float = 60.0,
     n_jobs: int = 1,
+    computed_facts: bool = False,
 ) -> pd.DataFrame:
     """
     Evaluate ILP programs against every molecule in mol_order and save the
@@ -271,6 +322,14 @@ def build_ilp_preds_tensor(
         print(f"{len(aux_specs)} distinct auxiliary predicate implementation(s) referenced "
               f"by programs")
 
+    # llm_generated_rules: qualify aux rule references per class and recompute their
+    # extensions in the background. RuleProgram objects are picklable, so they ride in
+    # worker_state directly (no per-worker reload like the Python predicates need).
+    rule_programs = None
+    if predicate_set == "llm_generated_rules":
+        valid_programs, rule_programs = _qualify_aux_rules(valid_programs, aux_library_dir)
+        print(f"{len(rule_programs)} distinct auxiliary rule(s) referenced by programs")
+
     # fowl predicates are class-specific (fowl_<cls_id>) and derived from a shared
     # SMARTS table. Gather the patterns for the classes being predicted so the same
     # facts the programs were learned on are emitted into each molecule's background.
@@ -288,6 +347,7 @@ def build_ilp_preds_tensor(
     worker_state = dict(
         programs_str=programs_str, col_of=col_of, predicate_set=predicate_set,
         aux_timeout=aux_timeout, label_timeout=label_timeout, fowl_smarts=fowl_smarts,
+        rule_programs=rule_programs, computed_facts=computed_facts,
     )
 
     # Ship mols as RDKit binary with all properties so nothing (stereo/CIP perception,
@@ -373,6 +433,7 @@ def predict_smiles(
     predicate_set: str = "atoms",
     aux_library_dir: str | None = None,
     aux_timeout: float | None = None,
+    computed_facts: bool = False,
 ) -> list[dict]:
     """
     Predict which target predicates each molecule (given as a SMILES string) satisfies.
@@ -433,6 +494,17 @@ def predict_smiles(
                     seen.setdefault(pred.name, pred)
         aux_predicates = list(seen.values())
 
+    # llm_generated_rules: qualify the aux rule references in the rule set per class and
+    # gather the matching rule programs so the background recomputes their extensions.
+    rule_programs = None
+    if predicate_set == "llm_generated_rules":
+        programs_by_class = {
+            t[len("chebi_"):]: "\n".join(r for r in rules if f"chebi_{t[len('chebi_'):]}" in r)
+            for t in target_predicates if t.startswith("chebi_")
+        }
+        rules_qualified, rule_programs = _qualify_aux_rules(programs_by_class, aux_library_dir)
+        rules = "\n".join(rules_qualified.values()).split("\n")
+
     # fowl predicates are class-specific: gather the SMARTS patterns for the target
     # classes so the background emits the fowl_<cls_id> facts the rules reference.
     fowl_smarts = None
@@ -455,8 +527,11 @@ def predict_smiles(
         background_facts = build_full_background(
             mol_df, predicate_set=predicate_set,
             aux_predicates=aux_predicates, aux_timeout=aux_timeout,
-            fowl_smarts=fowl_smarts,
+            fowl_smarts=fowl_smarts, rule_programs=rule_programs, computed_facts=computed_facts,
         )
+        print(f"Evaluating {smiles!r} against {len(rules)} rules and {len(background_facts)} background facts...")
+        print(f"  Target predicates: {', '.join(target_predicates)}")
+        print(f"  Background knowledge: {background_facts}")
 
         start_time = time.perf_counter()
         try:
