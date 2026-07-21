@@ -265,9 +265,25 @@ class AuxiliaryGenerator(ABC):
                 f.write(f"- Rejected: {'; '.join(selection['rejected']) or '(none)'}\n\n")
             if parsed is not None:
                 f.write(f"## Model reasoning\n\n{parsed.reasoning}\n\n")
+                f.write(self._format_output(parsed))
             f.write("## System prompt\n\n```\n" + self.system_prompt + "\n```\n\n")
             f.write("## User prompt\n\n```\n" + prompt + "\n```\n\n")
-            f.write("## Raw LLM response\n\n```json\n")
-            f.write(raw if raw is not None else "(no response — request failed)")
-            f.write("\n```\n")
+            if parsed is None:
+                f.write("## Raw LLM response\n\n```json\n")
+                f.write(raw if raw is not None else "(no response — request failed)")
+                f.write("\n```\n")
         return log_path
+
+    def _format_output(self, parsed) -> str:
+        """Render the model's parsed answer as readable Markdown."""
+        parts = ["## Model output\n\n"]
+        reuse = ", ".join(f"[{i}]" for i in parsed.reuse) or "(none)"
+        parts.append(f"- Reuse candidates: {reuse}\n\n")
+        if not parsed.new:
+            parts.append(f"No new {self.noun}s proposed.\n\n")
+            return "".join(parts)
+        parts.append(f"### New {self.noun}s\n\n")
+        for item in parsed.new:
+            parts.append(f"#### `{item.name}`\n\n{item.description}\n\n")
+            parts.append("```\n" + item.program.strip("\n") + "\n```\n\n")
+        return "".join(parts)
