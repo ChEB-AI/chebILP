@@ -2,8 +2,8 @@
 # For each program, call an LLM to get a potentially better program.
 # Input to the LLM: available predicates with explanations, ChEBI class name and
 # definition, superclass information, and the original ILP program.
-# The ILP program is always relative to the superclass: it only needs to distinguish the
-# class from its sibling classes. The LLM may also explain the improved program.
+# The ILP program does global classification: it must distinguish the class from all other
+# molecules, with its siblings as the hardest negatives. The LLM may also explain the improved program.
 #
 # Usage:
 #   python -m chebILP.enhance_with_llms \
@@ -53,8 +53,6 @@ Rules use this format:
 where V0 is the molecule and V1, V2, ... are atom variables.
 Multiple clauses are allowed; a molecule is classified positively if ANY clause is satisfied.
 
-The classification is RELATIVE to the parent class: positive examples are molecules of
-the target class, negative examples are molecules of sibling classes under the same parent.
 You must only use the predicates listed in the prompt. The predicates 'aromatic' and 'aliphatic' apply to the whole molecule, not individual atoms.
 There are no predicates referring to ring membership, but you can use bond predicates to capture local structural patterns.
 
@@ -87,7 +85,7 @@ def _build_prompt(chebi_id: str, info: dict, original_program: str) -> str:
     return f"""\
 Target class: {info['name']} (CHEBI:{chebi_id})
 {definition_str}{parent_str}
-The rule must distinguish this class from its sibling classes (other subclasses of the same parent).
+The rule must distinguish this class from all other molecules
 
 Predicate reference:
 {_PREDICATE_EXPLANATIONS}
