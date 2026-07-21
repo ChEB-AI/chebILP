@@ -11,7 +11,7 @@ from chebILP.auxiliary_rules import derive_rule_extensions, load_class_rules
 from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
 from chebILP.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
-from chebILP.utils import AVAILABLE_PREDICATE_SETS
+from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
 from chebILP.clingo_eval import evaluate_with_clingo
 
@@ -275,6 +275,23 @@ class ILPProblemBuilder:
         return self.molecules.loc[[str(id) in selected for id in self.molecules.index]]
 
 
+    def build_negative_mix(self, neg_pool: pd.DataFrame, sibling_ids: set, max_samples: int, random_state: int = 42) -> pd.DataFrame:
+        """50:50 mix of direct-sibling negatives and random negatives from ``neg_pool``.
+
+        Up to half of ``max_samples`` are the target's direct siblings (near-misses); the rest
+        are drawn uniformly at random from the non-sibling remainder. When a class has fewer
+        siblings than half, the random draw takes up the slack rather than the set shrinking, so
+        the objective is global classification instead of separation from the superclass alone.
+        """
+        half = max_samples // 2
+        sibling_negs = neg_pool[neg_pool.index.astype(str).isin(sibling_ids)]
+        if len(sibling_negs) > half:
+            sibling_negs = sibling_negs.sample(half, random_state=random_state)
+        random_pool = neg_pool[~neg_pool.index.astype(str).isin(sibling_ids)]
+        n_random = min(max_samples - len(sibling_negs), len(random_pool))
+        random_negs = random_pool.sample(n_random, random_state=random_state) if n_random > 0 else random_pool.iloc[:0]
+        return pd.concat([sibling_negs, random_negs])
+
     def gather_samples_for_chebi_cls(self, target_id: str, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
         descendants = list(self.hierarchy_graph.predecessors(target_id)) + [target_id]
         # not all descendants are molecules (i.e., have a SMILES annotation) -> only take the ones that are in the samples_df (i.e. have a SMILES annotation and are in the 3_STAR subset)
@@ -286,18 +303,25 @@ class ILPProblemBuilder:
         if len(df_neg) < min_neg_samples:
             print(f"ChEBI class {target_id} does not have enough negative samples (found {len(df_neg)}, required are at least {min_neg_samples}). Got samples {df_neg.index.tolist()}")
         
+        # Direct-sibling molecules: subclasses shared with the target's parents. They form the
+        # near-miss half of every split's negatives; the other half is drawn uniformly at random
+        # from the full negative pool. The objective is therefore global classification, not
+        # separating the target from its superclass only.
+        pos_ids, sibling_neg_ids = get_direct_neighbors(target_id, self.chebi_graph, self.hierarchy_graph, self.molecules)
+        sibling_neg_ids = set(sibling_neg_ids)
+
         samples_by_split = dict()
         pos_train_samples = df_pos[df_pos.index.astype(str).isin(self.train_ids)]
         samples_by_split[("pos", "train")] = pos_train_samples.sample(min(max_pos_samples, len(pos_train_samples)), random_state=42) # if there are more positives than max_pos_samples, sample randomly
         neg_train_samples = df_neg[df_neg.index.astype(str).isin(self.train_ids)]
-        samples_by_split[("neg", "train")] = self.get_closest_negatives(neg_train_samples, target_id, min_samples=min_neg_samples, max_samples=max_neg_samples) # get closest negatives for training (not necessarily direct neighbors, but keep collecting from farther rings until we have enough samples)
+        samples_by_split[("neg", "train")] = self.build_negative_mix(neg_train_samples, sibling_neg_ids, max_neg_samples)
 
-        # only use direct neighbors for validation / testing
-        pos_ids, neg_ids_direct = get_direct_neighbors(target_id, self.chebi_graph, self.hierarchy_graph, self.molecules)
         samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(self.validation_ids) & df_pos.index.astype(str).isin(pos_ids)]
-        samples_by_split[("neg", "validation")] = df_neg[df_neg.index.astype(str).isin(self.validation_ids) & df_neg.index.astype(str).isin(neg_ids_direct)]
+        neg_val_samples = df_neg[df_neg.index.astype(str).isin(self.validation_ids)]
+        samples_by_split[("neg", "validation")] = self.build_negative_mix(neg_val_samples, sibling_neg_ids, max_neg_samples)
         samples_by_split[("pos", "test")] = df_pos[df_pos.index.astype(str).isin(self.test_ids) & df_pos.index.astype(str).isin(pos_ids)]
-        samples_by_split[("neg", "test")] = df_neg[df_neg.index.astype(str).isin(self.test_ids) & df_neg.index.astype(str).isin(neg_ids_direct)]
+        neg_test_samples = df_neg[df_neg.index.astype(str).isin(self.test_ids)]
+        samples_by_split[("neg", "test")] = self.build_negative_mix(neg_test_samples, sibling_neg_ids, max_neg_samples)
         
         for (posneg, split), df in samples_by_split.items():
             exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split=split)
@@ -344,8 +368,7 @@ def get_direct_neighbors(
     return pos_ids, neg_ids
 
 
-def get_atom_id(atom: int, molecule_id):
-    return "a" + str(molecule_id) + "_" + str(atom + 1)  # Prolog indices start at 1
+
 
 
 def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT, aux_failures=None, predicate_set="atoms", fowl_smarts=None):

@@ -76,3 +76,7 @@ def tee_output(log_path):
         sys.stdout = old_stdout
         sys.stderr = old_stderr
         log_file.close()
+
+
+def get_atom_id(atom: int, molecule_id):
+    return "a" + str(molecule_id) + "_" + str(atom + 1)  # Prolog indices start at 1
