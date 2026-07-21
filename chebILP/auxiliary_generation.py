@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 
 from chebILP.auxiliary_predicates import set_class_predicates
 from chebILP.ilp_path_manager import get_aux_generation_log_path
+from chebILP.utils import sort_labels_by_hierarchy
 
 
 class NewItem(BaseModel):
@@ -256,7 +257,7 @@ class AuxiliaryGenerator(ABC):
         print(f"  {len(self.retriever)} {self.noun}(s) in the library.")
 
         total = 0
-        for chebi_id in chebi_ids:
+        for chebi_id in sort_labels_by_hierarchy(chebi_ids, chebi_graph):
             info = get_class_info(chebi_graph, chebi_id)
             print(f"CHEBI:{chebi_id} ({info['name']})...")
             try:
