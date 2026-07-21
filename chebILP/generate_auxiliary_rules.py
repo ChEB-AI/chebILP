@@ -1,22 +1,7 @@
 # Pipeline: for each ChEBI class, ask an LLM to write AUXILIARY PREDICATES as ASP/clingo
-# rules (not Python) that help ILP tell the class apart from its siblings. Each predicate is
-# a small logic program — one head plus any helper clauses — over the background facts the
-# ILP system already produces, plus optional computed facts (molecular weight, ring size).
-# The head may be of any arity (a molecule, an atom, an atom pair, ...); it applies to a
-# molecule when one of its arguments is that molecule or one of its atoms. See
-# chebILP.auxiliary_rules for the storage contract and how the extension is attributed, and
-# chebILP.auxiliary_generation for the shared generate -> validate -> store loop.
-#
+# rules that help ILP define a class.
 # This is the rule-based counterpart of chebILP.generate_auxiliary_predicates (Python programs).
 # Rules are kept in ONE shared library and retrieved per class for reuse (hybrid BM25 + dense).
-#
-# Two EXP-014 optimisations are folded in:
-#   - validate-and-reject: every generated rule is grounded against the class's train pos/neg
-#     molecules. Rules that fire on no molecule are dropped, as are molecule-level flags true
-#     of >=95% of them (an atom-level predicate that fires everywhere still says WHICH atoms,
-#     so it is kept).
-#   - example SMILES: a few positive and near-miss-negative (sibling) molecules are shown so
-#     the model can ground its logic against real structures.
 #
 # Usage:
 #   python -m chebILP.generate_auxiliary_rules \
@@ -35,9 +20,6 @@ from dotenv import load_dotenv
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 
-# Import from submodules rather than the package root to avoid the slow dataset_builder ->
-# pandas import chain (painful when the venv lives on a WSL /mnt/c mount).
-from chebi_utils.obo_extractor import build_chebi_graph  # noqa: F401 (kept for parity/future use)
 from chebILP.mol_to_fol import mol_to_fol_atoms
 from chebILP.auxiliary_generation import (
     OUTPUT_CONTRACT,
@@ -55,6 +37,7 @@ from chebILP.auxiliary_rules import (
     rule_program_error,
 )
 from chebILP.ilp_path_manager import get_exs_path
+from chebILP.utils import get_atom_id
 from chebILP.predicate_retrieval import HybridPredicateRetriever
 
 
@@ -85,7 +68,7 @@ _COMPUTED_PREDICATES = """\
 _SYSTEM_PROMPT = """\
 You are an expert in cheminformatics, Answer Set Programming (clingo/ASP), and Inductive
 Logic Programming (ILP). Your task is to write AUXILIARY PREDICATES that help an ILP system
-distinguish a ChEBI chemical class from its sibling classes under the same parent.
+distinguish a ChEBI chemical class from other molecules. 
 
 Each predicate has three parts, which you supply as separate fields. The program is a 
 logic program that needs to be parsed by clingo.
@@ -98,23 +81,17 @@ logic program that needs to be parsed by clingo.
 Contract:
 - "program" holds ONLY clauses. Do not repeat the name or description inside it as comments.
 - The head may take WHATEVER arguments suit the property, and its name MUST match the "name"
-  field. A molecule predicate aux_x(M), an atom predicate aux_x(A), an atom pair aux_x(A1,A2)
-  or any other combination are all equally welcome — the ILP system consumes the derived
-  extension directly, and an atom- or pair-level predicate is often the more useful one.
-  Pick the arity the chemistry calls for; do not force a property to be molecule-level.
+  field. A predicate can describe a property of the molecule, an atom or a relation between atoms.
 - Your programs for this class are grounded TOGETHER, so a program MAY use a predicate that
   another one defines (including one you are reusing from the library) — build them up in
-  layers rather than repeating clauses. Two consequences: define each helper ONCE, in the
-  program it most belongs to; and never give the same name two different definitions, since
-  they would merge. If one program has a syntax error it is dropped on its own, and anything
-  depending on it derives nothing and is dropped too — so keep each program simple.
+  layers rather than repeating clauses. Define each helper ONCE, in the
+  program it most belongs to. Keep each program simple to avoid errors and make it easier to reuse later.
 - You MAY use clingo aggregates (#count, #sum), comparisons (=, !=, <, <=, >, >=) and
   negation-as-failure (not ...). You MAY define recursive helper predicates.
 - Every variable in the head must be bound by the body. Never leave the program unsafe.
 - There is no `or` and no parentheses for grouping in a body. Write one clause per
   alternative — the head holds if ANY clause does (see aux_carboxyl_carbon below).
-  Beware: `a ; b` in a body is NOT `or` — clingo reads `;` as `,`, so it silently means
-  `and`. `(a ; b)` is a syntax error and the whole program is dropped.
+  Don't use `a ; b` as an `or`. That is a syntax error.
 - A variable that appears ONLY inside an aggregate is LOCAL to it and does NOT bind the head.
   Bind it in the body outside the aggregate first:
       aux_x(M) :- has_atom(M,_), 2 = #count{ A : has_atom(M,A), aux_y(A) }.  % M bound: OK
@@ -125,11 +102,9 @@ Contract:
 There is a SHARED LIBRARY of auxiliary rules already written for other classes. You will be
 shown the most relevant existing ones; prefer to REUSE those that fit over writing near-duplicates.
 
-Several kinds of predicate are useful — here is a worked example of each. Note how the arity
-varies: pick whatever shape expresses the property most directly.
+Here a some examples of different kinds of useful predicates.
 
-A substructure or local pattern (element / bond / ring<=8 / charge / H / stereo), a plain
-conjunction. Molecule-level, "does the molecule contain this?":
+A substructure or local pattern. Molecule-level, "does the molecule contain this?":
     name:        aux_has_azetidine_ring
     description: contains a 4-membered ring holding a nitrogen
     program:     aux_has_azetidine_ring(M) :- has_atom(M,A), n(A), ring4(A,B,C,D).
@@ -148,9 +123,8 @@ An atom PAIR, when the property is a relationship between two atoms:
     program:     aux_amide_bond(C,N) :- c(C), o(O),
                      bDOUBLE(C,O), has_bond_to(C,N), n(N).
 
-A count or an absence, expressed with aggregates or negation. These are the highest-value
-predicates: sibling classes are often told apart only by HOW MANY of a group there are (N
-carbons, N sugar units, one vs two carboxyls), and a plain conjunction cannot count.
+A count, expressed with aggregates. Use this if it is relevant HOW MANY of a group there are (N
+carbons, N sugar units, one vs two carboxyls).
     name:        aux_exactly_two_ether_oxygens
     description: has exactly two ether oxygens (O bonded to two carbons, no hydrogen)
     program:     aux_ether_oxygen(O) :- o(O), has_0_hs(O), has_bond_to(O,C1),
@@ -159,9 +133,7 @@ carbons, N sugar units, one vs two carboxyls), and a plain conjunction cannot co
                      2 = #count{ O : has_atom(M,O), aux_ether_oxygen(O) }.
 
 An absence, via negation. Note it BUILDS ON aux_carboxyl_carbon above instead of restating
-it — that is the layering to aim for, and it keeps one definition of "carboxyl" rather than
-two that can disagree. Negation only works against a predicate something defines: negating a
-predicate no program of yours defines silently succeeds for every molecule.
+it — that is the layering to aim for. 
     name:        aux_no_carboxyl
     description: has no carboxyl group
     program:     aux_has_carboxyl(M) :- has_atom(M,C), aux_carboxyl_carbon(C).
@@ -175,7 +147,7 @@ A chain length, path or connectivity property, expressed with recursion:
                  aux_large_carbon_skeleton(M) :- has_atom(M,A), c(A),
                      22 <= #count{ B : aux_carbon_reachable(A,B) }.
 
-A property that needs the computed facts (molecular weight, or rings larger than 8):
+A property that needs computed facts (molecular weight, or rings larger than 8):
     name:        aux_has_macrocycle
     description: contains a ring larger than 8 atoms
     program:     aux_has_macrocycle(M) :- ring_size(M,S), S > 8.
@@ -185,12 +157,12 @@ Guidance (learned from failure analysis):
 - Prefer small predicates identifying specific molecular features. The ILP system will later 
   combine them into larger conjunctions. Favor predicates that can be reused across many 
   classes.
-- Counting and absence are the highest-value predicates: siblings often differ only in the
-  NUMBER of a group (N carbons, N sugar units, one vs two carboxyls). Reach for #count / not.
+- Counting and absence are the highest-value predicates: a close sibling often differs only in
+  the NUMBER of a group (N carbons, N sugar units, one vs two carboxyls). Reach for #count / not.
 - A carboxyl group's -OH oxygen also carries one hydrogen: a "hydroxy oxygen" test written as
   o(O), has_1_hs(O) matches it too. Exclude the carboxyl carbon when counting hydroxy groups.
 - Rings of size <=8 use in_ringN/ringN; rings LARGER than 8 must use ring_size(M,S), S>8.
-- Prefer predicates TRUE for many molecules of the target class and FALSE for its siblings.\
+- Prefer predicates TRUE for many molecules of the target class and FALSE for other molecules.\
 """
 
 # Header comments the model may repeat inside "program"; the pipeline synthesizes them.
@@ -198,11 +170,7 @@ _HEADER_RE = re.compile(r"^\s*%\s*(PREDICATE_NAME|DESCRIPTION)\s*:", re.IGNORECA
 
 
 def _load_train_samples(chebi_id, problem_dir, molecules, max_pos, max_neg):
-    """Return ``(pos_rows, neg_rows)`` DataFrames from the class's train exs.pl.
-
-    Negatives in exs.pl are the closest-sibling negatives (built by build_samples), i.e. the
-    near-miss molecules the rules must exclude.
-    """
+    """Return ``(pos_rows, neg_rows)`` DataFrames from the class's train exs.pl."""
     exs_path = get_exs_path(chebi_id, base_dir=problem_dir, split="train")
     pos_ids, neg_ids = [], []
     with open(exs_path, "r") as f:
@@ -218,13 +186,9 @@ def _load_train_samples(chebi_id, problem_dir, molecules, max_pos, max_neg):
     return pos_rows, neg_rows
 
 
-def _atom_id(atom: int, molecule_id) -> str:
-    return f"a{molecule_id}_{atom + 1}"  # Prolog indices start at 1 (matches build_bk)
-
-
 def _mol_facts(mol_id, mol, computed_facts: bool) -> list[str]:
     """Atom (+ optional computed) facts for one molecule, matching build_background_chemlog."""
-    lines = [f"has_atom({mol_id},{_atom_id(a.GetIdx(), mol_id)})." for a in mol.GetAtoms()]
+    lines = [f"has_atom({mol_id},{get_atom_id(a.GetIdx(), mol_id)})." for a in mol.GetAtoms()]
     atom_extensions, mol_extensions = mol_to_fol_atoms(mol)
     for predicate, indices in atom_extensions.items():
         if predicate.startswith("cip_code_"):
@@ -235,10 +199,10 @@ def _mol_facts(mol_id, mol, computed_facts: bool) -> list[str]:
             continue
         if isinstance(indices[0], tuple):
             for args in indices:
-                lines.append(f"{predicate}({','.join(_atom_id(a, mol_id) for a in args)}).")
+                lines.append(f"{predicate}({','.join(get_atom_id(a, mol_id) for a in args)}).")
         else:
             for idx in indices:
-                lines.append(f"{predicate}({_atom_id(idx, mol_id)}).")
+                lines.append(f"{predicate}({get_atom_id(idx, mol_id)}).")
     for predicate in mol_extensions:
         lines.append(f"{predicate}({mol_id}).")
     if computed_facts:
@@ -320,8 +284,7 @@ class RuleGenerator(AuxiliaryGenerator):
                 for s in info["siblings"][:8]
             )
             sibling_str = (
-                "Sibling classes (the NEGATIVES your predicates must exclude — look for the "
-                "contrast, e.g. they may differ only by a count or chain length):\n" + parts + "\n"
+                "Sibling classes (look for the contrast, e.g. they may differ only by a count or chain length):\n" + parts + "\n"
             )
 
         mol_lines = []
@@ -329,7 +292,7 @@ class RuleGenerator(AuxiliaryGenerator):
             mol_lines.append("Positive example molecules (SMILES):")
             mol_lines += [f"  + {s}" for s in ctx["pos_smiles"]]
         if ctx["neg_smiles"]:
-            mol_lines.append("Negative / near-miss sibling molecules (SMILES):")
+            mol_lines.append("Negative molecules (SMILES):")
             mol_lines += [f"  - {s}" for s in ctx["neg_smiles"]]
         mol_str = ("\n".join(mol_lines) + "\n") if mol_lines else ""
 
@@ -346,8 +309,8 @@ Background predicates ALREADY available:
 {mol_str}
 {format_candidates(candidates)}
 Choose up to {self.n_predicates} auxiliary predicates that would help distinguish
-"{info['name']}" from its sibling classes. REUSE the candidates above wherever they fit; only
-write NEW rules for properties they do not already cover. Favour count/absence and
+"{info['name']}" from other molecules. REUSE the candidates above wherever they
+fit; only write NEW rules for properties they do not already cover. Favour count/absence and
 recursion predicates, which the ILP system cannot express on its own.
 
 {OUTPUT_CONTRACT}

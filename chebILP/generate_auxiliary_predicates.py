@@ -1,11 +1,12 @@
 # Pipeline: for each ChEBI class, ask an LLM to choose auxiliary predicates that help
-# ILP tell the class apart from its siblings. Each auxiliary predicate is a small
+# ILP tell the class apart from other molecules.
+# Each auxiliary predicate is a small
 # self-contained Python program mapping an RDKit Mol to a predicate extension (see
 # chebILP.auxiliary_predicates for the contract, and chebILP.auxiliary_generation for the
 # shared generate -> validate -> store loop).
 #
-# EXP-014: predicates are kept in ONE shared library instead of being regenerated per
-# class. For each class we first RETRIEVE the most relevant existing predicates (hybrid
+# Predicates are kept in ONE shared library. For each class we first RETRIEVE the most 
+# relevant existing predicates (hybrid
 # BM25 + dense, see chebILP.predicate_retrieval) and offer them to the LLM, which may
 # reuse any of them and/or invent new ones. Reused + new predicates are recorded for the
 # class in class_map.json; new programs are added to the library. `build_bk
@@ -62,11 +63,10 @@ _EXISTING_PREDICATES = """\
 _SYSTEM_PROMPT = """\
 You are an expert in cheminformatics, RDKit, and Inductive Logic Programming (ILP).
 Your task is to select AUXILIARY PREDICATES that help an ILP system distinguish a
-ChEBI chemical class from its sibling classes under the same parent.
+ChEBI chemical class from other molecules.
 
-There is a SHARED LIBRARY of auxiliary predicates already written for other classes.
-You will be shown the most relevant existing predicates for the target class. Prefer to
-REUSE those that fit rather than writing near-duplicates; only invent NEW predicates for
+You will be shown some potentially relevant pre-existing auxiliary predicates for the target class. 
+Prefer to REUSE those that fit rather than writing new ones; only invent NEW predicates for
 properties the reuse candidates do not already cover.
 
 An auxiliary predicate is a short, self-contained Python program that maps an RDKit
@@ -130,7 +130,7 @@ Rules:
 - Never raise; return an empty list / False when the property does not apply.
 - Keep each program to a single predicate. Do not print or read files.
 - Prefer predicates that are TRUE for many molecules of the target class and
-  FALSE for its siblings.\
+  FALSE for other molecules.\
 """
 
 
@@ -202,7 +202,7 @@ Predicates ALREADY available (do NOT duplicate these):
 
 {format_candidates(candidates, with_kind=True)}
 Choose up to {self.n_predicates} auxiliary predicates that would help distinguish
-"{info['name']}" from its sibling classes. REUSE the candidates above wherever they fit;
+"{info['name']}" from other molecules. REUSE the candidates above wherever they fit;
 only write NEW programs for properties they do not already cover. Favour a mix of
 shortcut substructures and hard-to-express global concepts grounded in the definition.
 

@@ -98,8 +98,8 @@ def format_candidates(candidates: list[dict], with_kind: bool = False) -> str:
 
 OUTPUT_CONTRACT = """\
 Answer with a single JSON object:
-- "reasoning": think here first — weigh the target against its siblings and decide what
-  actually separates them. Keep it concise. This field is for your working; it is logged, not executed.
+- "reasoning": think here first — decide what separates the target from other molecules.
+  Keep it concise.
 - "reuse": the candidate numbers you are reusing, as integers (empty list if none).
 - "new": one entry per NEW predicate, each with "name" (snake_case), "description" (one
   short line) and "program".\

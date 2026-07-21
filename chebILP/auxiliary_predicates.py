@@ -1,11 +1,10 @@
 """Load and apply LLM-generated auxiliary predicates.
 
 Auxiliary predicates are extra molecule- or atom-level properties that the LLM
-proposes to help tell a ChEBI class apart from its siblings (see
+proposes to help tell a ChEBI class apart from other molecules (see
 ``generate_auxiliary_predicates.py``).
 
-Storage (EXP-014): predicates are **not** stored per class any more. They live once
-in a shared library and each class records which of them it uses:
+Predicates live in a shared library and each class records which of them it uses:
 
     <problem_dir>/_aux_predicate_library/
         programs/<aux_name>.py      # one canonical program per unique predicate
