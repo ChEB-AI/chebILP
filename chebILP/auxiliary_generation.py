@@ -20,11 +20,11 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 
-import anthropic
 from pydantic import BaseModel, ConfigDict
 
 from chebILP.auxiliary_predicates import set_class_predicates
 from chebILP.ilp_path_manager import get_aux_generation_log_path
+from chebILP.llm_client import structured_completion
 from chebILP.utils import sort_labels_by_hierarchy
 
 
@@ -107,27 +107,9 @@ Answer with a single JSON object:
 """
 
 
-def generate_one(client, prompt: str, system: str, model: str, selection_model, max_retries: int = 5):
+def generate_one(prompt: str, system: str, model: str, selection_model, api_base: str | None = None):
     """Ask the model for one class's selection. Returns ``(parsed, raw_json_text)``."""
-    last_exc = None
-    for attempt in range(max_retries):
-        try:
-            response = client.messages.parse(
-                model=model,
-                # Generous: a truncated response is invalid JSON and loses the whole class.
-                max_tokens=16000,
-                system=system,
-                messages=[{"role": "user", "content": prompt}],
-                output_format=selection_model,
-            )
-            raw = next((b.text for b in response.content if b.type == "text"), "")
-            return response.parsed_output, raw
-        except (anthropic.APIConnectionError, anthropic.APITimeoutError) as e:
-            last_exc = e
-            wait = 2 ** attempt
-            print(f"  Connection error (attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {e}")
-            time.sleep(wait)
-    raise last_exc
+    return structured_completion(model, system, prompt, selection_model, api_base=api_base)
 
 
 class AuxiliaryGenerator(ABC):
@@ -140,12 +122,12 @@ class AuxiliaryGenerator(ABC):
     noun = "predicate"  # log/console wording
     selection_model: type[Selection] = Selection
 
-    def __init__(self, client, library_dir, model, n_predicates, top_k):
-        self.client = client
+    def __init__(self, library_dir, model, n_predicates, top_k, api_base=None):
         self.library_dir = library_dir
         self.model = model
         self.n_predicates = n_predicates
         self.top_k = top_k
+        self.api_base = api_base
         self.retriever = None
 
     # --- hooks -------------------------------------------------------------------
@@ -205,7 +187,7 @@ class AuxiliaryGenerator(ABC):
 
         parsed, raw = None, None
         try:
-            parsed, raw = generate_one(self.client, prompt, self.system_prompt, self.model, self.selection_model)
+            parsed, raw = generate_one(prompt, self.system_prompt, self.model, self.selection_model, self.api_base)
         finally:
             # Log the exchange even if the request failed; rewritten below once resolved.
             log_path = self._write_log(chebi_id, info, prompt, parsed, raw, None)

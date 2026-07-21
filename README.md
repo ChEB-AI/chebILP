@@ -27,7 +27,7 @@ pip install chebILP
 
 Extras:
 - `pip install chebILP[explain]` adds `xclingo` and `Pillow` for the `explain` command
-- `pip install chebILP[llm]` adds `anthropic`, `langsmith`, and `python-dotenv` for LLM-enhanced rule learning (`enhance_with_llms`, experimental)
+- `pip install chebILP[llm]` adds `litellm` (multi-provider access for auxiliary-predicate generation), `anthropic`, `langsmith`, and `python-dotenv` for LLM-enhanced rule learning (`enhance_with_llms`, experimental)
 
 
 The `prepare_dl_preds` utility (one-time DL tensor extraction) additionally requires `torch`, which must be installed separately in an environment that has the DL model checkpoint.
@@ -91,7 +91,7 @@ library — one `programs/<aux_name>.py` file per distinct program (RDKit `Mol` 
 extension) plus a `class_map.json` recording which predicates each class uses — kept
 separate from the ILP problem directory (default `data/llm_generated_predicates`).
 
-Generate them (requires `ANTHROPIC_API_KEY` in `.env`) before `build_bk`:
+Generate them before `build_bk`:
 ```bash
 python -m chebILP.generate_auxiliary_predicates \
   --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
@@ -99,6 +99,14 @@ python -m chebILP.generate_auxiliary_predicates \
   --n_predicates 8 \
   --predicate_dir data/llm_generated_predicates
 ```
+The model provider is chosen with `--model provider/name` (via [LiteLLM](https://github.com/BerriAI/litellm)); it defaults to
+`anthropic/claude-haiku-4-5`. Other examples: `openai/gpt-4o`, `gemini/gemini-2.5-pro`,
+`ollama/llama3.1`, or `hosted_vllm/<name> --api_base http://localhost:8000/v1` for a
+self-hosted / OpenAI-compatible server. The model must support structured outputs. The
+provider's API key is read from `.env` / the environment under its standard name
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, ...). The same `--model` /
+`--api_base` flags apply to `python -m chebILP.generate_auxiliary_rules`.
+
 Then run `build_bk` with `--predicate_set llm_generated_fgs --predicate_dir <library>`;
 the predicates a class uses are merged into its background knowledge (predicate names are
 `aux_`-prefixed). `--predicate_dir` defaults to `data/llm_generated_predicates` and

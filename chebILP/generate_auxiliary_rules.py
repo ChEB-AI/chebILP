@@ -15,7 +15,6 @@ import argparse
 import os
 import re
 
-import anthropic
 from dotenv import load_dotenv
 from rdkit import Chem
 from rdkit.Chem import Descriptors
@@ -244,9 +243,9 @@ class RuleGenerator(AuxiliaryGenerator):
 
     noun = "rule"
 
-    def __init__(self, client, library_dir, model, n_predicates, top_k, *, molecules,
-                 problem_dir, computed_facts, validate_max, prompt_samples):
-        super().__init__(client, library_dir, model, n_predicates, top_k)
+    def __init__(self, library_dir, model, n_predicates, top_k, *, molecules,
+                 problem_dir, computed_facts, validate_max, prompt_samples, api_base=None):
+        super().__init__(library_dir, model, n_predicates, top_k, api_base=api_base)
         self.molecules = molecules
         self.problem_dir = problem_dir
         self.computed_facts = computed_facts
@@ -392,9 +391,13 @@ def main():
                         help="ILP problem tree holding each class's train exs.pl (for samples/validation).")
     parser.add_argument("--predicate_dir", default=DEFAULT_AUX_RULE_LIBRARY_DIR,
                         help="Shared auxiliary-RULE library directory.")
-    parser.add_argument("--model", default="claude-haiku-4-5",
-                        help="Claude model to use. Must support structured outputs (e.g. claude-haiku-4-5, "
-                             "claude-opus-4-8, claude-sonnet-5).")
+    parser.add_argument("--model", default="anthropic/claude-haiku-4-5",
+                        help="LLM as 'provider/name' (LiteLLM). Must support structured outputs, e.g. "
+                             "anthropic/claude-haiku-4-5, openai/gpt-4o, gemini/gemini-2.5-pro, "
+                             "ollama/llama3.1, hosted_vllm/<name> (with --api_base). The provider's API "
+                             "key is read from the environment (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...).")
+    parser.add_argument("--api_base", default=None,
+                        help="Base URL for self-hosted / OpenAI-compatible endpoints (e.g. vLLM, Ollama).")
     parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
     parser.add_argument("--top_k", type=int, default=16, help="Reuse candidates retrieved per class.")
     parser.add_argument("--computed_facts", dest="computed_facts", action="store_true", default=True,
@@ -408,10 +411,6 @@ def main():
     args = parser.parse_args()
 
     load_dotenv()
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY not set. Add it to your .env file.")
-    client = anthropic.Anthropic(api_key=api_key)
 
     import pickle as _pickle
 
@@ -426,9 +425,9 @@ def main():
         chebi_ids = [line.strip() for line in f if line.strip()]
 
     RuleGenerator(
-        client, args.predicate_dir, args.model, args.n_predicates, args.top_k,
+        args.predicate_dir, args.model, args.n_predicates, args.top_k,
         molecules=molecules, problem_dir=args.problem_dir, computed_facts=args.computed_facts,
-        validate_max=args.validate_max, prompt_samples=args.prompt_samples,
+        validate_max=args.validate_max, prompt_samples=args.prompt_samples, api_base=args.api_base,
     ).run(chebi_graph, chebi_ids)
 
 

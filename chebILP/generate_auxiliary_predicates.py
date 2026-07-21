@@ -27,7 +27,6 @@ import os
 import re
 from typing import Literal
 
-import anthropic
 from dotenv import load_dotenv
 from rdkit import Chem
 
@@ -241,19 +240,19 @@ def main():
     parser.add_argument("--chebi_version", type=int, default=248)
     parser.add_argument("--predicate_dir", default=os.path.join("data", "llm_generated_predicates"),
                         help="Directory for storing generated predicates.")
-    parser.add_argument("--model", default="claude-haiku-4-5",
-                        help="Claude model to use. Must support structured outputs (e.g. claude-haiku-4-5, "
-                             "claude-opus-4-8, claude-sonnet-5).")
+    parser.add_argument("--model", default="anthropic/claude-haiku-4-5",
+                        help="LLM as 'provider/name' (LiteLLM). Must support structured outputs, e.g. "
+                             "anthropic/claude-haiku-4-5, openai/gpt-4o, gemini/gemini-2.5-pro, "
+                             "ollama/llama3.1, hosted_vllm/<name> (with --api_base). The provider's API "
+                             "key is read from the environment (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...).")
+    parser.add_argument("--api_base", default=None,
+                        help="Base URL for self-hosted / OpenAI-compatible endpoints (e.g. vLLM, Ollama).")
     parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
     parser.add_argument("--top_k", type=int, default=16,
                         help="Reuse candidates retrieved from the shared library per class.")
     args = parser.parse_args()
 
     load_dotenv()
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY not set. Add it to your .env file.")
-    client = anthropic.Anthropic(api_key=api_key)
 
     import pickle as _pickle
 
@@ -265,7 +264,7 @@ def main():
         chebi_ids = [line.strip() for line in f if line.strip()]
 
     PredicateGenerator(
-        client, args.predicate_dir, args.model, args.n_predicates, args.top_k,
+        args.predicate_dir, args.model, args.n_predicates, args.top_k, api_base=args.api_base,
     ).run(chebi_graph, chebi_ids)
 
 
