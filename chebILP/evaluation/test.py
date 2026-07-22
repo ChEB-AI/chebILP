@@ -469,7 +469,7 @@ def predict_smiles(
     """
     from rdkit import Chem
     from chebILP.ilp_problem_builder import build_full_background
-    from chebILP.clingo_eval import evaluate_with_clingo
+    from chebILP.evaluation.clingo_eval import evaluate_with_clingo
     from chebILP.predicate_generation.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
 
     if aux_timeout is None:
@@ -576,7 +576,7 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
         conf_matrix = None
         start_time = time.perf_counter()
         print(f"Testing ChEBI:{chebi_id}...")
-        from chebILP.clingo_eval import run_ilp_validation_clingo
+        from chebILP.evaluation.clingo_eval import run_ilp_validation_clingo
         try:
             conf_matrix, details = run_ilp_validation_clingo(
                 chebi_id, prog_str,

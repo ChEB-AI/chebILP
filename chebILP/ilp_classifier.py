@@ -152,7 +152,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
             # Run validation in subprocess (isolated Prolog session)
             print(f"Validating ChEBI:{chebi_id}...")
             try:
-                from chebILP.clingo_eval import run_ilp_validation_clingo
+                from chebILP.evaluation.clingo_eval import run_ilp_validation_clingo
                 conf_matrix = run_ilp_validation_clingo(
                     chebi_id, prog_str,
                     exs_file=get_exs_path(chebi_id, split="validation", base_dir=problem_dir),

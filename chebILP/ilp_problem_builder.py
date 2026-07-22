@@ -12,7 +12,7 @@ from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, ca
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
-from chebILP.clingo_eval import evaluate_with_clingo
+from chebILP.evaluation.clingo_eval import evaluate_with_clingo
 
 
 CHEBI_FG_RULES_PATH = os.path.join("data", "chebi_fg_rules_from_smiles.pl")

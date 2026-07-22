@@ -144,8 +144,8 @@ def _load_label_stats(path: str) -> list[str]:
 def _handle_build_ilp_preds_for_ensemble(args):
     """Build a full ILP predictions tensor for a given split from a run's results.json."""
     import pandas as pd
-    from chebILP.test import build_ilp_preds_tensor
-    from chebILP.ensemble_eval import load_ilp_results
+    from chebILP.evaluation.test import build_ilp_preds_tensor
+    from chebILP.evaluation.ensemble_eval import load_ilp_results
 
     results = load_ilp_results(args.run_dir)
     programs = {cid: entry["program"] for cid, entry in results.items() if entry.get("program")}
@@ -196,7 +196,7 @@ def _handle_build_ilp_preds_for_ensemble(args):
 
 def _handle_ensemble_construct(args):
     """Perform model selection and generate the ILP predictions tensor."""
-    from chebILP.ensemble_eval import EnsembleConstructor, load_dl_preds
+    from chebILP.evaluation.ensemble_eval import EnsembleConstructor, load_dl_preds
 
     labels = _load_label_stats(args.labels_file)
     print(f"Label stats: {len(labels)} labels")
@@ -245,7 +245,7 @@ def _handle_ensemble_construct(args):
 
 def _handle_ensemble_aggregate(args):
     """Aggregate pre-computed DL and ILP prediction tensors into ensemble predictions."""
-    from chebILP.ensemble_eval import EnsembleAggregator, load_dl_preds, load_ilp_preds
+    from chebILP.evaluation.ensemble_eval import EnsembleAggregator, load_dl_preds, load_ilp_preds
     import numpy as np, json as _json, pandas as pd
 
     labels = _load_label_stats(args.labels_file)
@@ -312,7 +312,7 @@ def _handle_ensemble_aggregate(args):
 
 
 def _handle_test(args):
-    from chebILP.test import test_chebi_classes
+    from chebILP.evaluation.test import test_chebi_classes
 
     # load config from the run to evaluate
     with open(os.path.join(args.run_to_evaluate, "config.yml"), "r") as f:
@@ -348,7 +348,7 @@ def _handle_test(args):
 
 def _handle_predict(args):
     import json
-    from chebILP.test import predict_smiles
+    from chebILP.evaluation.test import predict_smiles
 
     smiles_list = args.smiles
     if smiles_list is None:

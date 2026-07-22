@@ -146,7 +146,7 @@ def derive_rule_extensions(progs, facts: list[str], mol_ids, timeout: float | No
 
     Returns ``{program_name: {mol_id: [arg_tuple, ...]}}``, with one entry per program.
     """
-    from chebILP.clingo_eval import ground_extensions
+    from chebILP.evaluation.clingo_eval import ground_extensions
 
     names = [p.name for p in progs]
     derived = ground_extensions([p.source for p in progs], facts, names, timeout=timeout)
