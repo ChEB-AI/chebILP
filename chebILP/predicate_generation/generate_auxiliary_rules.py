@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 
-from chebILP.molecule_processing.mol_to_fol import mol_to_fol_atoms
+from chebi_utils.extract_properties import mol_to_fol_atoms
 from chebILP.predicate_generation.auxiliary_generation import (
     OUTPUT_CONTRACT,
     AuxiliaryGenerator,

@@ -4,7 +4,8 @@ import networkx as nx
 
 import tqdm
 from chebILP.molecule_processing.data_preparation import ChEBIDataset
-from chebILP.molecule_processing.mol_to_fol import mol_to_fol_atoms, mol_to_fol_fgs
+from chebILP.molecule_processing.mol_to_fol import mol_to_fol_fgs
+from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
 from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
 from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules
 from chebILP.molecule_processing.fg_matching import get_chembl_fgs, get_chebi_fgs
@@ -377,18 +378,16 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
 def build_computed_facts(rows):
     """Molecular-weight and ring-size facts used only to evaluate llm_generated_rules.
 
-    Emits ``mol_weight(Mol, Wint)`` (rounded ``Descriptors.MolWt``) and one
-    ``ring_size(Mol, Size)`` per SSSR ring. These facts are fed to Clingo when a
-    class's auxiliary rules are grounded, but are never written to ``bk.pl`` — only
-    the derived ``aux_*`` extensions are persisted. Returns a flat list of Prolog lines.
+    Formats ``chebi_utils.get_numerical_facts`` per molecule as Prolog facts
+    (``mol_weight(Mol, W)``, one ``ring_size(Mol, Size)`` per ring). These facts are
+    fed to Clingo when a class's auxiliary rules are grounded, but are never written to
+    ``bk.pl`` — only the derived ``aux_*`` extensions are persisted.
     """
-    from rdkit.Chem import Descriptors
-
     lines = []
     for row in rows.itertuples():
-        lines.append(f"mol_weight({row.Index},{round(Descriptors.MolWt(row.mol))}).")
-        for ring in row.mol.GetRingInfo().AtomRings():
-            lines.append(f"ring_size({row.Index},{len(ring)}).")
+        for pred, values in get_numerical_facts(row.mol).items():
+            for value in values:
+                lines.append(f"{pred}({row.Index},{value}).")
     return lines
 
 
