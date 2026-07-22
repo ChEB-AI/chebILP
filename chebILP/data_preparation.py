@@ -3,13 +3,13 @@ Dataset preparation: download ChEBI data, build and cache the hierarchy graph
 and molecule DataFrame, select label classes, and create train/val/test splits.
 
 Example usage:
-    python -m chebILP prepare_dataset --chebi_version 248 --min_pos_samples 25
+    python -m chebILP prepare_dataset --chebi_version 251 
 
 After running, the following files are ready for use by the ILP pipeline:
-    data/chebi_v248/chebi_graph.pkl                 – networkx DiGraph (hierarchy subgraph)
-    data/chebi_v248/ChEBI25_3_STAR/molecules.pkl    – pandas DataFrame  (index = ChEBI ID)
-    data/chebi_v248/ChEBI25_3_STAR/labels.txt       – one selected class ID per line
-    data/chebi_v248/ChEBI25_3_STAR/splits.csv       – mol_id,split  (train/validation/test)
+    data/chebi_v251/chebi_graph.pkl                 – networkx DiGraph (hierarchy subgraph)
+    data/chebi_v251/ChEBI25_3_STAR/molecules.pkl    – pandas DataFrame  (index = ChEBI ID)
+    data/chebi_v251/ChEBI25_3_STAR/labels.txt       – one selected class ID per line
+    data/chebi_v251/ChEBI25_3_STAR/splits.csv       – id,split  (train/validation/test)
 """
 
 import os
@@ -41,13 +41,13 @@ class ChEBIDataset:
         self,
         chebi_version: int,
         three_star_only: bool = True,
-        data_dir: Optional[str] = None,
-        min_pos_samples: int = 50,
+        base_dir: Optional[str] = "data",
+        min_pos_samples: int = 25,
     ):
         self.chebi_version = chebi_version
         self.three_star_only = three_star_only
         self.min_pos_samples = min_pos_samples
-        self.data_dir = data_dir or os.path.join("data", f"chebi_v{chebi_version}")
+        self.data_dir = os.path.join(base_dir, f"chebi_v{chebi_version}")
         self.processed_dir = os.path.join(self.data_dir, f"ChEBI{min_pos_samples}{'_3_STAR' if three_star_only else ''}")
         self.raw_dir = os.path.join(self.data_dir, "raw")
         self.obo_path = os.path.join(self.raw_dir, "chebi.obo")
@@ -139,7 +139,7 @@ class ChEBIDataset:
         it if not cached.  Molecules that belong to none of the selected label
         classes are distributed randomly across splits.
 
-        Returns a DataFrame with columns ``[mol_id, split]``.
+        Returns a DataFrame with columns ``[id, split]``.
         """
         if self._labeled_df is not None:
             labeled_df = self._labeled_df
@@ -167,9 +167,9 @@ class ChEBIDataset:
         )
 
         records: list[tuple[str, str]] = []
-        for split_name, key in [("train", "train"), ("validation", "val"), ("test", "test")]:
-            records.extend((mid, split_name) for mid in raw_splits[key]["chebi_id"].tolist())
-        splits_df = pd.DataFrame(records, columns=["mol_id", "split"])
+        for split_name, split in raw_splits.items():
+            records.extend((mid, split_name) for mid in split["chebi_id"].tolist())
+        splits_df = pd.DataFrame(records, columns=["id", "split"])
 
         if output_path:
             os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -186,19 +186,17 @@ class ChEBIDataset:
         cls,
         chebi_version: int,
         three_star_only: bool = True,
-        data_dir: Optional[str] = None,
-        min_pos_samples: int = 50,
-        val_ratio: float = 0.1,
-        test_ratio: float = 0.1,
+        base_dir: Optional[str] = "data",
+        min_pos_samples: int = 25,
+        val_ratio: float = 0.2,
+        test_ratio: float = 0.2,
         seed: int = 42,
-        labels_path: Optional[str] = None,
-        splits_path: Optional[str] = None,
     ) -> "ChEBIDataset":
         """Download, build caches, select labels, and save splits in one call."""
-        dataset = cls(chebi_version=chebi_version, three_star_only=three_star_only, data_dir=data_dir, min_pos_samples=min_pos_samples)
+        dataset = cls(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
         processed = os.path.join(dataset.data_dir, f"ChEBI{dataset.min_pos_samples}{'_3_STAR' if dataset.three_star_only else ''}")
-        labels_out = labels_path or os.path.join(processed, "labels.txt")
-        splits_out = splits_path or os.path.join(processed, "splits.csv")
+        labels_out = os.path.join(processed, "labels.txt")
+        splits_out = os.path.join(processed, "splits.csv")
 
         labels = dataset.select_labels(output_path=labels_out)
         dataset.create_splits(

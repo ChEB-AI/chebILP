@@ -358,13 +358,11 @@ def _handle_prepare_dataset(args):
     ChEBIDataset.prepare(
         chebi_version=args.chebi_version,
         three_star_only=not args.include_two_star,
-        data_dir=args.data_dir,
+        base_dir=args.base_dir,
         min_pos_samples=args.min_pos_samples,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
         seed=args.seed,
-        labels_path=args.labels_path,
-        splits_path=args.splits_path,
     )
 
 
@@ -380,27 +378,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Download ChEBI data and build all dataset artefacts "
              "(graph cache, molecule cache, labels.txt, splits.csv).",
     )
-    sp_pd.add_argument("--chebi_version", type=int, required=True,
-                       help="ChEBI ontology version (e.g. 248).")
-    sp_pd.add_argument("--include_two_star", action="store_true",
+    sp_pd.add_argument("--chebi_version", "-v", type=int, required=True,
+                       help="ChEBI ontology version (e.g. 251).")
+    sp_pd.add_argument("--include_two_star", "-2", action="store_true",
                        help="Include classes with 2-star or 3-star annotation status (default: Only 3-star classes).")
-    sp_pd.add_argument("--data_dir", type=str, default=None,
-                       help="Root directory for raw and cached files "
-                            "(default: data/chebi_v{version}).")
-    sp_pd.add_argument("--min_pos_samples", type=int, default=50,
-                       help="Minimum descendant molecules per label class (default: 50).")
-    sp_pd.add_argument("--val_ratio", type=float, default=0.1,
-                       help="Fraction of molecules for validation (default: 0.1).")
-    sp_pd.add_argument("--test_ratio", type=float, default=0.1,
-                       help="Fraction of molecules for test (default: 0.1).")
+    sp_pd.add_argument("--base_dir", type=str, default=None,
+                       help="Root directory for the dataset (default: data).")
+    sp_pd.add_argument("--min_pos_samples", type=int, default=25,
+                       help="Minimum descendant molecules per label class (default: 25).")
+    sp_pd.add_argument("--val_ratio", type=float, default=0.2,
+                       help="Fraction of molecules held back for validation (default: 0.2).")
+    sp_pd.add_argument("--test_ratio", type=float, default=0.2,
+                       help="Fraction of molecules held back for testing (default: 0.2).")
     sp_pd.add_argument("--seed", type=int, default=42,
                        help="Random seed for splits (default: 42).")
-    sp_pd.add_argument("--labels_path", type=str, default=None,
-                       help="Output path for labels.txt "
-                            "(default: {data_dir}/min{n}/labels.txt).")
-    sp_pd.add_argument("--splits_path", type=str, default=None,
-                       help="Output path for splits.csv "
-                            "(default: {data_dir}/min{n}/splits.csv).")
     sp_pd.set_defaults(func=_handle_prepare_dataset)
 
     # ── build_samples ────────────────────────────────────────────────────
