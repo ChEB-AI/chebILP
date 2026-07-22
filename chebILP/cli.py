@@ -429,7 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="ChEBI ontology version (e.g. 251).")
     sp_pd.add_argument("--include_two_star", "-2", action="store_true",
                        help="Include classes with 2-star or 3-star annotation status (default: Only 3-star classes).")
-    sp_pd.add_argument("--base_dir", type=str, default=None,
+    sp_pd.add_argument("--base_dir", type=str, default="data",
                        help="Root directory for the dataset (default: data).")
     sp_pd.add_argument("--min_pos_samples", type=int, default=25,
                        help="Minimum descendant molecules per label class (default: 25).")

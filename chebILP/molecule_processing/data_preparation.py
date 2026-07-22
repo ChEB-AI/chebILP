@@ -41,7 +41,7 @@ class ChEBIDataset:
         self,
         chebi_version: int,
         three_star_only: bool = True,
-        base_dir: Optional[str] = "data",
+        base_dir: str = "data",
         min_pos_samples: int = 25,
     ):
         self.chebi_version = chebi_version
@@ -202,7 +202,7 @@ class ChEBIDataset:
         cls,
         chebi_version: int,
         three_star_only: bool = True,
-        base_dir: Optional[str] = "data",
+        base_dir: str = "data",
         min_pos_samples: int = 25,
         val_ratio: float = 0.2,
         test_ratio: float = 0.2,
