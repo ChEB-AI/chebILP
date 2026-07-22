@@ -86,11 +86,12 @@ def get_dl_direct_neighbor_scores(dl_preds: pd.DataFrame, chebi_graph: nx.DiGrap
 
     Returns a dict: {class_id: conf_matrix or None if not computable}.
     """
-    from chebILP.ilp_problem_builder import get_direct_neighbors
+    from chebi_utils.sample_filters import get_direct_neighbors
 
+    mol_index = set(str(i) for i in molecules_df.index)
     scores = {}
     for cls_id in dl_preds.columns:
-        pos_ids, neg_ids = get_direct_neighbors(cls_id, chebi_graph, hierarchy_graph, molecules_df)
+        pos_ids, neg_ids = get_direct_neighbors(mol_index, chebi_graph, cls_id)
         scores[cls_id] = eval_dl_on_ids(cls_id, pos_ids, neg_ids, dl_preds)
 
     # save to csv

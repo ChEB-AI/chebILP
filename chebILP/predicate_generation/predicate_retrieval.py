@@ -118,7 +118,7 @@ class HybridPredicateRetriever:
     def from_library(cls, base_dir: str, **kwargs) -> "HybridPredicateRetriever":
         import os
 
-        from chebILP.auxiliary_predicates import load_library_predicates
+        from chebILP.predicate_generation.auxiliary_predicates import load_library_predicates
 
         entries = [
             {
@@ -137,7 +137,7 @@ class HybridPredicateRetriever:
         """Build a retriever over an ASP rule library (``.pl`` programs)."""
         import os
 
-        from chebILP.auxiliary_rules import load_library_rules
+        from chebILP.predicate_generation.auxiliary_rules import load_library_rules
 
         entries = [
             {

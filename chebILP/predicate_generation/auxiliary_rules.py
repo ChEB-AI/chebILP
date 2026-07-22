@@ -1,6 +1,6 @@
 """Load and store LLM-generated auxiliary predicates written as ASP/clingo rules.
 
-This is the rule-based counterpart of :mod:`chebILP.auxiliary_predicates` (which stores
+This is the rule-based counterpart of :mod:`chebILP.predicate_generation.auxiliary_predicates` (which stores
 Python programs). Instead of a Python ``extension(mol)`` function, each auxiliary predicate
 here is a small logic program: one head ``aux_<name>(...) :- <body>`` plus any helper clauses
 it needs. During ``build_bk`` the program is grounded against the atom facts (and optional
@@ -40,7 +40,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from chebILP.auxiliary_predicates import sanitize_predicate_name
+from chebILP.predicate_generation.auxiliary_predicates import sanitize_predicate_name
 from chebILP.ilp_path_manager import get_aux_class_map_path, get_aux_programs_dir
 
 logger = logging.getLogger(__name__)
@@ -146,7 +146,7 @@ def derive_rule_extensions(progs, facts: list[str], mol_ids, timeout: float | No
 
     Returns ``{program_name: {mol_id: [arg_tuple, ...]}}``, with one entry per program.
     """
-    from chebILP.clingo_eval import ground_extensions
+    from chebILP.evaluation.clingo_eval import ground_extensions
 
     names = [p.name for p in progs]
     derived = ground_extensions([p.source for p in progs], facts, names, timeout=timeout)

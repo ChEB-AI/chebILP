@@ -2,18 +2,19 @@ import os
 from typing import Literal
 import networkx as nx
 
-import pickle
-
 import tqdm
-from chebILP.mol_to_fol import mol_to_fol_atoms, mol_to_fol_fgs
-from chebILP.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
-from chebILP.auxiliary_rules import derive_rule_extensions, load_class_rules
-from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
-from chebILP.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
+from chebILP.molecule_processing.data_preparation import ChEBIDataset
+from chebILP.molecule_processing.mol_to_fol import mol_to_fol_fgs
+from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
+from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
+from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules
+from chebILP.molecule_processing.fg_matching import get_chembl_fgs, get_chebi_fgs
+from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
-from chebILP.clingo_eval import evaluate_with_clingo
+from chebILP.evaluation.clingo_eval import evaluate_with_clingo
+from chebi_utils.sample_filters import get_direct_neighbors
 
 
 CHEBI_FG_RULES_PATH = os.path.join("data", "chebi_fg_rules_from_smiles.pl")
@@ -45,11 +46,10 @@ def load_fowl_smarts(path=FOWL_SMARTS_PATH) -> dict[str, str]:
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_split, chebi_graph_path, molecules_path, problem_dir=None, muggleton=False, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = False):
+    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True):
         self.predicate_set = predicate_set
-        self.problem_dir = os.path.join("data", "ilp_problems") if problem_dir is None else problem_dir
+        self.problem_dir = os.path.join(base_dir, "ilp_problems")
         os.makedirs(self.problem_dir, exist_ok=True)
-        self.muggleton = muggleton
         # Per-call wall-clock budget for LLM-generated auxiliary predicates.
         self.aux_timeout = aux_timeout
         self.aux_library_dir = aux_library_dir
@@ -59,30 +59,9 @@ class ILPProblemBuilder:
         self.computed_facts = computed_facts
 
         # --- Load pre-built ChEBI data -------------------------------------
-        with open(chebi_graph_path, "rb") as f:
-            self.chebi_graph = pickle.load(f)
-        self.molecules = pd.read_pickle(molecules_path)
-        self.hierarchy_graph = nx.transitive_closure_dag(self.chebi_graph)
-        self.undirected_graph = self.chebi_graph.to_undirected()
-
-        # load splits from csv file
-        with open(chebi_split, "r") as f:
-            lines = f.readlines()
-        self.train_ids = set()
-        self.validation_ids = set()
-        self.test_ids = set()
-        for line in lines[1:]:
-            parts = line.strip().split(",")
-            chebi_id = parts[0].strip()
-            split = parts[1]
-            if split == "train":
-                self.train_ids.add(chebi_id)
-            elif split == "validation":
-                self.validation_ids.add(chebi_id)
-            elif split == "test":
-                self.test_ids.add(chebi_id)
-            else:
-                raise ValueError(f"Unknown split '{split}' for ChEBI ID {chebi_id}")
+        self.dataset = ChEBIDataset(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
+        self.hierarchy_graph = nx.transitive_closure_dag(self.dataset.chebi_graph)
+        self.splits = self.dataset.load_splits_from_csv()
             
             
     def build_examples(self, target_ids: list[str], min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
@@ -156,21 +135,21 @@ class ILPProblemBuilder:
                 with open(exs_path, "r") as f:
                     # for each line get id between inner parentheses (e.g. pos(chebi_123(456)). -> 456) and select corresponding rows from samples_df
                     selected_ids = [line.strip().split("(")[-1].split(")")[0] for line in f.readlines() if line.strip() and not line.startswith("%")]
-                selected_rows = self.molecules[[id in selected_ids for id in self.molecules.index]]
+                selected_rows = self.dataset.molecules[[id in selected_ids for id in self.dataset.molecules.index]]
                 selected_ids_by_split[split] = selected_ids
 
                 # standard bk is always added
                 prolog_lines = []
-                prolog_lines_atoms, body_predicates_atoms = build_background_muggleton(selected_rows) if self.muggleton else build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set, fowl_smarts=fowl_smarts)
+                prolog_lines_atoms, body_predicates_atoms = build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set, fowl_smarts=fowl_smarts)
                 prolog_lines += prolog_lines_atoms
                 body_predicates.update(body_predicates_atoms)
                 if self.predicate_set in ["chembl_fgs", "chebi_fgs"]:
                     # add fgs as samples
                     if not hasattr(self, "_fg_data"):
                         if self.predicate_set == "chembl_fgs":
-                            self._fg_data = get_chembl_fgs(self.molecules)
+                            self._fg_data = get_chembl_fgs(self.dataset.molecules)
                         else:
-                            self._fg_data = get_chebi_fgs(self.molecules)
+                            self._fg_data = get_chebi_fgs(self.dataset.molecules)
                     prolog_lines_fgs, body_predicates_fgs = build_background_fg_data(self._fg_data, selected_rows, source=self.predicate_set)
                     prolog_lines += prolog_lines_fgs
                     body_predicates.update(body_predicates_fgs)
@@ -247,34 +226,6 @@ class ILPProblemBuilder:
                 f.write("\n".join(bias_lines) + "\n")
 
 
-    def get_closest_negatives(self, samples: pd.DataFrame, target_id: str, min_samples=25, max_samples=None, direct_only=False):
-        # goal: reach min_samples, but continue collecting samples (until max_samples) if they are siblings.
-        # if direct_only=True, only collect from direct neighbors of target_id (first BFS ring) regardless of count.
-        import queue
-        q = queue.Queue()
-        q.put(target_id)
-        visited = set() # visit closest labels
-        selected = set() # select samples that are subclasses of closest labels until we have enough samples
-        samples_index = list(str(id) for id in samples.index)
-        siblings = True
-        while not q.empty():
-            current = q.get()
-            for neighbor in self.undirected_graph.neighbors(current):
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    q.put(neighbor)
-                    for neighbor_sub in self.hierarchy_graph.predecessors(neighbor):
-                        if str(neighbor_sub) in samples_index:
-                            selected.add(str(neighbor_sub))
-                        if (max_samples and len(selected) >= max_samples) or (len(selected) >= min_samples and not siblings):
-                            return self.molecules.loc[[id in selected for id in self.molecules.index]]
-            if len(selected) >= min_samples or direct_only:
-                break
-            siblings = False
-
-        return self.molecules.loc[[str(id) in selected for id in self.molecules.index]]
-
-
     def build_negative_mix(self, neg_pool: pd.DataFrame, sibling_ids: set, max_samples: int, random_state: int = 42) -> pd.DataFrame:
         """50:50 mix of direct-sibling negatives and random negatives from ``neg_pool``.
 
@@ -296,8 +247,8 @@ class ILPProblemBuilder:
         descendants = list(self.hierarchy_graph.predecessors(target_id)) + [target_id]
         # not all descendants are molecules (i.e., have a SMILES annotation) -> only take the ones that are in the samples_df (i.e. have a SMILES annotation and are in the 3_STAR subset)
 
-        df_pos = self.molecules[[id in descendants for id in self.molecules.index]]
-        df_neg = self.molecules[[id not in df_pos.index for id in self.molecules.index]]
+        df_pos = self.dataset.molecules[[id in descendants for id in self.dataset.molecules.index]]
+        df_neg = self.dataset.molecules[[id not in df_pos.index for id in self.dataset.molecules.index]]
         if len(df_pos) < min_pos_samples:
             print(f"ChEBI class {target_id} does not have enough positive samples (found {len(df_pos)}, required are at least {min_pos_samples}). Got samples {df_pos.index.tolist()}")
         if len(df_neg) < min_neg_samples:
@@ -307,20 +258,21 @@ class ILPProblemBuilder:
         # near-miss half of every split's negatives; the other half is drawn uniformly at random
         # from the full negative pool. The objective is therefore global classification, not
         # separating the target from its superclass only.
-        pos_ids, sibling_neg_ids = get_direct_neighbors(target_id, self.chebi_graph, self.hierarchy_graph, self.molecules)
+        mol_index = set(str(i) for i in self.dataset.molecules.index)
+        pos_ids, sibling_neg_ids = get_direct_neighbors(mol_index, self.dataset.chebi_graph, target_id)
         sibling_neg_ids = set(sibling_neg_ids)
 
         samples_by_split = dict()
-        pos_train_samples = df_pos[df_pos.index.astype(str).isin(self.train_ids)]
+        pos_train_samples = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "train"])]
         samples_by_split[("pos", "train")] = pos_train_samples.sample(min(max_pos_samples, len(pos_train_samples)), random_state=42) # if there are more positives than max_pos_samples, sample randomly
-        neg_train_samples = df_neg[df_neg.index.astype(str).isin(self.train_ids)]
+        neg_train_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "train"])]
         samples_by_split[("neg", "train")] = self.build_negative_mix(neg_train_samples, sibling_neg_ids, max_neg_samples)
-
-        samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(self.validation_ids) & df_pos.index.astype(str).isin(pos_ids)]
-        neg_val_samples = df_neg[df_neg.index.astype(str).isin(self.validation_ids)]
+        
+        samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "validation"]) & df_pos.index.astype(str).isin(pos_ids)]
+        neg_val_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "validation"])]
         samples_by_split[("neg", "validation")] = self.build_negative_mix(neg_val_samples, sibling_neg_ids, max_neg_samples)
-        samples_by_split[("pos", "test")] = df_pos[df_pos.index.astype(str).isin(self.test_ids) & df_pos.index.astype(str).isin(pos_ids)]
-        neg_test_samples = df_neg[df_neg.index.astype(str).isin(self.test_ids)]
+        samples_by_split[("pos", "test")] = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "test"]) & df_pos.index.astype(str).isin(pos_ids)]
+        neg_test_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "test"])]
         samples_by_split[("neg", "test")] = self.build_negative_mix(neg_test_samples, sibling_neg_ids, max_neg_samples)
         
         for (posneg, split), df in samples_by_split.items():
@@ -331,43 +283,6 @@ class ILPProblemBuilder:
 
         # sum up all positive and negative samples across splits
         return sum(len(v) for k, v in samples_by_split.items() if k[0] == "pos"), sum(len(v) for k, v in samples_by_split.items() if k[0] == "neg")
-    
-
-def get_direct_neighbors(
-    target_id: str,
-    chebi_graph,
-    hierarchy_graph,
-    molecules_df: pd.DataFrame,
-) -> tuple[list[str], list[str]]:
-    """
-    Return the positive and negative samples for a target class, only considering descendants of its direct parents.
-
-    Returns:
-        pos_ids: list of positive validation molecule IDs
-        neg_ids: list of negative validation molecule IDs
-                 (empty when target has no siblings)
-    """
-    mol_index = set(str(idx) for idx in molecules_df.index)
-    pos_ids = [
-        str(d)
-        for d in hierarchy_graph.predecessors(target_id)
-        if str(d) in mol_index
-    ]
-
-    sample_space_by_parent = dict()
-    for parent in chebi_graph.successors(target_id):
-        sample_space_by_parent[parent] = set()
-        for desc in hierarchy_graph.predecessors(parent):
-            s = str(desc)
-            if s in mol_index:
-                sample_space_by_parent[parent].add(s)
-    if len(sample_space_by_parent) == 0:
-        return pos_ids, []
-    sample_space = set.intersection(*sample_space_by_parent.values())
-    neg_ids = list(sample_space - set(pos_ids))
-    return pos_ids, neg_ids
-
-
 
 
 
@@ -463,18 +378,16 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
 def build_computed_facts(rows):
     """Molecular-weight and ring-size facts used only to evaluate llm_generated_rules.
 
-    Emits ``mol_weight(Mol, Wint)`` (rounded ``Descriptors.MolWt``) and one
-    ``ring_size(Mol, Size)`` per SSSR ring. These facts are fed to Clingo when a
-    class's auxiliary rules are grounded, but are never written to ``bk.pl`` — only
-    the derived ``aux_*`` extensions are persisted. Returns a flat list of Prolog lines.
+    Formats ``chebi_utils.get_numerical_facts`` per molecule as Prolog facts
+    (``mol_weight(Mol, W)``, one ``ring_size(Mol, Size)`` per ring). These facts are
+    fed to Clingo when a class's auxiliary rules are grounded, but are never written to
+    ``bk.pl`` — only the derived ``aux_*`` extensions are persisted.
     """
-    from rdkit.Chem import Descriptors
-
     lines = []
     for row in rows.itertuples():
-        lines.append(f"mol_weight({row.Index},{round(Descriptors.MolWt(row.mol))}).")
-        for ring in row.mol.GetRingInfo().AtomRings():
-            lines.append(f"ring_size({row.Index},{len(ring)}).")
+        for pred, values in get_numerical_facts(row.mol).items():
+            for value in values:
+                lines.append(f"{pred}({row.Index},{value}).")
     return lines
 
 
@@ -486,7 +399,7 @@ def build_full_background(
     aux_failures=None,
     fowl_smarts=None,
     rule_programs=None,
-    computed_facts: bool = False,
+    computed_facts: bool = True,
 ) -> list[str]:
     """Build one flat background-knowledge fact list for the molecules in ``rows``.
 
@@ -584,51 +497,9 @@ def build_background_fg_data(fg_data: dict[int, list[str]], rows, source: Litera
     return total_lines, [(pred, 1) for pred in lines_by_predicate.keys()]
 
 
-def build_background_muggleton(rows):
-    all_atoms, all_bonds = [], []
-    comments = []
-    for row in rows:
-        atoms, bonds = mol_to_prolog_muggleton(row.mol, molecule_id=row.Index)
-        all_atoms.extend(atoms)
-        all_bonds.extend(bonds)
-        comments.append(f"% CHEBI:{row.Index}, name: {row.name}, SMILES: {row.smiles}")
-    return comments + all_atoms + all_bonds, [("atom", 4), ("bond", 4)]
-
-def mol_to_prolog_muggleton(mol, molecule_id="mol1"):
-    atoms = mol.GetAtoms()
-    bonds = mol.GetBonds()
-
-    prolog_atoms = []
-    prolog_bonds = []
-
-    for atom in atoms:
-        atom_id = get_atom_id(atom.GetIdx(), molecule_id)
-        atom_type = atom.GetSymbol().lower()
-        atom_charge = atom.GetFormalCharge()
-        prolog_atoms.append(
-            f"atom({molecule_id},{atom_id},{atom_type},{atom_charge})."
-        )
-
-    for bond in bonds:
-        start_atom_id = get_atom_id(bond.GetBeginAtom().GetIdx(), molecule_id)
-        end_atom_id = get_atom_id(bond.GetEndAtom().GetIdx(), molecule_id)
-        bond_type = str(bond.GetBondType()).lower()
-        prolog_bonds.append(
-            f"bond({molecule_id},{start_atom_id},{end_atom_id},{bond_type})."
-        )
-        prolog_bonds.append(
-            f"bond({molecule_id},{end_atom_id},{start_atom_id},{bond_type})."
-        )  # undirected 
-
-    return prolog_atoms, prolog_bonds
-
-
 if __name__ == "__main__":
-    _data_dir = os.path.join("data", "chebi_v248")
     builder = ILPProblemBuilder(
-        chebi_split=os.path.join(_data_dir, "min50", "splits.csv"),
-        chebi_graph_path=os.path.join(_data_dir, "chebi_graph.pkl"),
-        molecules_path=os.path.join(_data_dir, "molecules.pkl"),
+        chebi_version=251,
         predicate_set="atoms",
     )
     target_ids = ["134362"]

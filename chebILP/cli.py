@@ -17,41 +17,43 @@ def _load_classes(labels_file: str) -> list[str]:
 
 
 def _make_ilp_builder(args):
-    from chebILP.learn_fgs import FGILPProblemBuilder
+    from chebILP.molecule_processing.learn_fgs import FGILPProblemBuilder
     from chebILP.ilp_problem_builder import ILPProblemBuilder
-    from chebILP.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
+    from chebILP.predicate_generation.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
     if isinstance(args, dict):
         fg_mode = args["fg_mode"]
-        chebi_split = args.get("chebi_split")
+        chebi_version = args["chebi_version"]
+        three_star_only = not args.get("include_two_star", False)
+        base_dir = args.get("base_dir", "data")
+        min_pos_samples = args.get("min_pos_samples", 25)
         predicate_set = args["predicate_set"]
-        chebi_graph_path = args.get("chebi_graph_path")
-        molecules_path = args.get("molecules_path")
         aux_timeout = args.get("aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = args.get("predicate_dir")
         computed_facts = args.get("computed_facts", False)
     else:
         fg_mode = args.fg_mode
-        chebi_split = getattr(args, "chebi_split", None)
+        chebi_version = args.chebi_version
+        three_star_only = not getattr(args, "include_two_star", False)
+        base_dir = getattr(args, "base_dir", "data")
+        min_pos_samples = getattr(args, "min_pos_samples", 25)
         predicate_set = args.predicate_set
-        chebi_graph_path = getattr(args, "chebi_graph_path", None)
-        molecules_path = getattr(args, "molecules_path", None)
         aux_timeout = getattr(args, "aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = getattr(args, "predicate_dir", None)
         computed_facts = getattr(args, "computed_facts", False)
 
     if fg_mode:
         return FGILPProblemBuilder(
-            chebi_split=chebi_split,
-            chebi_graph_path=chebi_graph_path,
-            molecules_path=molecules_path,
-            dataset_path=os.path.join("data", "chebi_fgs_dataset.pkl"),
+            chebi_version=chebi_version,
+            three_star_only=three_star_only,
+            base_dir=base_dir,
+            min_pos_samples=min_pos_samples,
             predicate_set=predicate_set,
         )
     return ILPProblemBuilder(
-        chebi_split=chebi_split,
-        chebi_graph_path=chebi_graph_path,
-        molecules_path=molecules_path,
-        muggleton=False,
+        chebi_version=chebi_version,
+        three_star_only=three_star_only,
+        base_dir=base_dir,
+        min_pos_samples=min_pos_samples,
         predicate_set=predicate_set,
         aux_timeout=aux_timeout,
         aux_library_dir=aux_library_dir,
@@ -113,7 +115,7 @@ def _handle_learn(args):
 
 
 def _handle_select_predicates(args):
-    from chebILP.select_predicates import select_predicates_for_classes
+    from chebILP.predicate_generation.select_predicates import select_predicates_for_classes
 
     with open(args.labels_file, "r") as f:
         chebi_ids = [int(line.strip()) for line in f if line.strip()]
@@ -144,8 +146,8 @@ def _load_label_stats(path: str) -> list[str]:
 def _handle_build_ilp_preds_for_ensemble(args):
     """Build a full ILP predictions tensor for a given split from a run's results.json."""
     import pandas as pd
-    from chebILP.test import build_ilp_preds_tensor
-    from chebILP.ensemble_eval import load_ilp_results
+    from chebILP.evaluation.test import build_ilp_preds_tensor
+    from chebILP.evaluation.ensemble_eval import load_ilp_results
 
     results = load_ilp_results(args.run_dir)
     programs = {cid: entry["program"] for cid, entry in results.items() if entry.get("program")}
@@ -196,7 +198,7 @@ def _handle_build_ilp_preds_for_ensemble(args):
 
 def _handle_ensemble_construct(args):
     """Perform model selection and generate the ILP predictions tensor."""
-    from chebILP.ensemble_eval import EnsembleConstructor, load_dl_preds
+    from chebILP.evaluation.ensemble_eval import EnsembleConstructor, load_dl_preds
 
     labels = _load_label_stats(args.labels_file)
     print(f"Label stats: {len(labels)} labels")
@@ -245,7 +247,7 @@ def _handle_ensemble_construct(args):
 
 def _handle_ensemble_aggregate(args):
     """Aggregate pre-computed DL and ILP prediction tensors into ensemble predictions."""
-    from chebILP.ensemble_eval import EnsembleAggregator, load_dl_preds, load_ilp_preds
+    from chebILP.evaluation.ensemble_eval import EnsembleAggregator, load_dl_preds, load_ilp_preds
     import numpy as np, json as _json, pandas as pd
 
     labels = _load_label_stats(args.labels_file)
@@ -312,7 +314,7 @@ def _handle_ensemble_aggregate(args):
 
 
 def _handle_test(args):
-    from chebILP.test import test_chebi_classes
+    from chebILP.evaluation.test import test_chebi_classes
 
     # load config from the run to evaluate
     with open(os.path.join(args.run_to_evaluate, "config.yml"), "r") as f:
@@ -348,7 +350,7 @@ def _handle_test(args):
 
 def _handle_predict(args):
     import json
-    from chebILP.test import predict_smiles
+    from chebILP.evaluation.test import predict_smiles
 
     smiles_list = args.smiles
     if smiles_list is None:
@@ -386,27 +388,28 @@ def _handle_predict(args):
 def _add_common_args(parser: argparse.ArgumentParser):
     """Add arguments shared by all subcommands that build an ILPProblemBuilder."""
     parser.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
-    parser.add_argument("--chebi_split", type=str, required=True, help="Path to the ChEBI split file (mol_id,split CSV).")
+    parser.add_argument("--chebi_version", "-v", type=int, required=True,
+                        help="ChEBI ontology version (e.g. 251); selects the prepared dataset.")
+    parser.add_argument("--include_two_star", "-2", action="store_true",
+                        help="Include 2-star classes as well as 3-star (default: 3-star only).")
+    parser.add_argument("--base_dir", type=str, default="data",
+                        help="Root directory for the dataset (default: data).")
+    parser.add_argument("--min_pos_samples", type=int, default=25,
+                        help="Minimum descendant molecules per label class; selects the dataset subset (default: 25).")
     parser.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
-    parser.add_argument("--chebi_graph_path", type=str, required=True,
-                        help="Path to chebi_graph.pkl.")
-    parser.add_argument("--molecules_path", type=str, default=True,
-                        help="Path to molecules.pkl.")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
 
 
 def _handle_prepare_dataset(args):
-    from chebILP.data_preparation import ChEBIDataset
+    from chebILP.molecule_processing.data_preparation import ChEBIDataset
     ChEBIDataset.prepare(
         chebi_version=args.chebi_version,
         three_star_only=not args.include_two_star,
-        data_dir=args.data_dir,
+        base_dir=args.base_dir,
         min_pos_samples=args.min_pos_samples,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
         seed=args.seed,
-        labels_path=args.labels_path,
-        splits_path=args.splits_path,
     )
 
 
@@ -422,27 +425,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Download ChEBI data and build all dataset artefacts "
              "(graph cache, molecule cache, labels.txt, splits.csv).",
     )
-    sp_pd.add_argument("--chebi_version", type=int, required=True,
-                       help="ChEBI ontology version (e.g. 248).")
-    sp_pd.add_argument("--include_two_star", action="store_true",
+    sp_pd.add_argument("--chebi_version", "-v", type=int, required=True,
+                       help="ChEBI ontology version (e.g. 251).")
+    sp_pd.add_argument("--include_two_star", "-2", action="store_true",
                        help="Include classes with 2-star or 3-star annotation status (default: Only 3-star classes).")
-    sp_pd.add_argument("--data_dir", type=str, default=None,
-                       help="Root directory for raw and cached files "
-                            "(default: data/chebi_v{version}).")
-    sp_pd.add_argument("--min_pos_samples", type=int, default=50,
-                       help="Minimum descendant molecules per label class (default: 50).")
-    sp_pd.add_argument("--val_ratio", type=float, default=0.1,
-                       help="Fraction of molecules for validation (default: 0.1).")
-    sp_pd.add_argument("--test_ratio", type=float, default=0.1,
-                       help="Fraction of molecules for test (default: 0.1).")
+    sp_pd.add_argument("--base_dir", type=str, default="data",
+                       help="Root directory for the dataset (default: data).")
+    sp_pd.add_argument("--min_pos_samples", type=int, default=25,
+                       help="Minimum descendant molecules per label class (default: 25).")
+    sp_pd.add_argument("--val_ratio", type=float, default=0.2,
+                       help="Fraction of molecules held back for validation (default: 0.2).")
+    sp_pd.add_argument("--test_ratio", type=float, default=0.2,
+                       help="Fraction of molecules held back for testing (default: 0.2).")
     sp_pd.add_argument("--seed", type=int, default=42,
                        help="Random seed for splits (default: 42).")
-    sp_pd.add_argument("--labels_path", type=str, default=None,
-                       help="Output path for labels.txt "
-                            "(default: {data_dir}/min{n}/labels.txt).")
-    sp_pd.add_argument("--splits_path", type=str, default=None,
-                       help="Output path for splits.csv "
-                            "(default: {data_dir}/min{n}/splits.csv).")
     sp_pd.set_defaults(func=_handle_prepare_dataset)
 
     # ── build_samples ────────────────────────────────────────────────────
@@ -451,7 +447,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build positive/negative example files (exs.pl) for the given ChEBI classes.",
     )
     _add_common_args(sp_samples)
-    sp_samples.add_argument("--min_pos_samples", type=int, default=25, help="Minimum positive samples per class.")
     sp_samples.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive samples per class.")
     sp_samples.add_argument("--min_neg_samples", type=int, default=25, help="Minimum negative samples per class.")
     sp_samples.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
@@ -671,7 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _handle_rule_to_nl(args):
-    from chebILP.rule_to_nl import translate_rule
+    from chebILP.explainability.rule_to_nl import translate_rule
 
     rule = args.rule
     if rule is None:
@@ -690,7 +685,7 @@ def _handle_rule_to_nl(args):
 
 
 def _handle_explain(args):
-    from chebILP.explain import explain_molecule
+    from chebILP.explainability.explain import explain_molecule
 
     smiles = args.smiles
     if smiles is None:

@@ -2,12 +2,12 @@
 # ILP tell the class apart from other molecules.
 # Each auxiliary predicate is a small
 # self-contained Python program mapping an RDKit Mol to a predicate extension (see
-# chebILP.auxiliary_predicates for the contract, and chebILP.auxiliary_generation for the
+# chebILP.predicate_generation.auxiliary_predicates for the contract, and chebILP.predicate_generation.auxiliary_generation for the
 # shared generate -> validate -> store loop).
 #
 # Predicates are kept in ONE shared library. For each class we first RETRIEVE the most 
 # relevant existing predicates (hybrid
-# BM25 + dense, see chebILP.predicate_retrieval) and offer them to the LLM, which may
+# BM25 + dense, see chebILP.predicate_generation.predicate_retrieval) and offer them to the LLM, which may
 # reuse any of them and/or invent new ones. Reused + new predicates are recorded for the
 # class in class_map.json; new programs are added to the library. `build_bk
 # --predicate_set llm_generated_fgs` then loads each class's chosen programs.
@@ -17,7 +17,7 @@
 # the retrieved reuse candidates from the shared library.
 #
 # Usage:
-#   python -m chebILP.generate_auxiliary_predicates \
+#   python -m chebILP.predicate_generation.generate_auxiliary_predicates \
 #       --labels_file labels.txt \
 #       --chebi_version 248 \
 #       --n_predicates 8
@@ -30,7 +30,7 @@ from typing import Literal
 from dotenv import load_dotenv
 from rdkit import Chem
 
-from chebILP.auxiliary_generation import (
+from chebILP.predicate_generation.auxiliary_generation import (
     OUTPUT_CONTRACT,
     AuxiliaryGenerator,
     NewItem,
@@ -39,8 +39,8 @@ from chebILP.auxiliary_generation import (
     format_parents,
     one_line,
 )
-from chebILP.auxiliary_predicates import add_program_to_library, load_program_source
-from chebILP.predicate_retrieval import HybridPredicateRetriever
+from chebILP.predicate_generation.auxiliary_predicates import add_program_to_library, load_program_source
+from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
 
 
 # Reuse the exact predicate reference the enhancement pipeline shows the model,

@@ -2,8 +2,8 @@
 
 Two pipelines sit on this base and differ only in what an auxiliary predicate *is*:
 
-- :mod:`chebILP.generate_auxiliary_predicates` — a Python program over an RDKit Mol.
-- :mod:`chebILP.generate_auxiliary_rules` — an ASP/clingo rule program.
+- :mod:`chebILP.predicate_generation.generate_auxiliary_predicates` — a Python program over an RDKit Mol.
+- :mod:`chebILP.predicate_generation.generate_auxiliary_rules` — an ASP/clingo rule program.
 
 Everything else (class lookup, reuse retrieval, the LLM call, validate-and-reject,
 library storage, class_map bookkeeping, the exchange log) is shared and lives here.
@@ -22,9 +22,9 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict
 
-from chebILP.auxiliary_predicates import set_class_predicates
+from chebILP.predicate_generation.auxiliary_predicates import set_class_predicates
 from chebILP.ilp_path_manager import get_aux_generation_log_path
-from chebILP.llm_client import structured_completion
+from chebILP.predicate_generation.llm_client import structured_completion
 from chebILP.utils import sort_labels_by_hierarchy
 
 

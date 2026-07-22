@@ -7,7 +7,7 @@ from xclingo import XclingoControl
 
 from chebILP.ilp_problem_builder import build_background_chemlog
 from chebILP.utils import split_prolog_literals
-from chebILP.rule_to_nl import _ELEMENT_NAMES, _num_word, _sort_clause_literals, _get_a_an
+from chebILP.explainability.rule_to_nl import _ELEMENT_NAMES, _num_word, _sort_clause_literals, _get_a_an
 
 
 def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
