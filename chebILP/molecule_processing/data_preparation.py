@@ -210,8 +210,8 @@ class ChEBIDataset:
     ) -> "ChEBIDataset":
         """Download, build caches, select labels, and save splits in one call."""
         dataset = cls(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
-        labels_out = os.path.join(dataset.data_dir, "labels.txt")
-        splits_out = os.path.join(dataset.data_dir, "splits.csv")
+        labels_out = os.path.join(dataset.processed_dir, "labels.txt")
+        splits_out = os.path.join(dataset.processed_dir, "splits.csv")
 
         labels = dataset.select_labels(output_path=labels_out)
         dataset.create_splits(
