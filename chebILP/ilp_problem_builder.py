@@ -44,7 +44,7 @@ def load_fowl_smarts(path=FOWL_SMARTS_PATH) -> dict[str, str]:
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = False):
+    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True):
         self.predicate_set = predicate_set
         self.problem_dir = os.path.join(base_dir, "ilp_problems")
         os.makedirs(self.problem_dir, exist_ok=True)
@@ -464,7 +464,7 @@ def build_full_background(
     aux_failures=None,
     fowl_smarts=None,
     rule_programs=None,
-    computed_facts: bool = False,
+    computed_facts: bool = True,
 ) -> list[str]:
     """Build one flat background-knowledge fact list for the molecules in ``rows``.
 

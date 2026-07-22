@@ -22,36 +22,38 @@ def _make_ilp_builder(args):
     from chebILP.predicate_generation.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
     if isinstance(args, dict):
         fg_mode = args["fg_mode"]
-        chebi_split = args.get("chebi_split")
+        chebi_version = args["chebi_version"]
+        three_star_only = not args.get("include_two_star", False)
+        base_dir = args.get("base_dir", "data")
+        min_pos_samples = args.get("min_pos_samples", 25)
         predicate_set = args["predicate_set"]
-        chebi_graph_path = args.get("chebi_graph_path")
-        molecules_path = args.get("molecules_path")
         aux_timeout = args.get("aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = args.get("predicate_dir")
         computed_facts = args.get("computed_facts", False)
     else:
         fg_mode = args.fg_mode
-        chebi_split = getattr(args, "chebi_split", None)
+        chebi_version = args.chebi_version
+        three_star_only = not getattr(args, "include_two_star", False)
+        base_dir = getattr(args, "base_dir", "data")
+        min_pos_samples = getattr(args, "min_pos_samples", 25)
         predicate_set = args.predicate_set
-        chebi_graph_path = getattr(args, "chebi_graph_path", None)
-        molecules_path = getattr(args, "molecules_path", None)
         aux_timeout = getattr(args, "aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = getattr(args, "predicate_dir", None)
         computed_facts = getattr(args, "computed_facts", False)
 
     if fg_mode:
         return FGILPProblemBuilder(
-            chebi_split=chebi_split,
-            chebi_graph_path=chebi_graph_path,
-            molecules_path=molecules_path,
-            dataset_path=os.path.join("data", "chebi_fgs_dataset.pkl"),
+            chebi_version=chebi_version,
+            three_star_only=three_star_only,
+            base_dir=base_dir,
+            min_pos_samples=min_pos_samples,
             predicate_set=predicate_set,
         )
     return ILPProblemBuilder(
-        chebi_split=chebi_split,
-        chebi_graph_path=chebi_graph_path,
-        molecules_path=molecules_path,
-        muggleton=False,
+        chebi_version=chebi_version,
+        three_star_only=three_star_only,
+        base_dir=base_dir,
+        min_pos_samples=min_pos_samples,
         predicate_set=predicate_set,
         aux_timeout=aux_timeout,
         aux_library_dir=aux_library_dir,
@@ -386,12 +388,15 @@ def _handle_predict(args):
 def _add_common_args(parser: argparse.ArgumentParser):
     """Add arguments shared by all subcommands that build an ILPProblemBuilder."""
     parser.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
-    parser.add_argument("--chebi_split", type=str, required=True, help="Path to the ChEBI split file (mol_id,split CSV).")
+    parser.add_argument("--chebi_version", "-v", type=int, required=True,
+                        help="ChEBI ontology version (e.g. 251); selects the prepared dataset.")
+    parser.add_argument("--include_two_star", "-2", action="store_true",
+                        help="Include 2-star classes as well as 3-star (default: 3-star only).")
+    parser.add_argument("--base_dir", type=str, default="data",
+                        help="Root directory for the dataset (default: data).")
+    parser.add_argument("--min_pos_samples", type=int, default=25,
+                        help="Minimum descendant molecules per label class; selects the dataset subset (default: 25).")
     parser.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
-    parser.add_argument("--chebi_graph_path", type=str, required=True,
-                        help="Path to chebi_graph.pkl.")
-    parser.add_argument("--molecules_path", type=str, default=True,
-                        help="Path to molecules.pkl.")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
 
 
@@ -442,7 +447,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build positive/negative example files (exs.pl) for the given ChEBI classes.",
     )
     _add_common_args(sp_samples)
-    sp_samples.add_argument("--min_pos_samples", type=int, default=25, help="Minimum positive samples per class.")
     sp_samples.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive samples per class.")
     sp_samples.add_argument("--min_neg_samples", type=int, default=25, help="Minimum negative samples per class.")
     sp_samples.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
