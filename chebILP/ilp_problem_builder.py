@@ -13,6 +13,7 @@ import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
+from chebi_utils.sample_filters import get_direct_neighbors
 
 
 CHEBI_FG_RULES_PATH = os.path.join("data", "chebi_fg_rules_from_smiles.pl")
@@ -59,8 +60,7 @@ class ILPProblemBuilder:
         # --- Load pre-built ChEBI data -------------------------------------
         self.dataset = ChEBIDataset(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
         self.hierarchy_graph = nx.transitive_closure_dag(self.dataset.chebi_graph)
-        self.undirected_graph = self.dataset.chebi_graph.to_undirected()
-        self.splits = self.dataset.load_splits_from_csv() 
+        self.splits = self.dataset.load_splits_from_csv()
             
             
     def build_examples(self, target_ids: list[str], min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
@@ -225,34 +225,6 @@ class ILPProblemBuilder:
                 f.write("\n".join(bias_lines) + "\n")
 
 
-    def get_closest_negatives(self, samples: pd.DataFrame, target_id: str, min_samples=25, max_samples=None, direct_only=False):
-        # goal: reach min_samples, but continue collecting samples (until max_samples) if they are siblings.
-        # if direct_only=True, only collect from direct neighbors of target_id (first BFS ring) regardless of count.
-        import queue
-        q = queue.Queue()
-        q.put(target_id)
-        visited = set() # visit closest labels
-        selected = set() # select samples that are subclasses of closest labels until we have enough samples
-        samples_index = list(str(id) for id in samples.index)
-        siblings = True
-        while not q.empty():
-            current = q.get()
-            for neighbor in self.undirected_graph.neighbors(current):
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    q.put(neighbor)
-                    for neighbor_sub in self.hierarchy_graph.predecessors(neighbor):
-                        if str(neighbor_sub) in samples_index:
-                            selected.add(str(neighbor_sub))
-                        if (max_samples and len(selected) >= max_samples) or (len(selected) >= min_samples and not siblings):
-                            return self.dataset.molecules.loc[[id in selected for id in self.dataset.molecules.index]]
-            if len(selected) >= min_samples or direct_only:
-                break
-            siblings = False
-
-        return self.dataset.molecules.loc[[str(id) in selected for id in self.dataset.molecules.index]]
-
-
     def build_negative_mix(self, neg_pool: pd.DataFrame, sibling_ids: set, max_samples: int, random_state: int = 42) -> pd.DataFrame:
         """50:50 mix of direct-sibling negatives and random negatives from ``neg_pool``.
 
@@ -285,7 +257,8 @@ class ILPProblemBuilder:
         # near-miss half of every split's negatives; the other half is drawn uniformly at random
         # from the full negative pool. The objective is therefore global classification, not
         # separating the target from its superclass only.
-        pos_ids, sibling_neg_ids = get_direct_neighbors(target_id, self.dataset.chebi_graph, self.hierarchy_graph, self.dataset.molecules)
+        mol_index = set(str(i) for i in self.dataset.molecules.index)
+        pos_ids, sibling_neg_ids = get_direct_neighbors(mol_index, self.dataset.chebi_graph, target_id)
         sibling_neg_ids = set(sibling_neg_ids)
 
         samples_by_split = dict()
@@ -309,43 +282,6 @@ class ILPProblemBuilder:
 
         # sum up all positive and negative samples across splits
         return sum(len(v) for k, v in samples_by_split.items() if k[0] == "pos"), sum(len(v) for k, v in samples_by_split.items() if k[0] == "neg")
-    
-
-def get_direct_neighbors(
-    target_id: str,
-    chebi_graph,
-    hierarchy_graph,
-    molecules_df: pd.DataFrame,
-) -> tuple[list[str], list[str]]:
-    """
-    Return the positive and negative samples for a target class, only considering descendants of its direct parents.
-
-    Returns:
-        pos_ids: list of positive validation molecule IDs
-        neg_ids: list of negative validation molecule IDs
-                 (empty when target has no siblings)
-    """
-    mol_index = set(str(idx) for idx in molecules_df.index)
-    pos_ids = [
-        str(d)
-        for d in hierarchy_graph.predecessors(target_id)
-        if str(d) in mol_index
-    ]
-
-    sample_space_by_parent = dict()
-    for parent in chebi_graph.successors(target_id):
-        sample_space_by_parent[parent] = set()
-        for desc in hierarchy_graph.predecessors(parent):
-            s = str(desc)
-            if s in mol_index:
-                sample_space_by_parent[parent].add(s)
-    if len(sample_space_by_parent) == 0:
-        return pos_ids, []
-    sample_space = set.intersection(*sample_space_by_parent.values())
-    neg_ids = list(sample_space - set(pos_ids))
-    return pos_ids, neg_ids
-
-
 
 
 

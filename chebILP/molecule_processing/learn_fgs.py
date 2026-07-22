@@ -4,6 +4,7 @@ import pandas as pd
 
 from chebILP.ilp_path_manager import get_exs_path
 from chebILP.ilp_problem_builder import ILPProblemBuilder
+from chebi_utils.sample_filters import get_closest_negatives
 
 # todo: this class is out of dat
 class FGILPProblemBuilder(ILPProblemBuilder):
@@ -26,7 +27,8 @@ class FGILPProblemBuilder(ILPProblemBuilder):
 
         pos_samples = df_pos.sample(min(max_pos_samples, len(df_pos)))
 
-        neg_samples = self.get_closest_negatives(df_neg, target_id, n_samples=max_neg_samples)
+        neg_ids = get_closest_negatives([str(i) for i in df_neg.index], self.dataset.chebi_graph, target_id, max_samples=max_neg_samples)
+        neg_samples = df_neg[df_neg.index.astype(str).isin(neg_ids)]
         
         exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split="train")
         with open(exs_path, "w+") as f:
@@ -46,7 +48,8 @@ class FGILPProblemBuilder(ILPProblemBuilder):
 
         pos_samples = df_pos.sample(min(max_pos_samples, len(df_pos)))
 
-        neg_samples = self.get_closest_negatives(df_neg, target_id, n_samples=max_neg_samples)
+        neg_ids = get_closest_negatives([str(i) for i in df_neg.index], self.dataset.chebi_graph, target_id, max_samples=max_neg_samples)
+        neg_samples = df_neg[df_neg.index.astype(str).isin(neg_ids)]
         
         exs_validation_path = get_exs_path(target_id, base_dir=self.problem_dir, split="validation")
         with open(exs_validation_path, "w+") as f:
