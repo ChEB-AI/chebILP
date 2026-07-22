@@ -2,15 +2,13 @@ import os
 from typing import Literal
 import networkx as nx
 
-import pickle
-
 import tqdm
-from chebILP.data_preparation import ChEBIDataset
-from chebILP.mol_to_fol import mol_to_fol_atoms, mol_to_fol_fgs
-from chebILP.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
-from chebILP.auxiliary_rules import derive_rule_extensions, load_class_rules
-from chebILP.fg_matching import get_chembl_fgs, get_chebi_fgs
-from chebILP.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
+from chebILP.molecule_processing.data_preparation import ChEBIDataset
+from chebILP.molecule_processing.mol_to_fol import mol_to_fol_atoms, mol_to_fol_fgs
+from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
+from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules
+from chebILP.molecule_processing.fg_matching import get_chembl_fgs, get_chebi_fgs
+from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path

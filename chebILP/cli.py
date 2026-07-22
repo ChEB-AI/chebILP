@@ -17,9 +17,9 @@ def _load_classes(labels_file: str) -> list[str]:
 
 
 def _make_ilp_builder(args):
-    from chebILP.learn_fgs import FGILPProblemBuilder
+    from chebILP.molecule_processing.learn_fgs import FGILPProblemBuilder
     from chebILP.ilp_problem_builder import ILPProblemBuilder
-    from chebILP.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
+    from chebILP.predicate_generation.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
     if isinstance(args, dict):
         fg_mode = args["fg_mode"]
         chebi_split = args.get("chebi_split")
@@ -113,7 +113,7 @@ def _handle_learn(args):
 
 
 def _handle_select_predicates(args):
-    from chebILP.select_predicates import select_predicates_for_classes
+    from chebILP.predicate_generation.select_predicates import select_predicates_for_classes
 
     with open(args.labels_file, "r") as f:
         chebi_ids = [int(line.strip()) for line in f if line.strip()]
@@ -396,7 +396,7 @@ def _add_common_args(parser: argparse.ArgumentParser):
 
 
 def _handle_prepare_dataset(args):
-    from chebILP.data_preparation import ChEBIDataset
+    from chebILP.molecule_processing.data_preparation import ChEBIDataset
     ChEBIDataset.prepare(
         chebi_version=args.chebi_version,
         three_star_only=not args.include_two_star,
@@ -662,7 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _handle_rule_to_nl(args):
-    from chebILP.rule_to_nl import translate_rule
+    from chebILP.explainability.rule_to_nl import translate_rule
 
     rule = args.rule
     if rule is None:
@@ -681,7 +681,7 @@ def _handle_rule_to_nl(args):
 
 
 def _handle_explain(args):
-    from chebILP.explain import explain_molecule
+    from chebILP.explainability.explain import explain_molecule
 
     smiles = args.smiles
     if smiles is None:

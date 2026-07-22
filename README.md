@@ -93,7 +93,7 @@ separate from the ILP problem directory (default `data/llm_generated_predicates`
 
 Generate them before `build_bk`:
 ```bash
-python -m chebILP.generate_auxiliary_predicates \
+python -m chebILP.predicate_generation.generate_auxiliary_predicates \
   --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
   --chebi_version 248 \
   --n_predicates 8 \
@@ -105,7 +105,7 @@ The model provider is chosen with `--model provider/name` (via [LiteLLM](https:/
 self-hosted / OpenAI-compatible server. The model must support structured outputs. The
 provider's API key is read from `.env` / the environment under its standard name
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, ...). The same `--model` /
-`--api_base` flags apply to `python -m chebILP.generate_auxiliary_rules`.
+`--api_base` flags apply to `python -m chebILP.predicate_generation.generate_auxiliary_rules`.
 
 Then run `build_bk` with `--predicate_set llm_generated_fgs --predicate_dir <library>`;
 the predicates a class uses are merged into its background knowledge (predicate names are

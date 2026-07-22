@@ -1,10 +1,10 @@
 # Pipeline: for each ChEBI class, ask an LLM to write AUXILIARY PREDICATES as ASP/clingo
 # rules that help ILP define a class.
-# This is the rule-based counterpart of chebILP.generate_auxiliary_predicates (Python programs).
+# This is the rule-based counterpart of chebILP.predicate_generation.generate_auxiliary_predicates (Python programs).
 # Rules are kept in ONE shared library and retrieved per class for reuse (hybrid BM25 + dense).
 #
 # Usage:
-#   python -m chebILP.generate_auxiliary_rules \
+#   python -m chebILP.predicate_generation.generate_auxiliary_rules \
 #       --labels_file labels.txt \
 #       --chebi_version 251 \
 #       --molecules_path data/chebi_v251/ChEBI25_3_STAR/molecules.pkl \
@@ -19,15 +19,15 @@ from dotenv import load_dotenv
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 
-from chebILP.mol_to_fol import mol_to_fol_atoms
-from chebILP.auxiliary_generation import (
+from chebILP.molecule_processing.mol_to_fol import mol_to_fol_atoms
+from chebILP.predicate_generation.auxiliary_generation import (
     OUTPUT_CONTRACT,
     AuxiliaryGenerator,
     format_candidates,
     format_parents,
     one_line,
 )
-from chebILP.auxiliary_rules import (
+from chebILP.predicate_generation.auxiliary_rules import (
     DEFAULT_AUX_RULE_LIBRARY_DIR,
     add_rule_to_library,
     aux_rule_path,
@@ -37,7 +37,7 @@ from chebILP.auxiliary_rules import (
 )
 from chebILP.ilp_path_manager import get_exs_path
 from chebILP.utils import get_atom_id
-from chebILP.predicate_retrieval import HybridPredicateRetriever
+from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
 
 
 # Background facts the ILP system already provides. The rules may use any of these.

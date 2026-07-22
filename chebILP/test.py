@@ -40,7 +40,7 @@ def _qualify_aux_predicates(programs, aux_library_dir):
     ``(qualified_name, source_file)`` telling a worker which predicates to (re)load.
     """
     import re
-    from chebILP.auxiliary_predicates import load_auxiliary_predicates
+    from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates
 
     rewritten: dict = {}
     specs: dict[str, str] = {}  # qualified_name -> source_file
@@ -89,7 +89,7 @@ def _qualify_aux_rules(programs, rule_library_dir):
     would otherwise merge with a same-named helper from a different class.
     """
     import re
-    from chebILP.auxiliary_rules import RuleProgram, load_class_rules
+    from chebILP.predicate_generation.auxiliary_rules import RuleProgram, load_class_rules
 
     rewritten: dict = {}
     qualified: dict[str, RuleProgram] = {}
@@ -126,7 +126,7 @@ def _load_qualified_aux(specs):
     disk rather than receiving them; the qualified name namespaces each class's
     version so identically-named predicates from different classes cannot collide.
     """
-    from chebILP.auxiliary_predicates import load_program_source
+    from chebILP.predicate_generation.auxiliary_predicates import load_program_source
 
     preds = []
     for qname, source_file in specs:
@@ -144,7 +144,7 @@ def _load_qualified_aux(specs):
 def _quiet_aux_logging():
     """Silence the noise the LLM-generated auxiliary programs produce.
 
-    Their compile/timeout/crash paths log via chebILP.auxiliary_predicates, and they
+    Their compile/timeout/crash paths log via chebILP.predicate_generation.auxiliary_predicates, and they
     routinely trip RDKit's own C++ warnings/errors (valence, parsing, ...). During a
     full-split tensor build these would flood the console, so raise both above the
     default level. Failures are still reported in aggregate at the end of the build.
@@ -152,7 +152,7 @@ def _quiet_aux_logging():
     import logging
     from rdkit import RDLogger
 
-    logging.getLogger("chebILP.auxiliary_predicates").setLevel(logging.ERROR)
+    logging.getLogger("chebILP.predicate_generation.auxiliary_predicates").setLevel(logging.ERROR)
     RDLogger.DisableLog("rdApp.*")
 
 
@@ -275,7 +275,7 @@ def build_ilp_preds_tensor(
     """
     import tqdm
     import clingo
-    from chebILP.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
+    from chebILP.predicate_generation.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
 
     if aux_timeout is None:
         aux_timeout = DEFAULT_AUX_TIMEOUT
@@ -470,7 +470,7 @@ def predict_smiles(
     from rdkit import Chem
     from chebILP.ilp_problem_builder import build_full_background
     from chebILP.clingo_eval import evaluate_with_clingo
-    from chebILP.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
+    from chebILP.predicate_generation.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
 
     if aux_timeout is None:
         aux_timeout = DEFAULT_AUX_TIMEOUT
@@ -484,7 +484,7 @@ def predict_smiles(
     aux_predicates = None
     if predicate_set == "llm_generated_fgs":
         import re
-        from chebILP.auxiliary_predicates import load_auxiliary_predicates
+        from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates
         used_aux_names = set(re.findall(r"\baux_\w+", "\n".join(rules)))
         class_ids = [t[len("chebi_"):] for t in target_predicates if t.startswith("chebi_")]
         seen: dict[str, object] = {}
