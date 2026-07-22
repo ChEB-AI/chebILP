@@ -78,7 +78,7 @@ class ChEBIDataset:
             with open(self.graph_path, "rb") as f:
                 return pickle.load(f)
         print("Building ChEBI hierarchy graph...")
-        graph = get_hierarchy_subgraph(build_chebi_graph(self.obo_path, top_class=None))
+        graph = get_hierarchy_subgraph(build_chebi_graph(self.obo_path, top_class="23367"))
         with open(self.graph_path, "wb") as f:
             pickle.dump(graph, f)
         print(f"  Saved to {self.graph_path} ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")

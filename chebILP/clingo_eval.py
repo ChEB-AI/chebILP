@@ -14,11 +14,15 @@ def filter_impossible_rules(rules: list[str], predicates_in_bk: list[str]):
     print(f"Filtered out {len(rules) - len(rules_filtered)} impossible rules. Remaining rules: {len(rules_filtered)}")
     return rules_filtered
 
-def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_labels: list[str], examples: list, predicates_in_bk: list[str]|None=None, timeout: float|None=None):
+def ground_extensions(rules: list[str], background_facts: list[str], target_labels: list[str], timeout: float|None=None) -> dict[str, list[tuple[str, ...]]]:
+    """Ground ``rules`` over ``background_facts``; return each target's derived argument tuples.
+
+    The target predicates may have any arity — the arguments are returned as they were
+    derived and it is up to the caller to interpret them. Note that clingo treats ``p/1``
+    and ``p/2`` as different predicates, so one name can yield tuples of differing width.
+    """
     import clingo
 
-    if predicates_in_bk is not None:
-        rules = filter_impossible_rules(rules, predicates_in_bk)
     ctl = clingo.Control()
     ctl.add("base", [], "\n".join(background_facts))
     try:
@@ -31,27 +35,49 @@ def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_l
         raise e
     ctl.ground([("base", [])])
 
-    atoms = set()
+    wanted = set(target_labels)
+    extensions: dict[str, list[tuple[str, ...]]] = {}
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+
+    def _collect(model):
+        for atom in model.symbols(atoms=True):
+            if atom.name not in wanted:
+                continue
+            key = (atom.name, tuple(str(a) for a in atom.arguments))
+            if key in seen:
+                continue
+            seen.add(key)
+            extensions.setdefault(atom.name, []).append(key[1])
+
     if timeout is None:
         with ctl.solve(yield_=True) as handle:
             for model in handle:
-                atoms.update(str(atom) for atom in model.symbols(atoms=True))
+                _collect(model)
     else:
-        def _on_model(model):
-            atoms.update(str(atom) for atom in model.symbols(atoms=True))
-
-        with ctl.solve(on_model=_on_model, async_=True) as handle:
+        with ctl.solve(on_model=_collect, async_=True) as handle:
             finished = handle.wait(timeout)
             if not finished:
                 handle.cancel()
                 print(f"Clingo solving timed out after {timeout}s")
+    return extensions
+
+
+def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_labels: list[str], examples: list, predicates_in_bk: list[str]|None=None, timeout: float|None=None):
+    """Which of ``examples`` each target predicate holds for, matching ``label(example)``.
+
+    Only unary extensions are considered; for predicates of other arities use
+    :func:`ground_extensions`.
+    """
+    if predicates_in_bk is not None:
+        rules = filter_impossible_rules(rules, predicates_in_bk)
+    extensions = ground_extensions(rules, background_facts, target_labels, timeout=timeout)
+
     positives = dict()
     for target_label in target_labels:
-        for example in examples:
-            if f"{target_label}({example})" in atoms:
-                if target_label not in positives:
-                    positives[target_label] = []
-                positives[target_label].append(example)
+        derived = {args[0] for args in extensions.get(target_label, []) if len(args) == 1}
+        hits = [example for example in examples if str(example) in derived]
+        if hits:
+            positives[target_label] = hits
 
     return positives
 
