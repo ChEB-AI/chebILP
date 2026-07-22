@@ -19,18 +19,25 @@ def _load_classes(labels_file: str) -> list[str]:
 def _make_ilp_builder(args):
     from chebILP.learn_fgs import FGILPProblemBuilder
     from chebILP.ilp_problem_builder import ILPProblemBuilder
+    from chebILP.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
     if isinstance(args, dict):
         fg_mode = args["fg_mode"]
         chebi_split = args.get("chebi_split")
         predicate_set = args["predicate_set"]
         chebi_graph_path = args.get("chebi_graph_path")
         molecules_path = args.get("molecules_path")
+        aux_timeout = args.get("aux_timeout", DEFAULT_AUX_TIMEOUT)
+        aux_library_dir = args.get("predicate_dir")
+        computed_facts = args.get("computed_facts", False)
     else:
         fg_mode = args.fg_mode
         chebi_split = getattr(args, "chebi_split", None)
         predicate_set = args.predicate_set
         chebi_graph_path = getattr(args, "chebi_graph_path", None)
         molecules_path = getattr(args, "molecules_path", None)
+        aux_timeout = getattr(args, "aux_timeout", DEFAULT_AUX_TIMEOUT)
+        aux_library_dir = getattr(args, "predicate_dir", None)
+        computed_facts = getattr(args, "computed_facts", False)
 
     if fg_mode:
         return FGILPProblemBuilder(
@@ -46,6 +53,9 @@ def _make_ilp_builder(args):
         molecules_path=molecules_path,
         muggleton=False,
         predicate_set=predicate_set,
+        aux_timeout=aux_timeout,
+        aux_library_dir=aux_library_dir,
+        computed_facts=computed_facts,
     )
 
 
@@ -141,6 +151,21 @@ def _handle_build_ilp_preds_for_ensemble(args):
     programs = {cid: entry["program"] for cid, entry in results.items() if entry.get("program")}
     print(f"Loaded {len(programs)} ILP programs from {args.run_dir}")
 
+    # Recover which predicate set / problem dir the run used so the background knowledge
+    # matches what the programs were learned on. Explicit CLI flags override the config.
+    run_config = {}
+    config_path = os.path.join(args.run_dir, "config.yml")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                if ": " in line:
+                    key, value = line.strip().split(": ", 1)
+                    run_config[key] = value
+    predicate_set = args.predicate_set or run_config.get("predicate_set", "atoms")
+    aux_library_dir = args.predicate_dir or run_config.get("predicate_dir")
+    print(f"Using predicate_set='{predicate_set}'"
+          + (f", predicate_dir='{aux_library_dir}'" if predicate_set == "llm_generated_fgs" else ""))
+
     mol_ids = []
     with open(args.chebi_split) as f:
         for line in f.readlines()[1:]:
@@ -159,15 +184,22 @@ def _handle_build_ilp_preds_for_ensemble(args):
     output_npy = os.path.join(args.run_dir, f"full_{prefix}_preds.npy")
     output_meta = os.path.join(args.run_dir, f"full_{prefix}_preds_metadata.json")
 
-    build_ilp_preds_tensor(programs, molecules_df, mol_ids, output_npy, output_meta, label_timeout=args.label_timeout)
+    computed_facts = getattr(args, "computed_facts", False) or run_config.get("computed_facts") == "True"
+
+    build_ilp_preds_tensor(
+        programs, molecules_df, mol_ids, output_npy, output_meta,
+        predicate_set=predicate_set, aux_timeout=args.aux_timeout,
+        aux_library_dir=aux_library_dir, label_timeout=args.label_timeout,
+        n_jobs=args.n_jobs, computed_facts=computed_facts,
+    )
 
 
 def _handle_ensemble_construct(args):
     """Perform model selection and generate the ILP predictions tensor."""
     from chebILP.ensemble_eval import EnsembleConstructor, load_dl_preds
 
-    label_stats = _load_label_stats(args.label_stats)
-    print(f"Label stats: {len(label_stats)} labels")
+    labels = _load_label_stats(args.labels_file)
+    print(f"Label stats: {len(labels)} labels")
 
     dl_val_preds = load_dl_preds(args.dl_val_preds_npy, args.dl_val_preds_meta)
     print(f"DL val predictions: {dl_val_preds.shape[0]} molecules x {dl_val_preds.shape[1]} classes")
@@ -181,7 +213,7 @@ def _handle_ensemble_construct(args):
     constructor = EnsembleConstructor(
         ilp_val_runs=ilp_val_run_dirs,
         dl_val_preds=dl_val_preds,
-        label_stats=label_stats,
+        label_stats=labels,
         chebi_graph=chebi_graph,
         predict_on=args.predict_on,
     )
@@ -216,7 +248,7 @@ def _handle_ensemble_aggregate(args):
     from chebILP.ensemble_eval import EnsembleAggregator, load_dl_preds, load_ilp_preds
     import numpy as np, json as _json, pandas as pd
 
-    label_stats = _load_label_stats(args.label_stats)
+    labels = _load_label_stats(args.labels_file)
 
     dl_preds = load_dl_preds(args.dl_preds_npy, args.dl_preds_meta)
     print(f"DL predictions: {dl_preds.shape[0]} molecules x {dl_preds.shape[1]} labels")
@@ -244,13 +276,17 @@ def _handle_ensemble_aggregate(args):
     import pickle as _pickle
     with open(os.path.join(data_dir, "chebi_graph.pkl"), "rb") as _f:
         chebi_graph = _pickle.load(_f)
+    
+    if trusted_model is not None and any(len(m) > 1 for m in trusted_model.values()):
+        raise ValueError("Not supported: multiple trusted models per class.")
+    single_trusted_model = {cls_id: models[0] for cls_id, models in trusted_model.items()} if trusted_model is not None else None
 
     aggregator = EnsembleAggregator(
         dl_preds=dl_preds,
         ilp_preds=ilp_preds,
-        label_stats=label_stats,
+        label_stats=labels,
         chebi_graph=chebi_graph,
-        trusted_model=trusted_model,
+        trusted_model=single_trusted_model,
         model_weights=model_weights_dict,
     )
 
@@ -329,6 +365,10 @@ def _handle_predict(args):
         rules_file=args.rules_file,
         target_predicates=target_predicates,
         verbose=args.verbose,
+        predicate_set=args.predicate_set,
+        aux_library_dir=args.predicate_dir,
+        aux_timeout=args.aux_timeout,
+        computed_facts=getattr(args, "computed_facts", False),
     )
 
     if args.output:
@@ -336,6 +376,8 @@ def _handle_predict(args):
         with open(args.output, "w") as f:
             json.dump(results, f, indent=2)
         print(f"Predictions saved to {args.output}")
+    else:
+        print(json.dumps(results, indent=2))
 
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
@@ -351,7 +393,7 @@ def _add_common_args(parser: argparse.ArgumentParser):
     parser.add_argument("--molecules_path", type=str, default=True,
                         help="Path to molecules.pkl.")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
-   
+
 
 def _handle_prepare_dataset(args):
     from chebILP.data_preparation import ChEBIDataset
@@ -423,6 +465,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build background knowledge (bk.pl) and bias template (bias.pl) for the given ChEBI classes.",
     )
     _add_common_args(sp_bk)
+    sp_bk.add_argument("--aux_timeout", type=float, default=1.0, help="Timeout (seconds) for each auxiliary predicate's extension call (default: 1.0).")
+    sp_bk.add_argument("--predicate_dir", type=str, default=None,
+                       help="Shared auxiliary-predicate library directory (llm_generated_fgs: "
+                            "data/llm_generated_predicates; llm_generated_rules: data/llm_generated_rules).")
+    sp_bk.add_argument("--computed_facts", action="store_true",
+                       help="For llm_generated_rules: compute mol_weight/ring_size facts to evaluate "
+                            "the rules against (kept out of bk.pl; only aux_* extensions are saved).")
     sp_bk.set_defaults(func=_handle_build_bk)
 
     # ── learn ────────────────────────────────────────────────────────────
@@ -465,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Evaluate learned programs on the test set using results from a previous run.",
     )
     sp_test.add_argument("--run_to_evaluate", type=str, required=True, help="Path to a previous run directory (must contain results.json and config.yml).")
-    sp_test.add_argument("--test_on", type=str, default="test", choices=["validation", "test"], help="Split to evaluate on: 'test' (default) or 'validation' (validation).")
+    sp_test.add_argument("--test_on", type=str, default="test", choices=["train", "validation", "test"], help="Split to evaluate on: 'test' (default), 'validation', or 'train'.")
     sp_test.add_argument("--verbose", action="store_true", help="Log classification result for up to 10 positive and negative samples per class.")
     sp_test.set_defaults(func=_handle_test)
 
@@ -484,6 +533,19 @@ def build_parser() -> argparse.ArgumentParser:
     targets_group_pred.add_argument("--targets_file", type=str, help="File with one target predicate name per line.")
     sp_predict.add_argument("--output", type=str, default=None, help="Optional path to save predictions as JSON.")
     sp_predict.add_argument("--verbose", action="store_true", help="Print satisfied predicates per molecule.")
+    sp_predict.add_argument("--predicate_set", type=str, default="atoms",
+                            choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
+                            help="Background-knowledge predicate set (must match the set the rules "
+                                 "were learned on). Default: atoms.")
+    sp_predict.add_argument("--predicate_dir", type=str, default=None,
+                            help="Shared auxiliary-predicate library directory (only needed for the "
+                                 "llm_generated_fgs predicate set). Default: data/llm_generated_predicates.")
+    sp_predict.add_argument("--aux_timeout", type=float, default=None,
+                            help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
+                                 "(llm_generated_fgs only). Default: library default.")
+    sp_predict.add_argument("--computed_facts", action="store_true",
+                            help="For llm_generated_rules: recompute mol_weight/ring_size facts when "
+                                 "grounding the rules (must match how the rules were built).")
     sp_predict.set_defaults(func=_handle_predict)
 
     # ── build_ilp_preds_for_ensemble ─────────────────────────────────────
@@ -506,6 +568,23 @@ def build_parser() -> argparse.ArgumentParser:
                          help="Path to molecules.pkl (default: data/chebi_v{version}/ChEBI25_3_STAR/molecules.pkl).")
     sp_bipe.add_argument("--label_timeout", type=float, default=60.0,
                          help="Per-label Clingo solving timeout in seconds (default: 60).")
+    sp_bipe.add_argument("--predicate_set", type=str, default=None,
+                         choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
+                         help="Background-knowledge predicate set. Default: read from the run's config.yml "
+                              "(falling back to 'atoms'). Must match the set the programs were learned on.")
+    sp_bipe.add_argument("--predicate_dir", type=str, default=None,
+                         help="Shared auxiliary-predicate library directory (only needed for the "
+                              "llm_generated_fgs predicate set). Default: read from the run's config.yml, "
+                              "falling back to data/llm_generated_predicates.")
+    sp_bipe.add_argument("--aux_timeout", type=float, default=None,
+                         help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
+                              "(llm_generated_fgs only). Default: library default.")
+    sp_bipe.add_argument("--computed_facts", action="store_true",
+                         help="For llm_generated_rules: recompute mol_weight/ring_size facts when "
+                              "grounding the rules. Default: read from the run's config.yml.")
+    sp_bipe.add_argument("--n_jobs", type=int, default=1,
+                         help="Worker processes for evaluating molecules in parallel. "
+                              "1 (default) runs serially; <= 0 uses all CPU cores.")
     sp_bipe.set_defaults(func=_handle_build_ilp_preds_for_ensemble)
 
     # ── ensemble_construct ───────────────────────────────────────────────
@@ -527,7 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Validation-run directories (output of 'test --test_on validation'). "
                             "Each must contain full_val_preds.npy + full_val_preds_metadata.json "
                             "and results.json (for ILP programs).")
-    sp_ec.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
+    sp_ec.add_argument("--labels_file", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "labels.txt"),
                        help="Class statistics CSV (label list + has_negatives flag).")
     sp_ec.add_argument("--output", type=str,
                        default=os.path.join("data", "ensemble_predictions", "ensemble_f1"),
@@ -550,8 +629,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Metadata JSON for --ilp_preds_npy.")
     sp_ea.add_argument("--trusted_models", type=str, required=True,
                        help="Trusted models CSV (_trusted_models.csv) or model weights CSV (_model_weights.csv) from ensemble_construct.")
-    sp_ea.add_argument("--label_stats", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv"),
-                       help="Class statistics CSV (label list + has_negatives flag).")
+    sp_ea.add_argument("--labels_file", type=str, default=os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "labels.txt"),
+                       help="File containing the list of labels.")
     sp_ea.add_argument("--output", type=str,
                        default=os.path.join("data", "ensemble_predictions", "ensemble_predictions.npy"),
                        help="Output .npy path; a matching _metadata.json is written alongside.")

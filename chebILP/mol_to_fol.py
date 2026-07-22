@@ -8,6 +8,10 @@ import logging
 
 from rdkit import Chem
 
+# Largest ring size that gets its own size-specific ring{N}/in_ring{N}
+# predicates. Larger rings only contribute to the generic unary in_ring.
+MAX_RING_SIZE = 8
+
 # Gonane core SMARTS (C1–C17, IUPAC steroid numbering) compiled once at import.
 # [#6] matches any carbon; ~ matches any bond — handles unsaturated steroids
 # (Δ4, Δ5), ketones, and estrogens (aromatic ring A) without modification.
@@ -84,6 +88,26 @@ def mol_to_fol_atoms(mol: Chem.Mol):
             stereo_pred = f"b{bond.GetStereo().name}"
             atom_extensions.setdefault(stereo_pred, []).extend([(left, right), (right, left)])
 
+    # Rings.
+    #   ring{N}(A1, …, AN) – A1…AN form an N-membered ring (all permutations) Only for N <= MAX_RING_SIZE.
+    #   in_ring{N}(A)      – A belongs to some N-membered ring (N <= MAX_RING_SIZE).
+    #   in_ring(A)         – A belongs to some ring of any size.
+    in_ring_atoms: set[int] = set()
+    in_ringN_atoms: dict[int, set[int]] = {}
+    for ring in mol.GetRingInfo().AtomRings():
+        n = len(ring)
+        in_ring_atoms.update(ring)
+        if n <= MAX_RING_SIZE:
+            for start_atom in range(n):
+                ring_permutation = ring[start_atom:] + ring[:start_atom]
+                atom_extensions.setdefault(f"ring{n}", []).append(tuple(ring_permutation))
+                atom_extensions[f"ring{n}"].append(tuple(reversed(ring_permutation)))
+            in_ringN_atoms.setdefault(n, set()).update(ring)
+    if in_ring_atoms:
+        atom_extensions["in_ring"] = sorted(in_ring_atoms)
+    for n, atoms in in_ringN_atoms.items():
+        atom_extensions[f"in_ring{n}"] = sorted(atoms)
+
     # Steroid nucleus positions (steroid_1 … steroid_17)
     steroid_match = mol.GetSubstructMatch(_GONANE_PATTERN, useChirality=False)
     if steroid_match:
@@ -108,3 +132,58 @@ def mol_to_fol_atoms(mol: Chem.Mol):
         mol_extensions.add("aliphatic")
 
     return atom_extensions, mol_extensions
+
+def mol_to_fol_fgs(mol: Chem.Mol, add_fg_atom_predicates: bool = False):
+    # extract functional groups with the FARM algorithm
+
+    from chebai_graph.preprocessing.reader.augmented_reader import AtomFGReader_WithFGEdges_NoGraphNode
+    reader = AtomFGReader_WithFGEdges_NoGraphNode()
+
+    try:
+        augmented_graph = reader._augment_graph_structure(mol)  
+    except Exception as e:
+        print(f"Error occurred while augmenting graph structure: {e}")
+        return {}
+
+    nodes = augmented_graph["node_info"]["fg_nodes"]
+
+    fg_extensions = {}
+
+    for node_id, node in nodes.items():
+        fg_type = node["FG"].lower()
+        if not fg_type[0].isalpha():
+            fg_type = f"fg_{fg_type}"
+        fg_extensions.setdefault(fg_type, []).append(node_id)
+        #ring_size = node["RING"]
+        #if ring_size != 0:
+        #    fg_extensions.setdefault(f"fg_ring{ring_size}", []).append(node_id)
+
+    for edge in augmented_graph["edge_info"]["within_fg_lvl"]:
+        left, right = edge.split("_")
+        left = int(left)
+        right = int(right)
+        fg_extensions.setdefault("is_fg_neighbor", []).append((left, right))
+        fg_extensions.setdefault("is_fg_neighbor", []).append((right, left))
+
+    if add_fg_atom_predicates:
+        for fg_id, atoms in augmented_graph["graph_meta_info"]["fg_to_atoms_map"].items():
+            for atom in atoms["atom"]:
+                fg_extensions.setdefault("in_fg", []).append((int(atom), int(fg_id)))
+            
+
+    return fg_extensions
+
+
+if __name__ == "__main__":
+
+    from chebai_graph.preprocessing.reader.augmented_reader import AtomFGReader_WithFGEdges_NoGraphNode
+    reader = AtomFGReader_WithFGEdges_NoGraphNode()
+
+    mol = Chem.MolFromSmiles("CCO")
+    try:
+        augmented_graph = reader._augment_graph_structure(mol)  
+    except Exception as e:
+        print(f"Error occurred while augmenting graph structure: {e}")
+
+    print(augmented_graph)
+        

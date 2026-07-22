@@ -9,21 +9,245 @@ from typing import Literal, Optional
 import numpy as np
 import pandas as pd
 
+
+def _silent_clingo_logger(code, message):
+    """Swallow Clingo's grounding messages.
+    """
+    pass
+
+
+# Per-process configuration for the molecule workers. Populated once (in the main
+# process for the serial path, or by each pool worker's initializer) so that the
+# large, read-only bits (all programs, auxiliary predicates) are not re-shipped or
+# re-parsed for every molecule.
+_WORKER_STATE: dict = {}
+
+
+def _qualify_aux_predicates(programs, aux_library_dir):
+    """Namespace auxiliary-predicate references per class so they cannot collide.
+
+    Auxiliary predicate names (e.g. ``aux_long_aliphatic_chain``) are NOT unique
+    across classes: many classes independently define a predicate with the same
+    sanitized name but *different* logic. When every class's program is grounded
+    against one shared background knowledge, those names would collide and a single
+    (arbitrary) implementation would be used for all of them — silently producing the
+    wrong labels. To keep the shared-BK optimization sound, rewrite each program's aux
+    references to a class-qualified name (``<name>_<class_id>``, the class id being
+    unique) and emit that class's own extension under the same name.
+
+    Returns ``(rewritten_programs, aux_specs)`` where ``rewritten_programs`` maps
+    class_id -> program text with qualified aux names, and ``aux_specs`` is a list of
+    ``(qualified_name, source_file)`` telling a worker which predicates to (re)load.
+    """
+    import re
+    from chebILP.auxiliary_predicates import load_auxiliary_predicates
+
+    rewritten: dict = {}
+    specs: dict[str, str] = {}  # qualified_name -> source_file
+    for cls_id, prog in programs.items():
+        used = set(re.findall(r"\baux_\w+", prog))
+        if not used:
+            rewritten[cls_id] = prog
+            continue
+        # Map this class's own sanitized aux names to their source files.
+        name_to_source = {
+            p.name: p.source_file
+            for p in load_auxiliary_predicates(cls_id, library_dir=aux_library_dir)
+        }
+        rename: dict[str, str] = {}
+        for name in used:
+            source_file = name_to_source.get(name)
+            if source_file is None:
+                continue  # program references an aux this class does not define
+            qname = f"{name}_{cls_id}"
+            rename[name] = qname
+            specs.setdefault(qname, source_file)
+        rewritten[cls_id] = re.sub(
+            r"\baux_\w+", lambda m: rename.get(m.group(0), m.group(0)), prog
+        )
+    return rewritten, list(specs.items())
+
+
+def _qualify_aux_rules(programs, rule_library_dir):
+    """Namespace auxiliary-RULE references per class (llm_generated_rules).
+
+    Like :func:`_qualify_aux_predicates`, but for ASP rule programs: the same sanitized
+    ``aux_`` name can back different rules in different classes, and every class's program
+    is grounded against one shared background knowledge. Rewrite each program's aux
+    references to a class-qualified name (``<name>_<class_id>``) and return the matching
+    qualified :class:`RuleProgram` objects so the background emits each class's own
+    extension under that name.
+
+    Returns ``(rewritten_programs, qualified_rule_programs)``. Rule programs carry only
+    strings, so (unlike Python aux predicates) they are picklable and shipped to workers
+    directly rather than reloaded from disk.
+
+    EVERY aux name a class's programs mention is renamed, not just the heads the learned
+    program uses, and the class's whole rule set is returned rather than the subset it uses.
+    Both are required because the programs are grounded together: a head the learned program
+    never mentions may still be the helper another head depends on, and an unqualified helper
+    would otherwise merge with a same-named helper from a different class.
+    """
+    import re
+    from chebILP.auxiliary_rules import RuleProgram, load_class_rules
+
+    rewritten: dict = {}
+    qualified: dict[str, RuleProgram] = {}
+    for cls_id, prog in programs.items():
+        if not re.search(r"\baux_\w+", prog):
+            rewritten[cls_id] = prog
+            continue
+        rps = load_class_rules(cls_id, library_dir=rule_library_dir)
+        rename = {
+            name: f"{name}_{cls_id}"
+            for rp in rps
+            for name in re.findall(r"\baux_\w+", rp.source)
+        }
+        substitute = lambda text: re.sub(r"\baux_\w+", lambda m: rename.get(m.group(0), m.group(0)), text)
+        for rp in rps:
+            qname = rename[rp.name]
+            if qname not in qualified:
+                qualified[qname] = RuleProgram(
+                    name=qname,
+                    description=rp.description,
+                    source=substitute(rp.source),
+                    source_file=rp.source_file,
+                )
+        rewritten[cls_id] = substitute(prog)
+    return rewritten, list(qualified.values())
+
+
+def _load_qualified_aux(specs):
+    """Reload auxiliary predicates for a worker under their class-qualified names.
+
+    ``specs`` is a list of ``(qualified_name, source_file)`` produced by
+    ``_qualify_aux_predicates``. The predicates' ``extension`` functions are
+    ``exec``-compiled and therefore not picklable, so each worker rebuilds them from
+    disk rather than receiving them; the qualified name namespaces each class's
+    version so identically-named predicates from different classes cannot collide.
+    """
+    from chebILP.auxiliary_predicates import load_program_source
+
+    preds = []
+    for qname, source_file in specs:
+        try:
+            with open(source_file, "r", encoding="utf-8") as f:
+                pred = load_program_source(f.read(), source_file=source_file)
+        except OSError:
+            pred = None
+        if pred is not None:
+            pred.name = qname
+            preds.append(pred)
+    return preds
+
+
+def _quiet_aux_logging():
+    """Silence the noise the LLM-generated auxiliary programs produce.
+
+    Their compile/timeout/crash paths log via chebILP.auxiliary_predicates, and they
+    routinely trip RDKit's own C++ warnings/errors (valence, parsing, ...). During a
+    full-split tensor build these would flood the console, so raise both above the
+    default level. Failures are still reported in aggregate at the end of the build.
+    """
+    import logging
+    from rdkit import RDLogger
+
+    logging.getLogger("chebILP.auxiliary_predicates").setLevel(logging.ERROR)
+    RDLogger.DisableLog("rdApp.*")
+
+
+def _worker_init(state, aux_load_args):
+    """Pool initializer: stash the shared config and (re)load auxiliary predicates.
+
+    ``aux_load_args`` is the ``aux_specs`` list from ``_qualify_aux_predicates``
+    (``(qualified_name, source_file)`` pairs) or ``None``. The predicates'
+    ``extension`` functions are ``exec``-compiled and therefore not picklable, so each
+    worker reloads them from disk rather than receiving them.
+    """
+    global _WORKER_STATE
+    _quiet_aux_logging()
+    _WORKER_STATE = dict(state)
+    _WORKER_STATE["aux_predicates"] = (
+        _load_qualified_aux(aux_load_args) if aux_load_args is not None else None
+    )
+
+
+def _evaluate_molecule(payload):
+    """Evaluate every program against a single molecule.
+
+    ``payload`` is ``(mol_id, mol_binary)`` where ``mol_binary`` is the RDKit
+    ``Mol.ToBinary(AllProps)`` blob (kept picklable and property-complete across the
+    process boundary). Returns ``(mol_id, fired_names, status, aux_failures)`` with
+    ``status`` one of ``""`` (ok), ``"timeout"`` (partial result still returned) or
+    ``"error: ..."``, and ``aux_failures`` a ``{name: "timeout"|"error"}`` map of the
+    auxiliary predicates that could not be computed for this molecule.
+    """
+    import clingo
+    import pandas as pd
+    from rdkit import Chem
+    from chebILP.ilp_problem_builder import build_full_background
+
+    mol_id, mol_binary = payload
+    st = _WORKER_STATE
+    row_df = pd.DataFrame({"mol": [Chem.Mol(mol_binary)]}, index=[mol_id])
+
+    aux_failures: dict[str, str] = {}
+    try:
+        bg_facts = build_full_background(
+            row_df, predicate_set=st["predicate_set"],
+            aux_predicates=st["aux_predicates"], aux_timeout=st["aux_timeout"],
+            aux_failures=aux_failures, fowl_smarts=st.get("fowl_smarts"),
+            rule_programs=st.get("rule_programs"), computed_facts=st.get("computed_facts", False),
+        )
+    except Exception as e:  # noqa: BLE001
+        return mol_id, [], f"error: {e}", aux_failures
+
+    col_of = st["col_of"]
+    fired: set[str] = set()
+
+    def _on_model(model):
+        for atom in model.symbols(atoms=True):
+            if atom.name in col_of:
+                fired.add(atom.name)
+
+    label_timeout = st["label_timeout"]
+    try:
+        ctl = clingo.Control(logger=_silent_clingo_logger)
+        ctl.add("base", [], "\n".join(bg_facts) + "\n" + st["programs_str"])
+        ctl.ground([("base", [])])
+        if label_timeout and label_timeout > 0:
+            with ctl.solve(on_model=_on_model, async_=True) as handle:
+                if not handle.wait(label_timeout):
+                    handle.cancel()
+                    return mol_id, sorted(fired), "timeout", aux_failures
+        else:
+            ctl.solve(on_model=_on_model)
+    except Exception as e:  # noqa: BLE001
+        return mol_id, [], f"error: {e}", aux_failures
+    return mol_id, sorted(fired), "", aux_failures
+
+
 def build_ilp_preds_tensor(
     programs: dict[str, str],
     molecules_df: pd.DataFrame,
     mol_order: list[str],
     output_npy_path: str,
     output_meta_path: str,
+    predicate_set: str = "atoms",
+    aux_timeout: float | None = None,
+    aux_library_dir: str | None = None,
     label_timeout: float = 60.0,
+    n_jobs: int = 1,
+    computed_facts: bool = False,
 ) -> pd.DataFrame:
     """
     Evaluate ILP programs against every molecule in mol_order and save the
     result as a boolean numpy tensor.
 
-    Builds background knowledge from scratch using build_background_chemlog
-    (not from existing bk.pl problem files). Intended for generating full
-    split prediction tensors used by ensemble_construct.
+    Builds background knowledge from scratch (not from existing bk.pl problem
+    files), using the same predicate-set logic as ILPProblemBuilder.build_bk so
+    the programs are evaluated against the BK they were learned on. Intended for
+    generating full split prediction tensors used by ensemble_construct.
 
     Args:
         programs:         class_id → Prolog program string (only classes with
@@ -34,58 +258,164 @@ def build_ilp_preds_tensor(
         mol_order:        ordered list of molecule IDs to evaluate.
         output_npy_path:  destination .npy file for the boolean tensor.
         output_meta_path: destination JSON file for mol_order / class_labels.
-        label_timeout:    per-label Clingo solving timeout in seconds (default 60).
+        predicate_set:    which background-knowledge predicate set to build
+                          (must match the run being predicted for).
+        aux_timeout:      per-predicate timeout for LLM auxiliary predicates
+                          (llm_generated_fgs only); None → library default.
+        aux_library_dir:  shared auxiliary-predicate library directory (needed
+                          to load predicates for llm_generated_fgs); None →
+                          DEFAULT_AUX_LIBRARY_DIR.
+        label_timeout:    Clingo solving timeout in seconds (default 60).
+        n_jobs:           number of worker processes to evaluate molecules in
+                          parallel. 1 (default) runs serially in-process; <= 0
+                          uses all available CPU cores. Molecules are independent,
+                          so this scales close to linearly with cores.
 
     Returns a boolean DataFrame (index=mol_order, columns=sorted class IDs).
     """
     import tqdm
-    from chebILP.clingo_eval import evaluate_with_clingo
-    from chebILP.ilp_problem_builder import build_background_chemlog
+    import clingo
+    from chebILP.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
+
+    if aux_timeout is None:
+        aux_timeout = DEFAULT_AUX_TIMEOUT
 
     ilp_class_ids = sorted(programs.keys())
     n_mols = len(mol_order)
     n_classes = len(ilp_class_ids)
-    print(f"Building ILP predictions tensor: {n_mols} molecules × {n_classes} classes")
+    print(f"Building ILP predictions tensor: {n_mols} molecules × {n_classes} classes "
+          f"(predicate_set={predicate_set})")
 
-    print("Building background facts for all molecules...")
-    all_bg_facts: list[str] = []
-    present_mol_ids: list[str] = []
-    missing = 0
-    for mol_id in tqdm.tqdm(mol_order, desc="Background knowledge"):
-        mol_row = molecules_df[molecules_df.index == mol_id].dropna(subset=["mol"])
-        if mol_row.empty:
-            missing += 1
-            print(f"  Molecule {mol_id} missing from molecules_df — predicted False")
-        else:
-            lines, _ = build_background_chemlog(mol_row)
-            all_bg_facts.extend(lines)
-            present_mol_ids.append(mol_id)
+    # Molecules we actually have; anything missing stays False in the tensor.
+    present_rows = molecules_df[molecules_df.index.isin(set(mol_order))].dropna(subset=["mol"])
+    present_mol_ids = [str(i) for i in present_rows.index]
+    missing = len(set(mol_order)) - len(set(present_mol_ids))
     if missing:
         print(f"  {missing} molecules missing from molecules_df — predicted False")
 
-    print("Running Clingo for all ILP classes...")
-    all_positives: dict[str, list[str]] = {}
-    for cls_id in tqdm.tqdm(ilp_class_ids, desc="Clingo evaluation"):
-        target_label = f"chebi_{cls_id}"
-        # Use the full program for this class so that every rule needed to define the
-        # label (including auxiliary predicates) is included.
-        rules = [line for line in programs[cls_id].split("\n") if line.strip()]
-        try:
-            positives = evaluate_with_clingo(
-                rules, all_bg_facts, [target_label], present_mol_ids, timeout=label_timeout
-            )
-        except Exception as e:
-            print(f"Clingo evaluation failed: {e}")
-            positives = {}
-        all_positives[target_label] = positives.get(target_label, [])
-
+    # Column index per target label, and row index per molecule id.
+    col_of = {f"chebi_{cls_id}": j for j, cls_id in enumerate(ilp_class_ids)}
     mol_idx = {mol_id: i for i, mol_id in enumerate(mol_order)}
     tensor = np.zeros((n_mols, n_classes), dtype=bool)
-    for col_idx, cls_id in enumerate(ilp_class_ids):
-        label = f"chebi_{cls_id}"
-        for mol_id in all_positives.get(label, []):
-            if mol_id in mol_idx:
-                tensor[mol_idx[mol_id], col_idx] = True
+
+    # Parse-check every program once and keep the valid ones (class_id -> program). Each
+    # program's only derived head is its unique chebi_{id} target, so they never interfere.
+    valid_programs: dict[str, str] = {}
+    for cls_id in ilp_class_ids:
+        prog = "\n".join(line for line in programs[cls_id].split("\n") if line.strip())
+        try:
+            clingo.Control(logger=_silent_clingo_logger).add("t", [], prog)  # syntax check only
+            valid_programs[cls_id] = prog
+        except RuntimeError as e:
+            print(f"  Skipping ChEBI:{cls_id} — failed to parse program: {e}")
+
+    # Auxiliary predicates (llm_generated_fgs) are class-specific: the same sanitized name
+    # can mean different things in different classes. Qualify each program's aux references
+    # (and the extensions we emit for them) per class so they cannot collide in the single
+    # shared background knowledge. The predicates are then (re)loaded once per worker (their
+    # exec-compiled extension functions are not picklable); ``aux_load_args`` is the spec
+    # list a worker needs to reload them.
+    aux_load_args = None
+    if predicate_set == "llm_generated_fgs":
+        valid_programs, aux_specs = _qualify_aux_predicates(valid_programs, aux_library_dir)
+        aux_load_args = aux_specs
+        print(f"{len(aux_specs)} distinct auxiliary predicate implementation(s) referenced "
+              f"by programs")
+
+    # llm_generated_rules: qualify aux rule references per class and recompute their
+    # extensions in the background. RuleProgram objects are picklable, so they ride in
+    # worker_state directly (no per-worker reload like the Python predicates need).
+    rule_programs = None
+    if predicate_set == "llm_generated_rules":
+        valid_programs, rule_programs = _qualify_aux_rules(valid_programs, aux_library_dir)
+        print(f"{len(rule_programs)} distinct auxiliary rule(s) referenced by programs")
+
+    # fowl predicates are class-specific (fowl_<cls_id>) and derived from a shared
+    # SMARTS table. Gather the patterns for the classes being predicted so the same
+    # facts the programs were learned on are emitted into each molecule's background.
+    fowl_smarts = None
+    if predicate_set == "fowl":
+        from chebILP.ilp_problem_builder import load_fowl_smarts
+        all_fowl_smarts = load_fowl_smarts()
+        fowl_smarts = {cls_id: all_fowl_smarts[cls_id] for cls_id in valid_programs if cls_id in all_fowl_smarts}
+        print(f"{len(fowl_smarts)} fowl SMARTS pattern(s) referenced by programs")
+
+    programs_str = "\n".join(valid_programs.values())
+
+    # Shared, read-only config handed to each molecule evaluation (main process for the
+    # serial path, or every pool worker via the initializer).
+    worker_state = dict(
+        programs_str=programs_str, col_of=col_of, predicate_set=predicate_set,
+        aux_timeout=aux_timeout, label_timeout=label_timeout, fowl_smarts=fowl_smarts,
+        rule_programs=rule_programs, computed_facts=computed_facts,
+    )
+
+    # Ship mols as RDKit binary with all properties so nothing (stereo/CIP perception,
+    # cached descriptors) is lost when they cross the process boundary.
+    from rdkit import Chem
+    all_props = Chem.PropertyPickleOptions.AllProps
+    payloads = [
+        (str(row.Index), row.mol.ToBinary(all_props)) for row in present_rows.itertuples()
+    ]
+
+    n_timeout = 0
+    n_error = 0
+    # Auxiliary predicates that could not be computed anywhere, name -> "timeout"|"error"
+    # (a "timeout" on any molecule wins, since it drops the predicate entirely).
+    aux_failures: dict[str, str] = {}
+
+    def _apply(result):
+        nonlocal n_timeout, n_error
+        mol_id, fired, status, mol_aux_failures = result
+        for name, reason in mol_aux_failures.items():
+            if reason == "timeout" or name not in aux_failures:
+                aux_failures[name] = reason
+        if status == "timeout":
+            n_timeout += 1
+        elif status.startswith("error"):
+            n_error += 1
+            print(f"  Clingo evaluation failed for molecule {mol_id}: {status[len('error: '):]}")
+            return
+        i = mol_idx.get(mol_id)
+        if i is not None:
+            for name in fired:
+                tensor[i, col_of[name]] = True
+
+    # Molecules are independent, so each is evaluated against its own tiny Clingo
+    # grounding (one molecule's background knowledge + all programs). With n_jobs != 1
+    # these are farmed out to worker processes for near-linear speedup.
+    if n_jobs is None or n_jobs <= 0:
+        n_jobs = os.cpu_count() or 1
+
+    if n_jobs == 1:
+        _worker_init(worker_state, aux_load_args)
+        for payload in tqdm.tqdm(payloads, desc="Molecules"):
+            _apply(_evaluate_molecule(payload))
+    else:
+        from concurrent.futures import ProcessPoolExecutor
+
+        print(f"Evaluating {len(payloads)} molecules across {n_jobs} worker process(es)")
+        with ProcessPoolExecutor(
+            max_workers=n_jobs, initializer=_worker_init,
+            initargs=(worker_state, aux_load_args),
+        ) as ex:
+            for result in tqdm.tqdm(
+                ex.map(_evaluate_molecule, payloads, chunksize=8),
+                total=len(payloads), desc="Molecules",
+            ):
+                _apply(result)
+
+    if n_timeout:
+        print(f"  {n_timeout} molecule(s) hit the {label_timeout}s solving timeout — those rows may be incomplete")
+    if n_error:
+        print(f"  {n_error} molecule(s) failed to evaluate — predicted False")
+    if aux_failures:
+        n_aux_timeout = sum(1 for r in aux_failures.values() if r == "timeout")
+        n_aux_error = sum(1 for r in aux_failures.values() if r == "error")
+        print(f"  {len(aux_failures)} auxiliary predicate(s) could not be calculated "
+              f"({n_aux_timeout} timed out, {n_aux_error} errored) and were dropped from the "
+              f"background knowledge")
+        print(f"  Failed auxiliary predicates: {', '.join(sorted(aux_failures.keys()))}")
 
     np.save(output_npy_path, tensor)
     with open(output_meta_path, "w") as f:
@@ -100,6 +430,10 @@ def predict_smiles(
     rules_file: str,
     target_predicates: list[str],
     verbose: bool = False,
+    predicate_set: str = "atoms",
+    aux_library_dir: str | None = None,
+    aux_timeout: float | None = None,
+    computed_facts: bool = False,
 ) -> list[dict]:
     """
     Predict which target predicates each molecule (given as a SMILES string) satisfies.
@@ -119,6 +453,12 @@ def predict_smiles(
                            are ignored.
         target_predicates: Head predicate names to check, e.g. ``"chebi_35341"``.
         verbose:           If True, print the satisfied predicates for each molecule.
+        predicate_set:     Which background-knowledge predicate set to build (must match
+                           the set the rules were learned on), via build_full_background.
+        aux_library_dir:   shared auxiliary-predicate library directory (only needed for the
+                           llm_generated_fgs predicate set); None → DEFAULT_AUX_LIBRARY_DIR.
+        aux_timeout:       Per-predicate timeout for LLM auxiliary predicates
+                           (llm_generated_fgs only); None → library default.
 
     Returns:
         list of dicts, one per input SMILES, each with keys:
@@ -128,11 +468,51 @@ def predict_smiles(
           - ``"time"``: time (seconds) the Clingo evaluation took, or None for invalid SMILES.
     """
     from rdkit import Chem
-    from chebILP.ilp_problem_builder import build_background_chemlog
+    from chebILP.ilp_problem_builder import build_full_background
     from chebILP.clingo_eval import evaluate_with_clingo
+    from chebILP.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
+
+    if aux_timeout is None:
+        aux_timeout = DEFAULT_AUX_TIMEOUT
 
     with open(rules_file, "r") as f:
         rules = [line.strip() for line in f if line.strip() and not line.strip().startswith("%")]
+
+    # Auxiliary predicates (llm_generated_fgs) are class-specific, so load the ones
+    # referenced by the rules for the target classes (first definition of each aux_ name
+    # wins). They are molecule-independent, so gather them once here.
+    aux_predicates = None
+    if predicate_set == "llm_generated_fgs":
+        import re
+        from chebILP.auxiliary_predicates import load_auxiliary_predicates
+        used_aux_names = set(re.findall(r"\baux_\w+", "\n".join(rules)))
+        class_ids = [t[len("chebi_"):] for t in target_predicates if t.startswith("chebi_")]
+        seen: dict[str, object] = {}
+        for cls_id in class_ids:
+            for pred in load_auxiliary_predicates(cls_id, library_dir=aux_library_dir):
+                if pred.name in used_aux_names:
+                    seen.setdefault(pred.name, pred)
+        aux_predicates = list(seen.values())
+
+    # llm_generated_rules: qualify the aux rule references in the rule set per class and
+    # gather the matching rule programs so the background recomputes their extensions.
+    rule_programs = None
+    if predicate_set == "llm_generated_rules":
+        programs_by_class = {
+            t[len("chebi_"):]: "\n".join(r for r in rules if f"chebi_{t[len('chebi_'):]}" in r)
+            for t in target_predicates if t.startswith("chebi_")
+        }
+        rules_qualified, rule_programs = _qualify_aux_rules(programs_by_class, aux_library_dir)
+        rules = "\n".join(rules_qualified.values()).split("\n")
+
+    # fowl predicates are class-specific: gather the SMARTS patterns for the target
+    # classes so the background emits the fowl_<cls_id> facts the rules reference.
+    fowl_smarts = None
+    if predicate_set == "fowl":
+        from chebILP.ilp_problem_builder import load_fowl_smarts
+        all_fowl_smarts = load_fowl_smarts()
+        class_ids = [t[len("chebi_"):] for t in target_predicates if t.startswith("chebi_")]
+        fowl_smarts = {cls_id: all_fowl_smarts[cls_id] for cls_id in class_ids if cls_id in all_fowl_smarts}
 
     results: list[dict] = []
     for smiles in smiles_list:
@@ -144,7 +524,14 @@ def predict_smiles(
 
         mol_id = "m0"
         mol_df = pd.DataFrame([{"mol": mol}], index=[mol_id])
-        background_facts, _ = build_background_chemlog(mol_df)
+        background_facts = build_full_background(
+            mol_df, predicate_set=predicate_set,
+            aux_predicates=aux_predicates, aux_timeout=aux_timeout,
+            fowl_smarts=fowl_smarts, rule_programs=rule_programs, computed_facts=computed_facts,
+        )
+        print(f"Evaluating {smiles!r} against {len(rules)} rules and {len(background_facts)} background facts...")
+        print(f"  Target predicates: {', '.join(target_predicates)}")
+        print(f"  Background knowledge: {background_facts}")
 
         start_time = time.perf_counter()
         try:

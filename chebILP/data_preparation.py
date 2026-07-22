@@ -3,13 +3,13 @@ Dataset preparation: download ChEBI data, build and cache the hierarchy graph
 and molecule DataFrame, select label classes, and create train/val/test splits.
 
 Example usage:
-    python -m chebILP prepare_dataset --chebi_version 248 --min_pos_samples 25
+    python -m chebILP prepare_dataset --chebi_version 251 --min_pos_samples 25
 
 After running, the following files are ready for use by the ILP pipeline:
-    data/chebi_v248/chebi_graph.pkl                 – networkx DiGraph (hierarchy subgraph)
-    data/chebi_v248/ChEBI25_3_STAR/molecules.pkl    – pandas DataFrame  (index = ChEBI ID)
-    data/chebi_v248/ChEBI25_3_STAR/labels.txt       – one selected class ID per line
-    data/chebi_v248/ChEBI25_3_STAR/splits.csv       – mol_id,split  (train/validation/test)
+    data/chebi_v251/chebi_graph.pkl                 – networkx DiGraph (hierarchy subgraph)
+    data/chebi_v251/ChEBI25_3_STAR/molecules.pkl    – pandas DataFrame  (index = ChEBI ID)
+    data/chebi_v251/ChEBI25_3_STAR/labels.txt       – one selected class ID per line
+    data/chebi_v251/ChEBI25_3_STAR/splits.csv       – mol_id,split  (train/validation/test)
 """
 
 import os
@@ -42,7 +42,7 @@ class ChEBIDataset:
         chebi_version: int,
         three_star_only: bool = True,
         data_dir: Optional[str] = None,
-        min_pos_samples: int = 50,
+        min_pos_samples: int = 25,
     ):
         self.chebi_version = chebi_version
         self.three_star_only = three_star_only
@@ -78,7 +78,7 @@ class ChEBIDataset:
             with open(self.graph_path, "rb") as f:
                 return pickle.load(f)
         print("Building ChEBI hierarchy graph...")
-        graph = get_hierarchy_subgraph(build_chebi_graph(self.obo_path, top_class=None))
+        graph = get_hierarchy_subgraph(build_chebi_graph(self.obo_path, top_class="23367"))
         with open(self.graph_path, "wb") as f:
             pickle.dump(graph, f)
         print(f"  Saved to {self.graph_path} ({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")
@@ -187,9 +187,9 @@ class ChEBIDataset:
         chebi_version: int,
         three_star_only: bool = True,
         data_dir: Optional[str] = None,
-        min_pos_samples: int = 50,
-        val_ratio: float = 0.1,
-        test_ratio: float = 0.1,
+        min_pos_samples: int = 25,
+        val_ratio: float = 0.2,
+        test_ratio: float = 0.2,
         seed: int = 42,
         labels_path: Optional[str] = None,
         splits_path: Optional[str] = None,

@@ -27,7 +27,7 @@ pip install chebILP
 
 Extras:
 - `pip install chebILP[explain]` adds `xclingo` and `Pillow` for the `explain` command
-- `pip install chebILP[llm]` adds `anthropic`, `langsmith`, and `python-dotenv` for LLM-enhanced rule learning (`enhance_with_llms`, experimental)
+- `pip install chebILP[llm]` adds `litellm` (multi-provider access for auxiliary-predicate generation), `anthropic`, `langsmith`, and `python-dotenv` for LLM-enhanced rule learning (`enhance_with_llms`, experimental)
 
 
 The `prepare_dl_preds` utility (one-time DL tensor extraction) additionally requires `torch`, which must be installed separately in an environment that has the DL model checkpoint.
@@ -76,10 +76,42 @@ python -m chebILP build_bk \
   --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
   --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
   --chebi_graph_path data/chebi_v248/chebi_graph.pkl \
-  --molecules_path data/chebi_v28/ChEBI25_3_STAR/molecules.pkl
+  --molecules_path data/chebi_v248/ChEBI25_3_STAR/molecules.pkl
 ```
 
-Steps 2 and 3 write files into `data/ilp_problems/` (one subdirectory per class). Available predicate sets: `atoms`, `chembl_fgs`, `chebi_fgs`, `chebi_fg_rules` and `chebi_fg_learned_rules`.
+Steps 2 and 3 write files into `data/ilp_problems/` (one subdirectory per class). Available predicate sets: `atoms`, `chembl_fgs`, `chebi_fgs`, `chebi_fg_rules`, `chebi_fg_learned_rules` and `llm_generated_fgs`.
+
+**Optional: LLM-generated auxiliary predicates (experimental)**
+
+The `llm_generated_fgs` predicate set augments the plain `atoms` predicates with
+class-specific *auxiliary predicates* invented by an LLM — either shortcuts for
+recurring functional groups or concepts that are hard to express with the atom/bond
+predicates (e.g. "molecule has exactly 40 carbons"). Predicates live in a shared
+library — one `programs/<aux_name>.py` file per distinct program (RDKit `Mol` →
+extension) plus a `class_map.json` recording which predicates each class uses — kept
+separate from the ILP problem directory (default `data/llm_generated_predicates`).
+
+Generate them before `build_bk`:
+```bash
+python -m chebILP.generate_auxiliary_predicates \
+  --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
+  --chebi_version 248 \
+  --n_predicates 8 \
+  --predicate_dir data/llm_generated_predicates
+```
+The model provider is chosen with `--model provider/name` (via [LiteLLM](https://github.com/BerriAI/litellm)); it defaults to
+`anthropic/claude-haiku-4-5`. Other examples: `openai/gpt-4o`, `gemini/gemini-2.5-pro`,
+`ollama/llama3.1`, or `hosted_vllm/<name> --api_base http://localhost:8000/v1` for a
+self-hosted / OpenAI-compatible server. The model must support structured outputs. The
+provider's API key is read from `.env` / the environment under its standard name
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, ...). The same `--model` /
+`--api_base` flags apply to `python -m chebILP.generate_auxiliary_rules`.
+
+Then run `build_bk` with `--predicate_set llm_generated_fgs --predicate_dir <library>`;
+the predicates a class uses are merged into its background knowledge (predicate names are
+`aux_`-prefixed). `--predicate_dir` defaults to `data/llm_generated_predicates` and
+`build_bk` errors if no library exists there. Classes with no recorded programs fall back
+to plain atom predicates.
 
 ---
 
@@ -126,9 +158,9 @@ Combine ILP rules with a deep learning (DL) model for hierarchical multi-label c
 **Step 1 — Build full ILP prediction tensors** (run once per ILP run, for the validation and/or test split):
 ```bash
 python -m chebILP build_ilp_preds_for_ensemble \
-  --run_dir data/results_val/run_20260101_120000 \
+  --run_dir data/results/run_20260101_120000 \
   --predict_on validation \
-  --chebi_split data/chebi_v248/ChEBI25_3_STAR/processed/splits.csv \
+  --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
   --chebi_version 248
 ```
 
@@ -137,11 +169,11 @@ This writes `full_val_preds.npy` and `full_val_preds_metadata.json` into the run
 **Step 2 — Model selection and ILP tensor assembly:**
 ```bash
 python -m chebILP ensemble_construct \
-  --chebi_split data/chebi_v248/ChEBI25_3_STAR/processed/splits.csv \
+  --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
   --dl_val_preds_npy data/preds/val_preds.npy \
   --dl_val_preds_meta data/preds/val_preds_metadata.json \
   --ilp_val_runs data/results_val/run_A data/results_val/run_B \
-  --label_stats data/chebi_v248/ChEBI25_3_STAR/processed/class_stats.csv \
+  --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
   --predict_on test \
   --output data/ensemble_predictions/ensemble
 ```

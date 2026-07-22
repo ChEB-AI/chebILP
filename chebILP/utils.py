@@ -3,8 +3,9 @@ from typing import Literal
 import sys
 from contextlib import contextmanager
 from datetime import datetime
+import networkx as nx
 
-AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "chebi_fg_rules", "chebi_fg_learned_rules"]
+AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "chebi_fg_rules", "chebi_fg_learned_rules", "llm_generated_fgs", "llm_generated_rules", "farm_fgs", "farm_fgs_atoms", "fowl"]
 
 
 def split_prolog_literals(body):
@@ -76,3 +77,22 @@ def tee_output(log_path):
         sys.stdout = old_stdout
         sys.stderr = old_stderr
         log_file.close()
+
+
+def get_atom_id(atom: int, molecule_id):
+    return "a" + str(molecule_id) + "_" + str(atom + 1)  # Prolog indices start at 1
+
+
+def sort_labels_by_hierarchy(labels: list[str], chebi_graph: nx.DiGraph):
+    """Sort a list of ChEBI ids by their hierarchy in ChEBI. If A is a superclass of B, A will appear before B in the returned list."""
+    if any(label not in chebi_graph for label in labels):
+        raise ValueError(f"Some labels are not in the ChEBI graph: {set(labels) - set(chebi_graph)}")
+    label_set = set(labels)
+
+    order_graph = nx.DiGraph()
+    order_graph.add_nodes_from(labels)
+    for label in labels:
+        for superclass in nx.descendants(chebi_graph, label) & label_set:
+            order_graph.add_edge(superclass, label)  # superclass -> subclass
+
+    return list(nx.topological_sort(order_graph))

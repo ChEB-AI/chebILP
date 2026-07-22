@@ -45,11 +45,11 @@ def run_ilp_training_subprocess(exs_file, bk_file, bias_file, settings_parameter
 import json
 import pickle
 import base64
-from popper.loop import learn_solution
+from popper.loop import popper
 from popper.util import Settings, format_prog
 
 settings = Settings(ex_file=r"{exs_file}", bk_file=r"{bk_file}", bias_file=r"{bias_file}", **{repr(settings_parameters)})
-prog, score, stats = learn_solution(settings)
+prog, score = popper(settings)
 prog_str = format_prog(prog) if prog else None
 
 result = {{"prog_str": prog_str, "score": list(score) if score else None}}
@@ -106,9 +106,9 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         "timeout": timeout,
     }
     if mdl_weight_fn != 1 or mdl_weight_fp != 1 or mdl_weight_size != 1:
-        settings_parameters["mdl_weight_fn"] = mdl_weight_fn
-        settings_parameters["mdl_weight_fp"] = mdl_weight_fp
-        settings_parameters["mdl_weight_size"] = mdl_weight_size
+        settings_parameters["fn_weight"] = mdl_weight_fn
+        settings_parameters["fp_weight"] = mdl_weight_fp
+        settings_parameters["size_weight"] = mdl_weight_size
 
     with open(os.path.join(results_dir, "config.yml"), "a+") as f:
         f.write(f"problem_dir: {problem_dir}\n")
