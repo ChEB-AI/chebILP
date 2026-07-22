@@ -181,6 +181,22 @@ class ChEBIDataset:
             )
         return splits_df
 
+    def load_splits_from_csv(self) -> pd.DataFrame:
+        """
+        Load a previously saved splits CSV file from the processed directory.  Returns a DataFrame with
+        columns ``[id, split]``.
+        """
+        splits_path = os.path.join(self.processed_dir, "splits.csv")
+        if not os.path.exists(splits_path):
+            raise FileNotFoundError(f"Splits file not found: {splits_path}. "
+                                    f"Run `python -m chebILP prepare_dataset` to create it.")
+        splits_df = pd.read_csv(splits_path)
+        if "id" not in splits_df.columns or "split" not in splits_df.columns:
+            raise ValueError(f"Splits CSV must contain 'id' and 'split' columns: {splits_path}")
+        if not all(s in splits_df["split"].unique() for s in ["train", "validation", "test"]):
+            raise ValueError(f"Splits CSV must contain 'train', 'validation', and 'test' splits: {splits_path}")
+        return splits_df
+
     @classmethod
     def prepare(
         cls,
@@ -194,9 +210,8 @@ class ChEBIDataset:
     ) -> "ChEBIDataset":
         """Download, build caches, select labels, and save splits in one call."""
         dataset = cls(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
-        processed = os.path.join(dataset.data_dir, f"ChEBI{dataset.min_pos_samples}{'_3_STAR' if dataset.three_star_only else ''}")
-        labels_out = os.path.join(processed, "labels.txt")
-        splits_out = os.path.join(processed, "splits.csv")
+        labels_out = os.path.join(dataset.data_dir, "labels.txt")
+        splits_out = os.path.join(dataset.data_dir, "splits.csv")
 
         labels = dataset.select_labels(output_path=labels_out)
         dataset.create_splits(
