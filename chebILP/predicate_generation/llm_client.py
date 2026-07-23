@@ -44,7 +44,7 @@ def _patch_litellm_native_structured_output() -> None:
         if (
             isinstance(response_format, dict)
             and "output_format" not in params
-            and any(family in model for family in ("fable", "mythos"))
+            and any(family in model for family in ("fable", "mythos", "haiku"))
         ):
             output_format = self.map_response_format_to_anthropic_output_format(response_format)
             if output_format is not None:
@@ -93,14 +93,20 @@ def structured_completion(
     max_retries: int = 5,
     api_base: str | None = None,
 ):
-    """Ask ``model`` for one structured answer. Returns ``(parsed, raw_json_text)``.
+    """Ask ``model`` for one structured answer. Returns ``(parsed, raw_json_text, attempts)``.
 
-    ``raw`` is the model's JSON string, kept for the exchange log. Retries transient
-    connection/timeout/rate-limit errors with exponential backoff, and reasks when a
-    (typically weaker) model returns malformed or schema-invalid JSON.
+    ``raw`` is the model's JSON string, kept for the exchange log. ``attempts`` is one
+    record per LLM call made (each ``{"error", "raw", "cost"}``), in order — the final
+    entry is the successful call (``error`` is ``None``); any earlier entries are reasks.
+    Retries transient connection/timeout/rate-limit errors with exponential backoff, and
+    reasks when a (typically weaker) model returns malformed or schema-invalid JSON. On
+    total failure the collected attempts are attached to the raised exception as
+    ``_chebilp_attempts`` so the caller can still log them.
     """
     last_exc = None
+    attempts: list[dict] = []
     for attempt in range(max_retries):
+        cost = None
         try:
             response = litellm.completion(
                 model=model,
@@ -113,6 +119,7 @@ def structured_completion(
                 response_format=schema,
                 api_base=api_base,
             )
+            cost = getattr(response, "_hidden_params", {}).get("response_cost")
             choice = response.choices[0]
             raw = choice.message.content
             if choice.finish_reason == "content_filter":
@@ -124,7 +131,9 @@ def structured_completion(
                     f"empty completion content (finish_reason={choice.finish_reason}, "
                     f"reasoning_chars={len(reasoning)}); raw Anthropic blocks: {original!r}"
                 )
-            return schema.model_validate_json(raw), raw
+            parsed = schema.model_validate_json(raw)
+            attempts.append({"error": None, "raw": raw, "cost": cost})
+            return parsed, raw, attempts
         except _TRANSIENT as e:
             last_exc = e
             wait = 2 ** attempt
@@ -133,6 +142,11 @@ def structured_completion(
         except (ValidationError, ValueError, litellm.JSONSchemaValidationError) as e:
             last_exc = e
             raw = getattr(e, "raw_response", None)
+            attempts.append({"error": str(e), "raw": raw, "cost": cost})
             detail = f"\n    raw response: {raw!r}" if raw else ""
             print(f"  Invalid structured output (attempt {attempt + 1}/{max_retries}), reasking: {e}{detail}")
+    try:
+        last_exc._chebilp_attempts = attempts
+    except (AttributeError, TypeError):
+        pass  # some exception types (e.g. pydantic's) forbid attribute assignment
     raise last_exc

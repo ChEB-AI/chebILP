@@ -108,7 +108,7 @@ Answer with a single JSON object:
 
 
 def generate_one(prompt: str, system: str, model: str, selection_model, api_base: str | None = None):
-    """Ask the model for one class's selection. Returns ``(parsed, raw_json_text)``."""
+    """Ask the model for one class's selection. Returns ``(parsed, raw_json_text, attempts)``."""
     return structured_completion(model, system, prompt, selection_model, api_base=api_base)
 
 
@@ -185,12 +185,17 @@ class AuxiliaryGenerator(ABC):
         candidates = self.retriever.retrieve(query, top_k=self.top_k) if len(self.retriever) else []
         prompt = self.build_user_prompt(chebi_id, info, candidates, ctx)
 
-        parsed, raw = None, None
+        parsed, raw, attempts = None, None, []
         try:
-            parsed, raw = generate_one(prompt, self.system_prompt, self.model, self.selection_model, self.api_base)
+            parsed, raw, attempts = generate_one(
+                prompt, self.system_prompt, self.model, self.selection_model, self.api_base
+            )
+        except Exception as e:
+            attempts = getattr(e, "_chebilp_attempts", [])
+            raise
         finally:
             # Log the exchange even if the request failed; rewritten below once resolved.
-            log_path = self._write_log(chebi_id, info, prompt, parsed, raw, None)
+            log_path = self._write_log(chebi_id, info, prompt, parsed, raw, None, attempts)
             print(f"    logged full exchange to {log_path}")
 
         reused_stems: list[str] = []
@@ -205,31 +210,33 @@ class AuxiliaryGenerator(ABC):
         self.prepare(blocks, ctx)
 
         new_stems: list[str] = []
-        rejected: list[str] = []
+        new_records: list[dict] = []
+        rejected: list[dict] = []
         seen: set[str] = set()
         for item, (label, source) in zip(parsed.new, blocks):
             ok, reason = self.accept(source, label, ctx)
             if not ok:
                 print(f"    rejected {item.name}: {reason}")
-                rejected.append(f"{item.name} ({reason})")
+                rejected.append({"name": item.name, "reason": reason})
                 continue
             added = self.add_to_library(source, chebi_id)
             if added is None:
-                rejected.append(f"{item.name} (invalid program)")
+                rejected.append({"name": item.name, "reason": "invalid program"})
                 continue
             stem, saved = added
             if saved.name in seen:
                 continue
             seen.add(saved.name)
             new_stems.append(stem)
+            new_records.append({"name": saved.name, "stem": stem, "reason": reason})
             self.retriever.add_entry(self.retriever_entry(stem, saved))
             print(f"    new {self.describe(saved, stem, reason)}")
 
         stems = reused_stems + new_stems
         set_class_predicates(chebi_id, stems, problem_dir=self.library_dir)
 
-        selection = {"reused": reused_stems, "new": new_stems, "rejected": rejected}
-        self._write_log(chebi_id, info, prompt, parsed, raw, selection)
+        selection = {"reused": reused_stems, "new": new_records, "rejected": rejected}
+        self._write_log(chebi_id, info, prompt, parsed, raw, selection, attempts)
         return len(stems)
 
     def run(self, chebi_graph, chebi_ids) -> int:
@@ -253,26 +260,66 @@ class AuxiliaryGenerator(ABC):
 
     # --- logging -----------------------------------------------------------------
 
-    def _write_log(self, chebi_id, info, prompt, parsed, raw, selection):
+    def _write_log(self, chebi_id, info, prompt, parsed, raw, selection, attempts=None):
+        attempts = attempts or []
+        failed = [a for a in attempts if a.get("error")]
+        costs = [a["cost"] for a in attempts if a.get("cost") is not None]
+        total_cost = sum(costs) if costs else None
         log_path = get_aux_generation_log_path(chebi_id, base_dir=self.library_dir)
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"# Auxiliary-{self.noun} generation log — CHEBI:{chebi_id} ({info['name']})\n\n")
-            f.write(f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n- Model: {self.model}\n\n")
+            f.write(f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n- Model: {self.model}\n")
+            if attempts:
+                cost_str = f"${total_cost:.4f}" if total_cost is not None else "unknown"
+                f.write(f"- Cost: {cost_str} across {len(attempts)} call(s), {len(failed)} reasked\n")
+            f.write("\n")
             if selection is not None:
-                f.write("## Resolved selection\n\n")
-                f.write(f"- Reused from library: {', '.join(selection['reused']) or '(none)'}\n")
-                f.write(f"- New {self.noun}s added: {', '.join(selection['new']) or '(none)'}\n")
-                f.write(f"- Rejected: {'; '.join(selection['rejected']) or '(none)'}\n\n")
+                f.write(self._format_selection(selection))
             if parsed is not None:
                 f.write(f"## Model reasoning\n\n{parsed.reasoning}\n\n")
                 f.write(self._format_output(parsed))
             f.write("## System prompt\n\n```\n" + self.system_prompt + "\n```\n\n")
             f.write("## User prompt\n\n```\n" + prompt + "\n```\n\n")
-            if parsed is None:
+            if parsed is None and not failed:
                 f.write("## Raw LLM response\n\n```json\n")
                 f.write(raw if raw is not None else "(no response — request failed)")
-                f.write("\n```\n")
+                f.write("\n```\n\n")
+            if failed:
+                # Kept at the bottom: the resolved result is what matters; the reasks are
+                # diagnostic context for why an extra call (or several) was needed.
+                f.write(self._format_failed_attempts(failed))
         return log_path
+
+    def _format_selection(self, selection) -> str:
+        """Render the resolved selection: reused, accepted (with fire fraction), rejected."""
+        parts = ["## Resolved selection\n\n"]
+        parts.append(f"- Reused from library: {', '.join(selection['reused']) or '(none)'}\n")
+        if selection["new"]:
+            parts.append(f"- New {self.noun}s added:\n")
+            for r in selection["new"]:
+                parts.append(f"    - `{r['name']}` — {r['reason']}\n")
+        else:
+            parts.append(f"- New {self.noun}s added: (none)\n")
+        if selection["rejected"]:
+            parts.append("- Rejected:\n")
+            for r in selection["rejected"]:
+                parts.append(f"    - `{r['name']}` — {r['reason']}\n")
+        else:
+            parts.append("- Rejected: (none)\n")
+        parts.append("\n")
+        return "".join(parts)
+
+    def _format_failed_attempts(self, failed) -> str:
+        """Render reasked calls (malformed / schema-invalid output) at the log's tail."""
+        parts = [f"## Failed attempts ({len(failed)} reasked)\n\n"]
+        for i, a in enumerate(failed, 1):
+            cost = a.get("cost")
+            cost_str = f" — cost ${cost:.4f}" if cost is not None else ""
+            parts.append(f"### Attempt {i}{cost_str}\n\n")
+            parts.append(f"- Error: {a['error']}\n\n")
+            raw = a.get("raw")
+            parts.append("```json\n" + (raw if raw else "(no raw response captured)") + "\n```\n\n")
+        return "".join(parts)
 
     def _format_output(self, parsed) -> str:
         """Render the model's parsed answer as readable Markdown."""
