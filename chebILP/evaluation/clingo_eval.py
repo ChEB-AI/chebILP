@@ -1,6 +1,28 @@
 from chebILP.utils import split_prolog_literals
 
 
+def _patch_clingo_logger_decode() -> None:
+    """Decode clingo logger messages with ``errors="replace"``.
+
+    clingo's logger callback strict-decodes each message as UTF-8, and its
+    ``onerror`` handler hard-exits the process (``os._exit``) on failure — so a
+    single non-UTF-8 byte in a warning/info message kills the whole run and no
+    ``try/except`` can catch it. A custom ``logger=`` does not help: the decode
+    runs before the handler is called. Patching ``clingo.core._to_str`` makes the
+    decode tolerant so grounding messages can never take the process down.
+    """
+    from clingo import core
+
+    if getattr(core, "_chebilp_safe_to_str", False):
+        return
+
+    def _safe_to_str(c_str) -> str:
+        return core._ffi.string(c_str).decode(errors="replace")
+
+    core._to_str = _safe_to_str
+    core._chebilp_safe_to_str = True
+
+
 def filter_impossible_rules(rules: list[str], predicates_in_bk: list[str]):
     # for every predicate name in the rule body, check if it exists in background_facts
     predicates_in_bk = [p[0] for p in predicates_in_bk]
@@ -23,6 +45,7 @@ def ground_extensions(rules: list[str], background_facts: list[str], target_labe
     """
     import clingo
 
+    _patch_clingo_logger_decode()
     ctl = clingo.Control()
     ctl.add("base", [], "\n".join(background_facts))
     try:

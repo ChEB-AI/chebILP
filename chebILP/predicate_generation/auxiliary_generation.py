@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict
 
-from chebILP.predicate_generation.auxiliary_predicates import set_class_predicates
+from chebILP.predicate_generation.auxiliary_predicates import load_class_map, set_class_predicates
 from chebILP.ilp_path_manager import get_aux_generation_log_path
 from chebILP.predicate_generation.llm_client import structured_completion
 from chebILP.utils import sort_labels_by_hierarchy
@@ -245,8 +245,14 @@ class AuxiliaryGenerator(ABC):
         self.retriever = self.build_retriever()
         print(f"  {len(self.retriever)} {self.noun}(s) in the library.")
 
+        done = set(load_class_map(self.library_dir))
+        if done:
+            print(f"  Resuming: {len(done)} class(es) already in class_map.json will be skipped.")
+
         total = 0
         for chebi_id in sort_labels_by_hierarchy(chebi_ids, chebi_graph):
+            if str(chebi_id) in done:
+                continue
             info = get_class_info(chebi_graph, chebi_id)
             print(f"CHEBI:{chebi_id} ({info['name']})...")
             try:

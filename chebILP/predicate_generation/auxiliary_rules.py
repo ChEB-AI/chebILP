@@ -119,6 +119,9 @@ def rule_program_error(source: str) -> str | None:
     """
     import clingo
 
+    from chebILP.evaluation.clingo_eval import _patch_clingo_logger_decode
+
+    _patch_clingo_logger_decode()
     messages: list[str] = []
     ctl = clingo.Control(logger=lambda code, msg: messages.append(msg))
     try:
