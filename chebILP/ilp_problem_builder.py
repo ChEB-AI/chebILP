@@ -7,7 +7,7 @@ from chebILP.molecule_processing.data_preparation import ChEBIDataset
 from chebILP.molecule_processing.mol_to_fol import mol_to_fol_fgs
 from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
 from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
-from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules
+from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules, resolve_rule_dependencies
 from chebILP.molecule_processing.fg_matching import get_chembl_fgs, get_chebi_fgs
 from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
@@ -89,6 +89,7 @@ class ILPProblemBuilder:
             """
 
         rules, rule_predicates = [], []
+        failed_rule_classes: list[str] = []
         if self.predicate_set in ["chebi_fg_rules", "chebi_fg_learned_rules"]:
             prolog_lines_rules, body_predicates_rules = build_background_chebi_fg_rules(CHEBI_FG_RULES_PATH if self.predicate_set == "chebi_fg_rules" else CHEBI_FG_LEARNED_RULES_PATH)
             rules = prolog_lines_rules
@@ -107,10 +108,15 @@ class ILPProblemBuilder:
             # llm_generated_rules: the class's auxiliary predicates are ASP rules,
             # evaluated (below) against the atom facts plus optional computed facts.
             # Only the derived aux_* extensions are written to bk.pl.
-            rule_programs = None
+            rule_programs, dependency_programs = None, []
             if self.predicate_set == "llm_generated_rules":
                 rule_programs = load_class_rules(target_id, library_dir=self.aux_library_dir)
-                print(f"  Loaded {len(rule_programs)} auxiliary rule(s) for ChEBI:{target_id}")
+                # class_map.json records only the predicates the class chose, not the ones
+                # they build on, so the dependencies have to be pulled in from the library
+                # or the rules ground against an empty body and derive nothing.
+                dependency_programs = resolve_rule_dependencies(rule_programs, self.aux_library_dir)
+                print(f"  Loaded {len(rule_programs)} auxiliary rule(s) for ChEBI:{target_id}"
+                      + (f" (+{len(dependency_programs)} dependencies)" if dependency_programs else ""))
 
             # The fowl set adds a single class-specific predicate, fowl_<target_id>,
             # derived from a SMARTS pattern, on top of the atom predicates. Not every
@@ -186,8 +192,20 @@ class ILPProblemBuilder:
                     eval_facts += [line for split in ["train", "validation", "test"] for line in computed_lines_by_split.get(split, [])]
                 # The class's rules are grounded as one program, so a rule may use a predicate
                 # another of its rules defines. The head may be of any arity; each derived
-                # atom is written to the split of the molecule it belongs to.
-                extensions = derive_rule_extensions(rule_programs, eval_facts, all_selected_ids)
+                # atom is written to the split of the molecule it belongs to. Dependencies
+                # take part in the grounding but never reach bk.pl.
+                try:
+                    extensions = derive_rule_extensions(
+                        rule_programs + dependency_programs, eval_facts, all_selected_ids
+                    )
+                except (RuntimeError, MemoryError) as e:
+                    # One class's rules must not end a run that is hours long. The class keeps
+                    # its atom-level bk.pl and simply goes without its aux_* extensions.
+                    print(f"  Grounding failed for ChEBI:{target_id} ({e}); "
+                          f"continuing without its auxiliary extensions. "
+                          f"Rules: {', '.join(rp.name for rp in rule_programs)}")
+                    failed_rule_classes.append(target_id)
+                    extensions = {}
                 for rp in rule_programs:
                     emitted = {split: set() for split in ["train", "validation", "test"]}
                     for example, arg_tuples in extensions.get(rp.name, {}).items():
@@ -224,6 +242,10 @@ class ILPProblemBuilder:
             # bias without settings (as template)
             with open(plain_bias_path, "w+") as f:
                 f.write("\n".join(bias_lines) + "\n")
+
+        if failed_rule_classes:
+            print(f"\n{len(failed_rule_classes)} class(es) built without their auxiliary rule "
+                  f"extensions because grounding failed: {', '.join(failed_rule_classes)}")
 
 
     def build_negative_mix(self, neg_pool: pd.DataFrame, sibling_ids: set, max_samples: int, random_state: int = 42) -> pd.DataFrame:
@@ -400,6 +422,7 @@ def build_full_background(
     fowl_smarts=None,
     rule_programs=None,
     computed_facts: bool = True,
+    aux_library_dir: str | None = None,
 ) -> list[str]:
     """Build one flat background-knowledge fact list for the molecules in ``rows``.
 
@@ -440,7 +463,14 @@ def build_full_background(
         if computed_facts:
             eval_facts += build_computed_facts(rows)
         mol_ids = [str(i) for i in rows.index]
-        extensions = derive_rule_extensions(rule_programs, eval_facts, mol_ids)
+        try:
+            extensions = derive_rule_extensions(
+                rule_programs + resolve_rule_dependencies(rule_programs, aux_library_dir),
+                eval_facts, mol_ids,
+            )
+        except (RuntimeError, MemoryError) as e:
+            print(f"Grounding failed ({e}); returning background knowledge without aux_* facts.")
+            extensions = {}
         for rp in rule_programs:
             emitted = set()
             for arg_tuples in extensions.get(rp.name, {}).values():

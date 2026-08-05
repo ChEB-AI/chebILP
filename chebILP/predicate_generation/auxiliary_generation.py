@@ -173,6 +173,15 @@ class AuxiliaryGenerator(ABC):
     def retriever_entry(self, stem, saved) -> dict:
         return {"name": saved.name, "description": saved.description, "kind": "rule", "stem": stem}
 
+    def rejection_code(self, label, ctx) -> str | None:
+        """Stable identifier for *why* ``label`` was rejected, or ``None`` if uncategorised.
+
+        Recorded alongside the human-readable reason so a later pass — a repair prompt that
+        feeds the failure back to the model, say — can branch on the error type instead of
+        parsing prose. Only pipelines that categorise their rejections override this.
+        """
+        return None
+
     def describe(self, saved, stem, reason) -> str:
         return f"{saved.name} -> library/{stem} ({reason}): {saved.description}"
 
@@ -216,8 +225,12 @@ class AuxiliaryGenerator(ABC):
         for item, (label, source) in zip(parsed.new, blocks):
             ok, reason = self.accept(source, label, ctx)
             if not ok:
-                print(f"    rejected {item.name}: {reason}")
-                rejected.append({"name": item.name, "reason": reason})
+                code = self.rejection_code(label, ctx)
+                print(f"    rejected {item.name}" + (f" [{code}]" if code else "") + f": {reason}")
+                record = {"name": item.name, "reason": reason}
+                if code is not None:
+                    record["code"] = code
+                rejected.append(record)
                 continue
             added = self.add_to_library(source, chebi_id)
             if added is None:
@@ -309,7 +322,8 @@ class AuxiliaryGenerator(ABC):
         if selection["rejected"]:
             parts.append("- Rejected:\n")
             for r in selection["rejected"]:
-                parts.append(f"    - `{r['name']}` — {r['reason']}\n")
+                code = f"**[{r['code']}]** " if r.get("code") else ""
+                parts.append(f"    - `{r['name']}` — {code}{r['reason']}\n")
         else:
             parts.append("- Rejected: (none)\n")
         parts.append("\n")

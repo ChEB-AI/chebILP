@@ -29,11 +29,13 @@ from chebILP.predicate_generation.auxiliary_generation import (
 )
 from chebILP.predicate_generation.auxiliary_rules import (
     DEFAULT_AUX_RULE_LIBRARY_DIR,
+    ERROR_UNBOUNDED_RECURSION,
     add_rule_to_library,
     aux_rule_path,
     derive_rule_extensions,
     parse_rule_program,
     rule_program_error,
+    static_rule_errors,
 )
 from chebILP.ilp_path_manager import get_exs_path
 from chebILP.utils import get_atom_id
@@ -166,6 +168,19 @@ Guidance (learned from failure analysis):
 
 # Header comments the model may repeat inside "program"; the pipeline synthesizes them.
 _HEADER_RE = re.compile(r"^\s*%\s*(PREDICATE_NAME|DESCRIPTION)\s*:", re.IGNORECASE)
+
+# Validate-and-reject grounds at most ``validate_max`` positives and negatives, which takes
+# well under a second; anything near this ceiling is pathological rather than merely slow.
+_VALIDATION_GROUNDING_TIMEOUT = 60.0
+
+# Rejection codes for the pipeline's own gates, alongside the static-analysis codes from
+# auxiliary_rules. Every rejection carries one, so a repair pass can branch on the failure
+# type rather than reading the message.
+ERROR_UNPARSEABLE = "unparseable"
+ERROR_CLINGO_SYNTAX = "clingo_syntax"
+ERROR_NO_GROUNDING = "no_grounding"
+ERROR_DEGENERATE = "degenerate"
+ERROR_NO_VALIDATION_MOLECULES = "no_validation_molecules"
 
 
 def _load_train_samples(chebi_id, problem_dir, molecules, max_pos, max_neg):
@@ -331,31 +346,61 @@ recursion predicates, which the ILP system cannot express on its own.
         the syntax gate simply derives nothing and is rejected as degenerate below.
         """
         ctx["errors"] = {}
+        ctx["error_codes"] = {}
         ctx["progs"] = {}
         for label, source in blocks:
             prog = parse_rule_program(source, source_file=label)
             if prog is None:
                 ctx["errors"][label] = "unparseable program"
+                ctx["error_codes"][label] = ERROR_UNPARSEABLE
                 continue
             error = rule_program_error(prog.source)
             if error is not None:
                 ctx["errors"][label] = f"clingo error: {error}"
+                ctx["error_codes"][label] = ERROR_CLINGO_SYNTAX
                 continue
             ctx["progs"][label] = prog
 
         context = [p for p in (_load_library_rule(s, self.library_dir) for s in ctx["reused_stems"]) if p]
+
+        # Static gates that must run before clingo sees the programs, because grounding either
+        # cannot survive the failure (non-terminating recursion runs the machine out of memory)
+        # or cannot detect it (a cross product grounds "successfully", just wrongly and
+        # enormously). Judged over the whole set, since a recursion cycle may close through a
+        # sibling or a reused program.
+        static = static_rule_errors(context + list(ctx["progs"].values()))
+        # A reused program blamed for non-terminating recursion means the NEW programs are what
+        # closed the cycle — the library grounds without them — so they go as a group. A cross
+        # product is local to one clause, so a reused program carrying one says nothing about
+        # the new programs and must not take them down with it.
+        via_reused = sorted(
+            name for name in {p.name for p in context} & set(static)
+            if static[name][0] == ERROR_UNBOUNDED_RECURSION
+        )
+        for label, prog in list(ctx["progs"].items()):
+            entry = static.get(prog.name)
+            if entry is None and via_reused:
+                entry = (ERROR_UNBOUNDED_RECURSION,
+                         f"non-terminating recursion through reused {via_reused[0]}")
+            if entry is not None:
+                ctx["error_codes"][label], ctx["errors"][label] = entry
+                del ctx["progs"][label]
+
         together = context + list(ctx["progs"].values())
         if not together or not ctx["val_ids"]:
             ctx["extensions"] = {}
             return
         try:
-            ctx["extensions"] = derive_rule_extensions(together, ctx["val_facts"], ctx["val_ids"])
+            ctx["extensions"] = derive_rule_extensions(
+                together, ctx["val_facts"], ctx["val_ids"], timeout=_VALIDATION_GROUNDING_TIMEOUT
+            )
         except Exception as e:
             # The set as a whole will not ground (unstratified negation across programs, say).
             # Nothing can be attributed, so every program is rejected with the shared cause.
             ctx["extensions"] = {}
             for label in ctx["progs"]:
                 ctx["errors"][label] = f"class rules do not ground together: {str(e).strip().splitlines()[0]}"
+                ctx["error_codes"][label] = ERROR_NO_GROUNDING
             ctx["progs"] = {}
 
     def accept(self, source, label, ctx) -> tuple[bool, str]:
@@ -363,17 +408,23 @@ recursion predicates, which the ILP system cannot express on its own.
             return False, ctx["errors"][label]
         prog = ctx["progs"][label]
         if not ctx["val_ids"]:
+            ctx["error_codes"][label] = ERROR_NO_VALIDATION_MOLECULES
             return False, "no validation molecules"
         by_mol = ctx["extensions"].get(prog.name, {})
         n = len(ctx["val_ids"])
         frac = len(by_mol) / n
         if frac == 0.0:
+            ctx["error_codes"][label] = ERROR_DEGENERATE
             return False, f"degenerate: fires on 0% of {n} train molecules"
         # A molecule-level flag true of every molecule carries no information. An atom- or
         # pair-level predicate that fires everywhere still says WHICH atoms, so it is kept.
         if frac >= 0.95 and _is_molecule_level(by_mol):
+            ctx["error_codes"][label] = ERROR_DEGENERATE
             return False, f"degenerate: molecule-level flag on {frac:.0%} of {n} train molecules"
         return True, f"fires on {frac:.0%}"
+
+    def rejection_code(self, label, ctx) -> str | None:
+        return ctx.get("error_codes", {}).get(label)
 
     def add_to_library(self, source, chebi_id):
         return add_rule_to_library(source, library_dir=self.library_dir, chebi_id=chebi_id)
