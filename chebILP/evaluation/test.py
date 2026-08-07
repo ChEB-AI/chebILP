@@ -23,120 +23,81 @@ def _silent_clingo_logger(code, message):
 _WORKER_STATE: dict = {}
 
 
-def _qualify_aux_predicates(programs, aux_library_dir):
-    """Namespace auxiliary-predicate references per class so they cannot collide.
+def _aux_predicate_specs(programs, aux_library_dir):
+    """Which auxiliary predicates (llm_generated_fgs) the learned programs reference.
 
-    Auxiliary predicate names (e.g. ``aux_long_aliphatic_chain``) are NOT unique
-    across classes: many classes independently define a predicate with the same
-    sanitized name but *different* logic. When every class's program is grounded
-    against one shared background knowledge, those names would collide and a single
-    (arbitrary) implementation would be used for all of them — silently producing the
-    wrong labels. To keep the shared-BK optimization sound, rewrite each program's aux
-    references to a class-qualified name (``<name>_<class_id>``, the class id being
-    unique) and emit that class's own extension under the same name.
+    An ``aux_`` name identifies one implementation library-wide: ``add_program_to_library``
+    disambiguates a name that would back different code with the class id, so a shared
+    background knowledge can hold every class's predicates side by side under their own
+    names. Only the ones some program actually mentions are worth computing.
 
-    Returns ``(rewritten_programs, aux_specs)`` where ``rewritten_programs`` maps
-    class_id -> program text with qualified aux names, and ``aux_specs`` is a list of
-    ``(qualified_name, source_file)`` telling a worker which predicates to (re)load.
+    Returns a list of ``(name, source_file)`` telling a worker which predicates to load.
     """
     import re
     from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates
 
-    rewritten: dict = {}
-    specs: dict[str, str] = {}  # qualified_name -> source_file
+    specs: dict[str, str] = {}
     for cls_id, prog in programs.items():
         used = set(re.findall(r"\baux_\w+", prog))
         if not used:
-            rewritten[cls_id] = prog
             continue
-        # Map this class's own sanitized aux names to their source files.
-        name_to_source = {
-            p.name: p.source_file
-            for p in load_auxiliary_predicates(cls_id, library_dir=aux_library_dir)
-        }
-        rename: dict[str, str] = {}
-        for name in used:
-            source_file = name_to_source.get(name)
-            if source_file is None:
-                continue  # program references an aux this class does not define
-            qname = f"{name}_{cls_id}"
-            rename[name] = qname
-            specs.setdefault(qname, source_file)
-        rewritten[cls_id] = re.sub(
-            r"\baux_\w+", lambda m: rename.get(m.group(0), m.group(0)), prog
-        )
-    return rewritten, list(specs.items())
+        for p in load_auxiliary_predicates(cls_id, library_dir=aux_library_dir):
+            if p.name in used:
+                specs.setdefault(p.name, p.source_file)
+    return list(specs.items())
 
 
-def _qualify_aux_rules(programs, rule_library_dir):
-    """Namespace auxiliary-RULE references per class (llm_generated_rules).
+def _collect_rule_programs(programs, rule_library_dir):
+    """Rule programs (llm_generated_rules) needed to evaluate the learned programs.
 
-    Like :func:`_qualify_aux_predicates`, but for ASP rule programs: the same sanitized
-    ``aux_`` name can back different rules in different classes, and every class's program
-    is grounded against one shared background knowledge. Rewrite each program's aux
-    references to a class-qualified name (``<name>_<class_id>``) and return the matching
-    qualified :class:`RuleProgram` objects so the background emits each class's own
-    extension under that name.
+    Returns ``(rule_programs, dependency_programs)``: the programs the classes chose, and
+    the library programs those build on. ``class_map.json`` records only the former, so
+    without the latter every layered rule grounds against an empty body and derives nothing.
+    Kept apart because only the chosen programs' extensions belong in the background —
+    the dependencies exist to make them derivable, exactly as in ``ILPProblemBuilder.build_bk``.
 
-    Returns ``(rewritten_programs, qualified_rule_programs)``. Rule programs carry only
-    strings, so (unlike Python aux predicates) they are picklable and shipped to workers
-    directly rather than reloaded from disk.
+    Names are library-wide unique (``add_rule_to_library`` disambiguates colliding content
+    with the class id), so the programs go into the shared background as they are. Rule
+    programs carry only strings, so (unlike Python aux predicates) they are picklable and
+    shipped to workers directly rather than reloaded from disk.
 
-    EVERY aux name a class's programs mention is renamed, not just the heads the learned
-    program uses, and the class's whole rule set is returned rather than the subset it uses.
-    Both are required because the programs are grounded together: a head the learned program
-    never mentions may still be the helper another head depends on, and an unqualified helper
-    would otherwise merge with a same-named helper from a different class.
+    A class's *whole* rule set is loaded, not just the heads its learned program uses: a head
+    the program never mentions may still be the helper another head depends on.
     """
     import re
-    from chebILP.predicate_generation.auxiliary_rules import RuleProgram, load_class_rules
+    from chebILP.predicate_generation.auxiliary_rules import load_class_rules, resolve_rule_dependencies
 
-    rewritten: dict = {}
-    qualified: dict[str, RuleProgram] = {}
+    chosen = {}
     for cls_id, prog in programs.items():
         if not re.search(r"\baux_\w+", prog):
-            rewritten[cls_id] = prog
             continue
-        rps = load_class_rules(cls_id, library_dir=rule_library_dir)
-        rename = {
-            name: f"{name}_{cls_id}"
-            for rp in rps
-            for name in re.findall(r"\baux_\w+", rp.source)
-        }
-        substitute = lambda text: re.sub(r"\baux_\w+", lambda m: rename.get(m.group(0), m.group(0)), text)
-        for rp in rps:
-            qname = rename[rp.name]
-            if qname not in qualified:
-                qualified[qname] = RuleProgram(
-                    name=qname,
-                    description=rp.description,
-                    source=substitute(rp.source),
-                    source_file=rp.source_file,
-                )
-        rewritten[cls_id] = substitute(prog)
-    return rewritten, list(qualified.values())
+        for rp in load_class_rules(cls_id, library_dir=rule_library_dir):
+            chosen.setdefault(rp.name, rp)
+
+    rule_programs = list(chosen.values())
+    dependencies = [
+        dep for dep in resolve_rule_dependencies(rule_programs, rule_library_dir)
+        if dep.name not in chosen
+    ]
+    return rule_programs, dependencies
 
 
-def _load_qualified_aux(specs):
-    """Reload auxiliary predicates for a worker under their class-qualified names.
+def _load_aux_predicates(specs):
+    """Reload auxiliary predicates for a worker from ``(name, source_file)`` specs.
 
-    ``specs`` is a list of ``(qualified_name, source_file)`` produced by
-    ``_qualify_aux_predicates``. The predicates' ``extension`` functions are
-    ``exec``-compiled and therefore not picklable, so each worker rebuilds them from
-    disk rather than receiving them; the qualified name namespaces each class's
-    version so identically-named predicates from different classes cannot collide.
+    The predicates' ``extension`` functions are ``exec``-compiled and therefore not
+    picklable, so each worker rebuilds them from disk rather than receiving them.
     """
     from chebILP.predicate_generation.auxiliary_predicates import load_program_source
 
     preds = []
-    for qname, source_file in specs:
+    for _, source_file in specs:
         try:
             with open(source_file, "r", encoding="utf-8") as f:
                 pred = load_program_source(f.read(), source_file=source_file)
         except OSError:
             pred = None
         if pred is not None:
-            pred.name = qname
             preds.append(pred)
     return preds
 
@@ -159,16 +120,15 @@ def _quiet_aux_logging():
 def _worker_init(state, aux_load_args):
     """Pool initializer: stash the shared config and (re)load auxiliary predicates.
 
-    ``aux_load_args`` is the ``aux_specs`` list from ``_qualify_aux_predicates``
-    (``(qualified_name, source_file)`` pairs) or ``None``. The predicates'
-    ``extension`` functions are ``exec``-compiled and therefore not picklable, so each
-    worker reloads them from disk rather than receiving them.
+    ``aux_load_args`` is the spec list from ``_aux_predicate_specs`` (``(name, source_file)``
+    pairs) or ``None``. The predicates' ``extension`` functions are ``exec``-compiled and
+    therefore not picklable, so each worker reloads them from disk rather than receiving them.
     """
     global _WORKER_STATE
     _quiet_aux_logging()
     _WORKER_STATE = dict(state)
     _WORKER_STATE["aux_predicates"] = (
-        _load_qualified_aux(aux_load_args) if aux_load_args is not None else None
+        _load_aux_predicates(aux_load_args) if aux_load_args is not None else None
     )
 
 
@@ -197,7 +157,8 @@ def _evaluate_molecule(payload):
             row_df, predicate_set=st["predicate_set"],
             aux_predicates=st["aux_predicates"], aux_timeout=st["aux_timeout"],
             aux_failures=aux_failures, fowl_smarts=st.get("fowl_smarts"),
-            rule_programs=st.get("rule_programs"), computed_facts=st.get("computed_facts", False),
+            rule_programs=st.get("rule_programs"), rule_dependencies=st.get("rule_dependencies"),
+            computed_facts=st.get("computed_facts", False),
         )
     except Exception as e:  # noqa: BLE001
         return mol_id, [], f"error: {e}", aux_failures
@@ -309,26 +270,24 @@ def build_ilp_preds_tensor(
         except RuntimeError as e:
             print(f"  Skipping ChEBI:{cls_id} — failed to parse program: {e}")
 
-    # Auxiliary predicates (llm_generated_fgs) are class-specific: the same sanitized name
-    # can mean different things in different classes. Qualify each program's aux references
-    # (and the extensions we emit for them) per class so they cannot collide in the single
-    # shared background knowledge. The predicates are then (re)loaded once per worker (their
+    # Auxiliary predicates (llm_generated_fgs) are gathered across all classes and computed
+    # into the single shared background knowledge. They are (re)loaded once per worker (their
     # exec-compiled extension functions are not picklable); ``aux_load_args`` is the spec
     # list a worker needs to reload them.
     aux_load_args = None
     if predicate_set == "llm_generated_fgs":
-        valid_programs, aux_specs = _qualify_aux_predicates(valid_programs, aux_library_dir)
-        aux_load_args = aux_specs
-        print(f"{len(aux_specs)} distinct auxiliary predicate implementation(s) referenced "
+        aux_load_args = _aux_predicate_specs(valid_programs, aux_library_dir)
+        print(f"{len(aux_load_args)} distinct auxiliary predicate implementation(s) referenced "
               f"by programs")
 
-    # llm_generated_rules: qualify aux rule references per class and recompute their
-    # extensions in the background. RuleProgram objects are picklable, so they ride in
-    # worker_state directly (no per-worker reload like the Python predicates need).
-    rule_programs = None
+    # llm_generated_rules: gather the classes' rule programs (plus the library programs they
+    # build on) and recompute their extensions in the background. RuleProgram objects are
+    # picklable, so they ride in worker_state directly.
+    rule_programs = rule_dependencies = None
     if predicate_set == "llm_generated_rules":
-        valid_programs, rule_programs = _qualify_aux_rules(valid_programs, aux_library_dir)
-        print(f"{len(rule_programs)} distinct auxiliary rule(s) referenced by programs")
+        rule_programs, rule_dependencies = _collect_rule_programs(valid_programs, aux_library_dir)
+        print(f"{len(rule_programs)} distinct auxiliary rule(s) referenced by programs"
+              + (f" (+{len(rule_dependencies)} dependencies)" if rule_dependencies else ""))
 
     # fowl predicates are class-specific (fowl_<cls_id>) and derived from a shared
     # SMARTS table. Gather the patterns for the classes being predicted so the same
@@ -347,7 +306,8 @@ def build_ilp_preds_tensor(
     worker_state = dict(
         programs_str=programs_str, col_of=col_of, predicate_set=predicate_set,
         aux_timeout=aux_timeout, label_timeout=label_timeout, fowl_smarts=fowl_smarts,
-        rule_programs=rule_programs, computed_facts=computed_facts,
+        rule_programs=rule_programs, rule_dependencies=rule_dependencies,
+        computed_facts=computed_facts,
     )
 
     # Ship mols as RDKit binary with all properties so nothing (stereo/CIP perception,
@@ -494,16 +454,15 @@ def predict_smiles(
                     seen.setdefault(pred.name, pred)
         aux_predicates = list(seen.values())
 
-    # llm_generated_rules: qualify the aux rule references in the rule set per class and
-    # gather the matching rule programs so the background recomputes their extensions.
-    rule_programs = None
+    # llm_generated_rules: gather the rule programs the target classes use (and the library
+    # programs they build on) so the background recomputes their extensions.
+    rule_programs = rule_dependencies = None
     if predicate_set == "llm_generated_rules":
         programs_by_class = {
             t[len("chebi_"):]: "\n".join(r for r in rules if f"chebi_{t[len('chebi_'):]}" in r)
             for t in target_predicates if t.startswith("chebi_")
         }
-        rules_qualified, rule_programs = _qualify_aux_rules(programs_by_class, aux_library_dir)
-        rules = "\n".join(rules_qualified.values()).split("\n")
+        rule_programs, rule_dependencies = _collect_rule_programs(programs_by_class, aux_library_dir)
 
     # fowl predicates are class-specific: gather the SMARTS patterns for the target
     # classes so the background emits the fowl_<cls_id> facts the rules reference.
@@ -527,7 +486,8 @@ def predict_smiles(
         background_facts = build_full_background(
             mol_df, predicate_set=predicate_set,
             aux_predicates=aux_predicates, aux_timeout=aux_timeout,
-            fowl_smarts=fowl_smarts, rule_programs=rule_programs, computed_facts=computed_facts,
+            fowl_smarts=fowl_smarts, rule_programs=rule_programs,
+            rule_dependencies=rule_dependencies, computed_facts=computed_facts,
         )
         print(f"Evaluating {smiles!r} against {len(rules)} rules and {len(background_facts)} background facts...")
         print(f"  Target predicates: {', '.join(target_predicates)}")

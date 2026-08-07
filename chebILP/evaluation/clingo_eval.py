@@ -123,6 +123,9 @@ _UNDEFINED_ATOM_RE = re.compile(
     r"atom does not occur in any rule head:\s*([a-z_][A-Za-z0-9_]*)\s*(\(([^)]*)\))?", re.IGNORECASE
 )
 
+# "<block>:5093:17-18: info: <what>" — clingo's severity, as it spells it in the message.
+_INFO_MESSAGE_RE = re.compile(r":\s*info:", re.IGNORECASE)
+
 
 def _summarize_clingo_messages(per_group: list[list[str]]) -> None:
     """Print one line for what clingo said, however many groundings it said it in.
@@ -131,9 +134,20 @@ def _summarize_clingo_messages(per_group: list[list[str]]) -> None:
     times the batch count. Undefined predicates are the signal worth keeping — a rule
     referencing something nothing defines has an empty body — but "undefined" is reported
     *per grounding*, and a batch whose molecules happen to contain no sulfur reports ``s/1``
-    exactly like a genuine typo. Only a predicate missing from **every** batch is really
-    undefined; the rest is molecule-to-molecule variation and is dropped. Other messages are
-    printed once, deduplicated.
+    exactly like a genuine typo. For an atom-level predicate only absence from **every** batch
+    means anything, and with a single batch (one molecule, as when building a prediction
+    tensor) not even that — so those are reported only when there are batches to compare.
+    An undefined ``aux_`` name is never molecule variation: nothing but a rule program can
+    define one, so a missing library dependency is reported however few batches there were.
+    Warnings and errors are printed once, deduplicated.
+
+    Clingo's other ``info:`` messages are dropped. They describe the *program* — a global
+    variable used as an aggregate tuple, an empty interval — so they are identical for every
+    molecule and every batch, and the ``<block>:LINE`` they point at is an offset into a
+    concatenation that differs from call to call. One such clause therefore prints once per
+    molecule while naming a line nobody can look up. Program defects belong to the static
+    checks in ``predicate_generation.auxiliary_rules``, which report them once per class
+    against the real source file.
     """
     seen_in: dict[str, set[int]] = {}
     other: set[str] = set()
@@ -141,12 +155,16 @@ def _summarize_clingo_messages(per_group: list[list[str]]) -> None:
         for message in messages:
             m = _UNDEFINED_ATOM_RE.search(message)
             if m is None:
-                other.add(message.strip())
+                if not _INFO_MESSAGE_RE.search(message):
+                    other.add(message.strip())
                 continue
             arity = len(m.group(3).split(",")) if m.group(3) and m.group(3).strip() else 0
             seen_in.setdefault(f"{m.group(1)}/{arity}", set()).add(index)
 
-    undefined = sorted(name for name, groups in seen_in.items() if len(groups) == len(per_group))
+    undefined = sorted(
+        name for name, groups in seen_in.items()
+        if len(groups) == len(per_group) and (name.startswith("aux_") or len(per_group) > 1)
+    )
     if undefined:
         print(f"  clingo: {len(undefined)} predicate(s) referenced but never defined "
               f"(their rule bodies are empty): {', '.join(undefined)}")

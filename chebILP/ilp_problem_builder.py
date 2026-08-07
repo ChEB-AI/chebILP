@@ -421,6 +421,7 @@ def build_full_background(
     aux_failures=None,
     fowl_smarts=None,
     rule_programs=None,
+    rule_dependencies=None,
     computed_facts: bool = True,
     aux_library_dir: str | None = None,
 ) -> list[str]:
@@ -436,6 +437,11 @@ def build_full_background(
     Clingo grounding memory). ``aux_predicates`` (for ``llm_generated_fgs``) are the
     name-deduplicated predicates gathered across all classes; their extensions are
     evaluated on ``rows`` here.
+
+    ``rule_dependencies`` (``llm_generated_rules``) are the library programs ``rule_programs``
+    build on. They are ground alongside but emit no facts of their own. Pass them when the
+    caller has already resolved them — resolving here instead costs a full parse of the
+    library per call, and needs ``aux_library_dir`` to point at the right one.
     """
     prolog_lines, _ = build_background_chemlog(
         rows, aux_predicates=aux_predicates, aux_timeout=aux_timeout, aux_failures=aux_failures,
@@ -463,10 +469,11 @@ def build_full_background(
         if computed_facts:
             eval_facts += build_computed_facts(rows)
         mol_ids = [str(i) for i in rows.index]
+        if rule_dependencies is None:
+            rule_dependencies = resolve_rule_dependencies(rule_programs, aux_library_dir)
         try:
             extensions = derive_rule_extensions(
-                rule_programs + resolve_rule_dependencies(rule_programs, aux_library_dir),
-                eval_facts, mol_ids,
+                rule_programs + rule_dependencies, eval_facts, mol_ids,
             )
         except (RuntimeError, MemoryError) as e:
             print(f"Grounding failed ({e}); returning background knowledge without aux_* facts.")

@@ -14,9 +14,10 @@ molecule's atoms — see :func:`derive_rule_extensions`, which is how both the g
 validate-and-reject step and ``build_bk`` attribute an extension to molecules.
 
 A class's programs are grounded TOGETHER, so one program may use a predicate another defines
-and helpers are shared. The flip side is that names are shared too: two programs of the same
-class defining one name differently merge into a single extension. Programs of *different*
-classes must therefore be name-qualified before they meet in one grounding.
+and helpers are shared. Names are shared too, but that is safe across classes: a name in the
+library backs exactly one program (:func:`add_rule_to_library` disambiguates content that
+would collide with the class id), so programs of different classes can meet in one grounding
+as they are.
 
 Storage reuses the shared-library layout of the Python pipeline, but with ``.pl`` files and a
 separate default directory so the two libraries never mix::
@@ -451,8 +452,9 @@ def derive_rule_extensions(progs, facts: list[str], mol_ids, timeout: float | No
 
     All programs go into a single clingo instance, so one may build on predicates another
     defines. Names are consequently shared across ``progs``: two programs that define the same
-    predicate differently contribute to a single extension. Within one class that is the
-    intent; across classes the names must be qualified first (see ``test._qualify_aux_rules``).
+    predicate differently would contribute to a single extension. The library rules that out
+    by construction — one name, one program — so programs from several classes may be passed
+    together.
 
     A head may have any arity: a molecule predicate ``aux_x(M)``, an atom one ``aux_x(A)``, a
     pair ``aux_x(A1,A2)``, or any mix. A derived atom belongs to a molecule when one of its
