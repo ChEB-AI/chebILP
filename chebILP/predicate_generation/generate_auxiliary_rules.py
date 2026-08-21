@@ -361,7 +361,15 @@ recursion predicates, which the ILP system cannot express on its own.
                 continue
             ctx["progs"][label] = prog
 
-        context = [p for p in (_load_library_rule(s, self.library_dir) for s in ctx["reused_stems"]) if p]
+        # Keyed by stem so accept_reused can find each reuse's own extension afterwards.
+        reused_progs = {}
+        for stem in ctx["reused_stems"]:
+            prog = _load_library_rule(stem, self.library_dir)
+            if prog is not None:
+                reused_progs[stem] = prog
+        ctx["reused_progs"] = reused_progs
+        ctx["extensions_valid"] = False
+        context = list(reused_progs.values())
 
         # Static gates that must run before clingo sees the programs, because grounding either
         # cannot survive the failure (non-terminating recursion runs the machine out of memory)
@@ -394,6 +402,7 @@ recursion predicates, which the ILP system cannot express on its own.
             ctx["extensions"] = derive_rule_extensions(
                 together, ctx["val_facts"], ctx["val_ids"], timeout=_VALIDATION_GROUNDING_TIMEOUT
             )
+            ctx["extensions_valid"] = True
         except Exception as e:
             # The set as a whole will not ground (unstratified negation across programs, say).
             # Nothing can be attributed, so every program is rejected with the shared cause.
@@ -403,25 +412,37 @@ recursion predicates, which the ILP system cannot express on its own.
                 ctx["error_codes"][label] = ERROR_NO_GROUNDING
             ctx["progs"] = {}
 
-    def accept(self, source, label, ctx) -> tuple[bool, str]:
-        if label in ctx["errors"]:
-            return False, ctx["errors"][label]
-        prog = ctx["progs"][label]
+    def _extension_gate(self, prog, key, ctx) -> tuple[bool, str]:
+        """Judge one program by the extension it derived over the class's train molecules."""
         if not ctx["val_ids"]:
-            ctx["error_codes"][label] = ERROR_NO_VALIDATION_MOLECULES
+            ctx["error_codes"][key] = ERROR_NO_VALIDATION_MOLECULES
             return False, "no validation molecules"
         by_mol = ctx["extensions"].get(prog.name, {})
         n = len(ctx["val_ids"])
         frac = len(by_mol) / n
         if frac == 0.0:
-            ctx["error_codes"][label] = ERROR_DEGENERATE
+            ctx["error_codes"][key] = ERROR_DEGENERATE
             return False, f"degenerate: fires on 0% of {n} train molecules"
         # A molecule-level flag true of every molecule carries no information. An atom- or
         # pair-level predicate that fires everywhere still says WHICH atoms, so it is kept.
         if frac >= 0.95 and _is_molecule_level(by_mol):
-            ctx["error_codes"][label] = ERROR_DEGENERATE
+            ctx["error_codes"][key] = ERROR_DEGENERATE
             return False, f"degenerate: molecule-level flag on {frac:.0%} of {n} train molecules"
         return True, f"fires on {frac:.0%}"
+
+    def accept(self, source, label, ctx) -> tuple[bool, str]:
+        if label in ctx["errors"]:
+            return False, ctx["errors"][label]
+        return self._extension_gate(ctx["progs"][label], label, ctx)
+
+    def accept_reused(self, stem, ctx) -> tuple[bool, str]:
+        prog = ctx.get("reused_progs", {}).get(stem)
+        # No grounding means no evidence about the reuse — the new programs already carry the
+        # shared failure, and dropping the reuses on top of it would report a cause that was
+        # never measured.
+        if prog is None or not ctx.get("extensions_valid"):
+            return True, ""
+        return self._extension_gate(prog, stem, ctx)
 
     def rejection_code(self, label, ctx) -> str | None:
         return ctx.get("error_codes", {}).get(label)

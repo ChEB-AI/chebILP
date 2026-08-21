@@ -20,16 +20,22 @@ from pydantic import BaseModel, ValidationError
 litellm.enable_json_schema_validation = True
 
 
+# Anthropic models LiteLLM's own allowlist misses. Substrings are version-specific
+# ("opus-5" does not match "opus-4-5"), so an older model never lands here by accident.
+_NATIVE_STRUCTURED_OUTPUT_FAMILIES = ("fable", "mythos", "haiku", "opus-5", "sonnet-5")
+
+
 def _patch_litellm_native_structured_output() -> None:
     """Route always-on-thinking Anthropic models through native structured output.
 
     LiteLLM chooses the Anthropic structured-output path from a hardcoded model
-    allowlist that predates Fable 5 / Mythos 5, so those fall back to tool-based
-    JSON coercion with a forced ``tool_choice``. That is incompatible with their
-    always-on thinking (the API can't force a tool while thinking is active), so
-    the model returns no tool call and the response parses to an empty ``{}``.
-    Reroute them to the native ``output_config.format`` path LiteLLM already uses
-    for 4.6/4.7, which is thinking-compatible.
+    allowlist that stops at Opus 4.7, so anything newer falls back to tool-based
+    JSON coercion with a forced ``tool_choice``. That is incompatible with always-on
+    thinking (the API can't force a tool while thinking is active), and the reply
+    comes back malformed: an empty ``{}`` on Fable/Mythos, or the whole answer
+    stuffed as a string under the literal placeholder key ``$PARAMETER_NAME`` on
+    Opus 5. Reroute them to the native ``output_config.format`` path LiteLLM already
+    uses for 4.6/4.7, which is thinking-compatible.
     """
     from litellm.constants import RESPONSE_FORMAT_TOOL_NAME
     from litellm.llms.anthropic.chat.transformation import AnthropicConfig
@@ -44,7 +50,7 @@ def _patch_litellm_native_structured_output() -> None:
         if (
             isinstance(response_format, dict)
             and "output_format" not in params
-            and any(family in model for family in ("fable", "mythos", "haiku"))
+            and any(family in model for family in _NATIVE_STRUCTURED_OUTPUT_FAMILIES)
         ):
             output_format = self.map_response_format_to_anthropic_output_format(response_format)
             if output_format is not None:

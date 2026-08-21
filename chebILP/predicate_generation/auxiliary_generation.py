@@ -149,6 +149,16 @@ class AuxiliaryGenerator(ABC):
     def accept(self, source, label, ctx) -> tuple[bool, str]:
         """Validate a program. Returns ``(accepted, reason)``; reason is shown when rejected."""
 
+    def accept_reused(self, stem, ctx) -> tuple[bool, str]:
+        """Validate a library program the model chose to reuse, same contract as :meth:`accept`.
+
+        Retrieval matches a candidate on its name and description, which says nothing about how
+        it behaves on *this* class's molecules, so a reuse is worth the same check a new program
+        gets. Pipelines whose validation needs the class's molecules override this; the default
+        keeps every reuse, which is the behaviour of a pipeline that cannot tell.
+        """
+        return True, ""
+
     @abstractmethod
     def add_to_library(self, source, chebi_id):
         """Store the program. Returns ``(stem, saved)`` or ``None``."""
@@ -218,9 +228,26 @@ class AuxiliaryGenerator(ABC):
         blocks = [(f"chebi_{chebi_id}_block_{i}", self.to_source(item)) for i, item in enumerate(parsed.new)]
         self.prepare(blocks, ctx)
 
+        rejected: list[dict] = []
+
+        # Reuses face the same gate as new programs. A reuse a new program builds on is still
+        # pulled back in by ``resolve_rule_dependencies`` at build_bk time, so dropping one here
+        # only keeps it out of the ILP's feature set — it never breaks a body that needs it.
+        kept_reused: list[dict] = []
+        for stem in reused_stems:
+            ok, reason = self.accept_reused(stem, ctx)
+            if not ok:
+                code = self.rejection_code(stem, ctx)
+                print(f"    rejected reused {stem}" + (f" [{code}]" if code else "") + f": {reason}")
+                record = {"name": stem, "reason": reason, "reused": True}
+                if code is not None:
+                    record["code"] = code
+                rejected.append(record)
+                continue
+            kept_reused.append({"name": stem, "reason": reason})
+
         new_stems: list[str] = []
         new_records: list[dict] = []
-        rejected: list[dict] = []
         seen: set[str] = set()
         for item, (label, source) in zip(parsed.new, blocks):
             ok, reason = self.accept(source, label, ctx)
@@ -245,10 +272,10 @@ class AuxiliaryGenerator(ABC):
             self.retriever.add_entry(self.retriever_entry(stem, saved))
             print(f"    new {self.describe(saved, stem, reason)}")
 
-        stems = reused_stems + new_stems
+        stems = [r["name"] for r in kept_reused] + new_stems
         set_class_predicates(chebi_id, stems, problem_dir=self.library_dir)
 
-        selection = {"reused": reused_stems, "new": new_records, "rejected": rejected}
+        selection = {"reused": kept_reused, "new": new_records, "rejected": rejected}
         self._write_log(chebi_id, info, prompt, parsed, raw, selection, attempts)
         return len(stems)
 
@@ -312,7 +339,12 @@ class AuxiliaryGenerator(ABC):
     def _format_selection(self, selection) -> str:
         """Render the resolved selection: reused, accepted (with fire fraction), rejected."""
         parts = ["## Resolved selection\n\n"]
-        parts.append(f"- Reused from library: {', '.join(selection['reused']) or '(none)'}\n")
+        if selection["reused"]:
+            parts.append("- Reused from library:\n")
+            for r in selection["reused"]:
+                parts.append(f"    - `{r['name']}`" + (f" — {r['reason']}\n" if r.get("reason") else "\n"))
+        else:
+            parts.append("- Reused from library: (none)\n")
         if selection["new"]:
             parts.append(f"- New {self.noun}s added:\n")
             for r in selection["new"]:
@@ -323,7 +355,8 @@ class AuxiliaryGenerator(ABC):
             parts.append("- Rejected:\n")
             for r in selection["rejected"]:
                 code = f"**[{r['code']}]** " if r.get("code") else ""
-                parts.append(f"    - `{r['name']}` — {code}{r['reason']}\n")
+                origin = " (reused)" if r.get("reused") else ""
+                parts.append(f"    - `{r['name']}`{origin} — {code}{r['reason']}\n")
         else:
             parts.append("- Rejected: (none)\n")
         parts.append("\n")
