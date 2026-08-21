@@ -1,6 +1,8 @@
 import os
 import re
 
+from tqdm import tqdm
+
 from chebILP.utils import split_prolog_literals
 
 
@@ -165,11 +167,13 @@ def _summarize_clingo_messages(per_group: list[list[str]]) -> None:
         name for name, groups in seen_in.items()
         if len(groups) == len(per_group) and (name.startswith("aux_") or len(per_group) > 1)
     )
+    # tqdm.write instead of print: callers run this inside a progress bar, and a plain
+    # print leaves the bar's line behind. Without a bar it behaves like print.
     if undefined:
-        print(f"  clingo: {len(undefined)} predicate(s) referenced but never defined "
-              f"(their rule bodies are empty): {', '.join(undefined)}")
+        tqdm.write(f"  clingo: {len(undefined)} predicate(s) referenced but never defined "
+                   f"(their rule bodies are empty): {', '.join(undefined)}")
     for message in sorted(other):
-        print(f"  clingo: {message}")
+        tqdm.write(f"  clingo: {message}")
 
 
 def _ground_groups(rules, fact_groups, target_labels, timeout):

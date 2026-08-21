@@ -14,7 +14,6 @@ import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
-from chebi_utils.sample_filters import get_direct_neighbors
 
 
 CHEBI_FG_RULES_PATH = os.path.join("data", "chebi_fg_rules_from_smiles.pl")
@@ -62,23 +61,29 @@ class ILPProblemBuilder:
         self.dataset = ChEBIDataset(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
         self.hierarchy_graph = nx.transitive_closure_dag(self.dataset.chebi_graph)
         self.splits = self.dataset.load_splits_from_csv()
+
+        # Invariant across target classes, so built once rather than per class.
+        self._mol_index = set(self.dataset.molecules.index)
+        self._split_ids = {split: set(self.splits[self.splits["split"] == split]["id"].astype(str))
+                           for split in ["train", "validation", "test"]}
+        # Size of the molecule graph, used to prefer small molecules when a split is
+        # capped. This is the same count that drives the has_atom facts in bk.pl, so it
+        # includes explicit hydrogens where a molecule carries them.
+        self._atom_counts = self.dataset.molecules["mol"].map(lambda m: m.GetNumAtoms())
             
             
     def build_examples(self, target_ids: list[str], min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
-        min_n_pos = max_pos_samples + 1
-        min_n_pos_id = None
-        min_n_neg = max_neg_samples + 1
-        min_n_neg_id = None
+        # Counts are summed over the three splits, so they are not comparable against the
+        # per-split max_*_samples caps; take the minimum over what was actually written.
+        counts = {}
         for target_id in tqdm.tqdm(target_ids, desc="Building examples for ChEBI classes"):
-            n_pos, n_neg = self.gather_samples_for_chebi_cls(target_id, min_pos_samples, max_pos_samples, min_neg_samples, max_neg_samples)
-            if n_pos < min_n_pos:
-                min_n_pos = n_pos
-                min_n_pos_id = target_id
-            if n_neg < min_n_neg:
-                min_n_neg = n_neg
-                min_n_neg_id = target_id
-        print(f"Label with least positive samples: ChEBI:{min_n_pos_id} with {min_n_pos} samples")
-        print(f"Label with least negative samples: ChEBI:{min_n_neg_id} with {min_n_neg} samples")
+            counts[target_id] = self.gather_samples_for_chebi_cls(target_id, min_pos_samples, max_pos_samples, min_neg_samples, max_neg_samples)
+        if not counts:
+            return
+        min_n_pos_id = min(counts, key=lambda c: counts[c][0])
+        min_n_neg_id = min(counts, key=lambda c: counts[c][1])
+        print(f"Label with least positive samples: ChEBI:{min_n_pos_id} with {counts[min_n_pos_id][0]} samples across all splits")
+        print(f"Label with least negative samples: ChEBI:{min_n_neg_id} with {counts[min_n_neg_id][1]} samples across all splits")
 
 
     def build_bk(self, target_ids):
@@ -252,29 +257,60 @@ class ILPProblemBuilder:
                   f"extensions because grounding failed: {', '.join(failed_rule_classes)}")
 
 
-    def build_negative_mix(self, neg_pool: pd.DataFrame, sibling_ids: set, max_samples: int, random_state: int = 42) -> pd.DataFrame:
+    def _take_smallest(self, df: pd.DataFrame, max_samples: int) -> pd.DataFrame:
+        """The ``max_samples`` smallest molecules of ``df``, by atom count.
+
+        Ties resolve by the frame's own order, so the pick is deterministic without a seed.
+        """
+        if len(df) <= max_samples:
+            return df
+        return df.loc[self._atom_counts[df.index].nsmallest(max_samples, keep="first").index]
+
+    def _direct_neighbors(self, target_id: str) -> tuple[set[str], set[str]]:
+        """Molecule ids below ``target_id``, and those shared by all its direct parents.
+
+        The second set is the near-miss pool: descendants of every parent that are not
+        descendants of the target itself. Equivalent to
+        ``chebi_utils.sample_filters.get_direct_neighbors``, but reuses ``hierarchy_graph``
+        instead of rebuilding the transitive closure once per class.
+        """
+        pos_ids = {str(d) for d in self.hierarchy_graph.predecessors(target_id)} & self._mol_index
+        parent_spaces = [
+            {str(d) for d in self.hierarchy_graph.predecessors(parent)} & self._mol_index
+            for parent in self.dataset.chebi_graph.successors(target_id)
+        ]
+        if not parent_spaces:
+            return pos_ids, set()
+        return pos_ids, set.intersection(*parent_spaces) - pos_ids
+
+    def build_negative_mix(self, neg_pool: pd.DataFrame, sibling_ids: set, max_samples: int, random_state: int = 42, prefer_smallest: bool = False) -> pd.DataFrame:
         """50:50 mix of direct-sibling negatives and random negatives from ``neg_pool``.
 
         Up to half of ``max_samples`` are the target's direct siblings (near-misses); the rest
         are drawn uniformly at random from the non-sibling remainder. When a class has fewer
         siblings than half, the random draw takes up the slack rather than the set shrinking, so
         the objective is global classification instead of separation from the superclass alone.
+
+        With ``prefer_smallest``, an over-full sibling half keeps the smallest molecules rather
+        than a random draw, which shrinks the derived bk.pl. Only the training split sets it;
+        validation and test stay random so their scores remain size-unbiased.
         """
         half = max_samples // 2
         sibling_negs = neg_pool[neg_pool.index.astype(str).isin(sibling_ids)]
         if len(sibling_negs) > half:
-            sibling_negs = sibling_negs.sample(half, random_state=random_state)
+            sibling_negs = self._take_smallest(sibling_negs, half) if prefer_smallest else sibling_negs.sample(half, random_state=random_state)
         random_pool = neg_pool[~neg_pool.index.astype(str).isin(sibling_ids)]
         n_random = min(max_samples - len(sibling_negs), len(random_pool))
         random_negs = random_pool.sample(n_random, random_state=random_state) if n_random > 0 else random_pool.iloc[:0]
         return pd.concat([sibling_negs, random_negs])
 
     def gather_samples_for_chebi_cls(self, target_id: str, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
-        descendants = list(self.hierarchy_graph.predecessors(target_id)) + [target_id]
+        descendants = set(self.hierarchy_graph.predecessors(target_id)) | {target_id}
         # not all descendants are molecules (i.e., have a SMILES annotation) -> only take the ones that are in the samples_df (i.e. have a SMILES annotation and are in the 3_STAR subset)
 
-        df_pos = self.dataset.molecules[[id in descendants for id in self.dataset.molecules.index]]
-        df_neg = self.dataset.molecules[[id not in df_pos.index for id in self.dataset.molecules.index]]
+        is_pos = self.dataset.molecules.index.isin(descendants)
+        df_pos = self.dataset.molecules[is_pos]
+        df_neg = self.dataset.molecules[~is_pos]
         if len(df_pos) < min_pos_samples:
             print(f"ChEBI class {target_id} does not have enough positive samples (found {len(df_pos)}, required are at least {min_pos_samples}). Got samples {df_pos.index.tolist()}")
         if len(df_neg) < min_neg_samples:
@@ -283,20 +319,19 @@ class ILPProblemBuilder:
         # Direct-sibling molecules: subclasses shared with the target's parents. They form the
         # near-miss half of every split's negatives; the other half is drawn uniformly at random
         # from the full negative pool. The objective is therefore global classification, not
-        # separating the target from its superclass only.
-        mol_index = set(str(i) for i in self.dataset.molecules.index)
-        pos_ids, sibling_neg_ids = get_direct_neighbors(mol_index, self.dataset.chebi_graph, target_id)
-        sibling_neg_ids = set(sibling_neg_ids)
+        # separating the target from its superclass only. Only training takes its near-misses
+        # smallest-first, so validation and test stay size-unbiased.
+        pos_ids, sibling_neg_ids = self._direct_neighbors(target_id)
 
-        # splits is long-format (id, split); isin needs the id column, not the filtered frame
-        split_ids = {split: set(self.splits[self.splits["split"] == split]["id"].astype(str))
-                     for split in ["train", "validation", "test"]}
+        split_ids = self._split_ids
 
         samples_by_split = dict()
         pos_train_samples = df_pos[df_pos.index.astype(str).isin(split_ids["train"])]
-        samples_by_split[("pos", "train")] = pos_train_samples.sample(min(max_pos_samples, len(pos_train_samples)), random_state=42) # if there are more positives than max_pos_samples, sample randomly
+        # Over the cap, the smallest molecules are kept: they carry the class just as well
+        # while keeping bk.pl small enough to ground cheaply.
+        samples_by_split[("pos", "train")] = self._take_smallest(pos_train_samples, max_pos_samples)
         neg_train_samples = df_neg[df_neg.index.astype(str).isin(split_ids["train"])]
-        samples_by_split[("neg", "train")] = self.build_negative_mix(neg_train_samples, sibling_neg_ids, max_neg_samples)
+        samples_by_split[("neg", "train")] = self.build_negative_mix(neg_train_samples, sibling_neg_ids, max_neg_samples, prefer_smallest=True)
         
         samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(split_ids["validation"]) & df_pos.index.astype(str).isin(pos_ids)]
         neg_val_samples = df_neg[df_neg.index.astype(str).isin(split_ids["validation"])]
