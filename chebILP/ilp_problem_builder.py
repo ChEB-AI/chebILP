@@ -95,15 +95,19 @@ class ILPProblemBuilder:
             rules = prolog_lines_rules
             rule_predicates = body_predicates_rules
         
-        for target_id in tqdm.tqdm(target_ids, desc="Building background knowledge for ChEBI classes"):
-            print(f"Building background knowledge for ChEBI:{target_id}...")
+        pbar = tqdm.tqdm(target_ids, desc="Building background knowledge")
+        for target_id in pbar:
+            # The per-class status goes into the bar itself; printing it would redraw the bar
+            # on every iteration. Only warnings and failures are written as their own lines.
+            pbar.set_description(f"Building background knowledge for ChEBI:{target_id}")
+            pbar.set_postfix_str("")
 
             # LLM-generated auxiliary predicates are specific to the target class,
             # so they are loaded once per target and merged into the atom-level BK.
             aux_predicates = None
             if self.predicate_set == "llm_generated_fgs":
                 aux_predicates = load_auxiliary_predicates(target_id, library_dir=self.aux_library_dir)
-                print(f"  Loaded {len(aux_predicates)} auxiliary predicate(s) for ChEBI:{target_id}")
+                pbar.set_postfix_str(f"{len(aux_predicates)} aux predicate(s)")
 
             # llm_generated_rules: the class's auxiliary predicates are ASP rules,
             # evaluated (below) against the atom facts plus optional computed facts.
@@ -115,8 +119,8 @@ class ILPProblemBuilder:
                 # they build on, so the dependencies have to be pulled in from the library
                 # or the rules ground against an empty body and derive nothing.
                 dependency_programs = resolve_rule_dependencies(rule_programs, self.aux_library_dir)
-                print(f"  Loaded {len(rule_programs)} auxiliary rule(s) for ChEBI:{target_id}"
-                      + (f" (+{len(dependency_programs)} dependencies)" if dependency_programs else ""))
+                pbar.set_postfix_str(f"{len(rule_programs)} rule(s)"
+                                     + (f" +{len(dependency_programs)} dep(s)" if dependency_programs else ""))
 
             # The fowl set adds a single class-specific predicate, fowl_<target_id>,
             # derived from a SMARTS pattern, on top of the atom predicates. Not every
@@ -127,9 +131,9 @@ class ILPProblemBuilder:
                     self._fowl_smarts = load_fowl_smarts()
                 smarts = self._fowl_smarts.get(target_id)
                 if smarts is None:
-                    print(f"  No fowl SMARTS for ChEBI:{target_id}; falling back to plain atom predicates.")
+                    pbar.set_postfix_str("no fowl SMARTS, plain atom predicates")
                 else:
-                    print(f"  Loaded fowl SMARTS for ChEBI:{target_id}: {smarts}")
+                    pbar.set_postfix_str(f"fowl SMARTS {smarts}")
                     fowl_smarts = {target_id: smarts}
 
             selected_ids_by_split = dict()
@@ -201,9 +205,9 @@ class ILPProblemBuilder:
                 except (RuntimeError, MemoryError) as e:
                     # One class's rules must not end a run that is hours long. The class keeps
                     # its atom-level bk.pl and simply goes without its aux_* extensions.
-                    print(f"  Grounding failed for ChEBI:{target_id} ({e}); "
-                          f"continuing without its auxiliary extensions. "
-                          f"Rules: {', '.join(rp.name for rp in rule_programs)}")
+                    pbar.write(f"  Grounding failed for ChEBI:{target_id} ({e}); "
+                               f"continuing without its auxiliary extensions. "
+                               f"Rules: {', '.join(rp.name for rp in rule_programs)}")
                     failed_rule_classes.append(target_id)
                     extensions = {}
                 for rp in rule_programs:
@@ -284,17 +288,21 @@ class ILPProblemBuilder:
         pos_ids, sibling_neg_ids = get_direct_neighbors(mol_index, self.dataset.chebi_graph, target_id)
         sibling_neg_ids = set(sibling_neg_ids)
 
+        # splits is long-format (id, split); isin needs the id column, not the filtered frame
+        split_ids = {split: set(self.splits[self.splits["split"] == split]["id"].astype(str))
+                     for split in ["train", "validation", "test"]}
+
         samples_by_split = dict()
-        pos_train_samples = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "train"])]
+        pos_train_samples = df_pos[df_pos.index.astype(str).isin(split_ids["train"])]
         samples_by_split[("pos", "train")] = pos_train_samples.sample(min(max_pos_samples, len(pos_train_samples)), random_state=42) # if there are more positives than max_pos_samples, sample randomly
-        neg_train_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "train"])]
+        neg_train_samples = df_neg[df_neg.index.astype(str).isin(split_ids["train"])]
         samples_by_split[("neg", "train")] = self.build_negative_mix(neg_train_samples, sibling_neg_ids, max_neg_samples)
         
-        samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "validation"]) & df_pos.index.astype(str).isin(pos_ids)]
-        neg_val_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "validation"])]
+        samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(split_ids["validation"]) & df_pos.index.astype(str).isin(pos_ids)]
+        neg_val_samples = df_neg[df_neg.index.astype(str).isin(split_ids["validation"])]
         samples_by_split[("neg", "validation")] = self.build_negative_mix(neg_val_samples, sibling_neg_ids, max_neg_samples)
-        samples_by_split[("pos", "test")] = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "test"]) & df_pos.index.astype(str).isin(pos_ids)]
-        neg_test_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "test"])]
+        samples_by_split[("pos", "test")] = df_pos[df_pos.index.astype(str).isin(split_ids["test"]) & df_pos.index.astype(str).isin(pos_ids)]
+        neg_test_samples = df_neg[df_neg.index.astype(str).isin(split_ids["test"])]
         samples_by_split[("neg", "test")] = self.build_negative_mix(neg_test_samples, sibling_neg_ids, max_neg_samples)
         
         for (posneg, split), df in samples_by_split.items():
