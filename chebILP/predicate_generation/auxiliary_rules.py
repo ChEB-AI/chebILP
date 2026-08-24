@@ -29,9 +29,9 @@ separate default directory so the two libraries never mix::
 
 A rule program file carries a two-line header naming the predicate and describing it::
 
-    % PREDICATE_NAME: aux_at_least_three_rings
-    % DESCRIPTION: molecule has at least three rings
-    aux_at_least_three_rings(M) :- N = #count{ S : ring_size(M,S) }, N >= 3.
+    % PREDICATE_NAME: aux_at_least_three_ring_atoms
+    % DESCRIPTION: molecule has at least three atoms lying in a ring
+    aux_at_least_three_ring_atoms(M) :- has_atom(M,_), 3 <= #count{ A : has_atom(M,A), in_ring(A) }.
 """
 
 from __future__ import annotations

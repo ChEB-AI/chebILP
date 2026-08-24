@@ -54,7 +54,8 @@ _EXISTING_PREDICATES = """\
 - bSINGLE/bDOUBLE/bTRIPLE/bAROMATIC(Atom1, Atom2): bond type
 - bSTEREOCIS/bSTEREOTRANS(Atom1, Atom2): cis/trans bond stereochemistry
 - has_bond_to(Atom1, Atom2): any bond between two atoms
-- in_ring(Atom), in_ringN(Atom), ringN(A1..AN): ring membership / N-membered rings (N up to 8)
+- in_ring(Atom), in_ringN(Atom): ring membership / membership of an N-membered ring, for
+  every N that occurs. There is no N-ary ringN(A1..AN) naming a ring's atoms in order.
 - net_charge_positive/negative/neutral(Molecule), aromatic/aliphatic(Molecule): molecule-level
 - steroid_1..steroid_17(Atom): atom at a steroid-nucleus position\
 """

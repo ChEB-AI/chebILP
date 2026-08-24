@@ -484,7 +484,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--selection_k", type=int, default=10, help="Number of predicates selection with selection_mode (required if selection_mode is set).")
     sp_learn.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
     sp_learn.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")
-    sp_learn.add_argument("--max_clauses", type=int, default=2, help="Maximum number of clauses in the learned program.")
+    sp_learn.add_argument("--max_clauses", type=int, default=2, help="Maximum number of clauses in the learned program. Inert: Popper forces max_rules=1 unless recursion or predicate invention is enabled, and the noisy MDL combiner caps nothing.")
     sp_learn.add_argument("--mdl_weight_fn", type=int, default=1, help="Weight β for false negatives in MDL cost (default: 1).")
     sp_learn.add_argument("--mdl_weight_fp", type=int, default=1, help="Weight γ for false positives in MDL cost (default: 1).")
     sp_learn.add_argument("--mdl_weight_size", type=int, default=1, help="Weight α for program size in MDL cost (default: 1).")
