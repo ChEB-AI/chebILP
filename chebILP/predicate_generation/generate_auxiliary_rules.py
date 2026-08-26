@@ -90,6 +90,64 @@ Contract:
   To negate a conjunction, define a helper predicate.
 
 There is a SHARED LIBRARY of auxiliary rules already written for other classes. REUSE them where possible.
+
+Here a some examples of different kinds of useful predicates.
+
+A substructure or local pattern. Molecule-level, "does the molecule contain this?":
+    name:        aux_has_azetidine_ring
+    description: contains a 4-membered ring holding a nitrogen
+    program:     aux_has_azetidine_ring(M) :- has_atom(M,A), n(A), in_ring4(A).
+
+The same kind of pattern, but naming the ATOMS that match, so ILP can reason about where they
+sit and join them to other atom predicates. Prefer this when the location matters:
+    name:        aux_carboxyl_carbon
+    description: carbons that are the carbon of a carboxyl group (C=O with an -OH or -O anion)
+    program:     aux_carboxyl_carbon(C) :- c(C), bDOUBLE(C,O1), o(O1), bSINGLE(C,O2), o(O2), has_1_hs(O2), O1 != O2.
+                 aux_carboxyl_carbon(C) :- c(C), bDOUBLE(C,O1), o(O1), bSINGLE(C,O2), o(O2), charge_m1(O2), O1 != O2.   
+                
+
+An atom PAIR, when the property is a relationship between two atoms:
+    name:        aux_amide_bond
+    description: pairs of (carbonyl carbon, amide nitrogen) joined by an amide bond
+    program:     aux_amide_bond(C,N) :- c(C), o(O), bDOUBLE(C,O), has_bond_to(C,N), n(N).
+
+A count, expressed with aggregates. Use this if it is relevant HOW MANY of a group there are (N
+carbons, N sugar units, one vs two carboxyls).
+    name:        aux_exactly_two_ether_oxygens
+    description: has exactly two ether oxygens (O bonded to two carbons, no hydrogen)
+    program:     aux_ether_oxygen(O) :- o(O), has_0_hs(O), has_bond_to(O,C1),
+                     c(C1), has_bond_to(O,C2), c(C2), C1 != C2.
+                 aux_exactly_two_ether_oxygens(M) :- has_atom(M,_),
+                     2 = #count{ O : has_atom(M,O), aux_ether_oxygen(O) }.
+
+An absence, via negation. Note it BUILDS ON aux_carboxyl_carbon above instead of restating
+it. 
+    name:        aux_no_carboxyl
+    description: has no carboxyl group
+    program:     aux_has_carboxyl(M) :- has_atom(M,C), aux_carboxyl_carbon(C).
+                 aux_no_carboxyl(M) :- has_atom(M,_), not aux_has_carboxyl(M).
+
+A chain length, path or connectivity property, expressed with recursion:
+    name:        aux_large_carbon_skeleton
+    description: has a connected carbon subgraph of at least 22 carbons
+    program:     aux_carbon_reachable(A,A) :- c(A).
+                 aux_carbon_reachable(A,D) :- aux_carbon_reachable(A,B), has_bond_to(B,D), c(D).
+                 aux_large_carbon_skeleton(M) :- has_atom(M,A), c(A),
+                     22 <= #count{ B : aux_carbon_reachable(A,B) }.
+
+A property that needs computed facts (molecular weight, or rings larger than 8):
+    name:        aux_has_macrocycle
+    description: contains a ring larger than 8 atoms
+    program:     aux_has_macrocycle(M) :- ring_size(M,S), S > 8.
+    (weight variant: aux_high_molecular_weight(M) :- mol_weight(M,W), W >= 500.)
+
+Guidance (learned from failure analysis):
+- Prefer small predicates identifying specific molecular features. The ILP system will later 
+  combine them into larger conjunctions. Favor predicates that can be reused across many 
+  classes.
+- Counting and absence are the highest-value predicates: a close sibling often differs only in
+  the NUMBER of a group (N carbons, N sugar units, one vs two carboxyls). Reach for #count / not.
+- Prefer predicates TRUE for many molecules of the target class and FALSE for other molecules.\
 """
 
 # Header comments the model may repeat inside "program"; the pipeline synthesizes them.
