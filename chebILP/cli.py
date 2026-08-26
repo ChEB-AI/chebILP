@@ -111,6 +111,9 @@ def _handle_learn(args):
             mdl_weight_fn=args.mdl_weight_fn,
             mdl_weight_fp=args.mdl_weight_fp,
             mdl_weight_size=args.mdl_weight_size,
+            seed_hypothesis=args.seed_hypothesis,
+            heuristic_guidance=args.heuristic_guidance,
+            aux_library_dir=args.predicate_dir,
         )
 
 
@@ -488,6 +491,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--mdl_weight_fn", type=int, default=1, help="Weight β for false negatives in MDL cost (default: 1).")
     sp_learn.add_argument("--mdl_weight_fp", type=int, default=1, help="Weight γ for false positives in MDL cost (default: 1).")
     sp_learn.add_argument("--mdl_weight_size", type=int, default=1, help="Weight α for program size in MDL cost (default: 1).")
+    sp_learn.add_argument("--predicate_dir", type=str, default=None,
+                          help="Auxiliary-rule library directory (llm_generated_rules), needed for "
+                               "--seed_hypothesis / --heuristic_guidance to read the class's chosen predicates.")
+    sp_learn.add_argument("--seed_hypothesis", action="store_true",
+                          help="Seed Popper's search with the conjunction of the class's chosen "
+                               "auxiliary predicates (llm_generated_rules only; requires --noisy, which is on).")
+    sp_learn.add_argument("--heuristic_guidance", action="store_true",
+                          help="Steer generation toward the class's chosen auxiliary predicates via "
+                               "prefer_body_pred directives in the bias file (llm_generated_rules only).")
     sp_learn.set_defaults(func=_handle_learn)
 
     # ── select_predicates ────────────────────────────────────────────────

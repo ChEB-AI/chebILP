@@ -680,6 +680,45 @@ def resolve_rule_dependencies(progs, library_dir: str | None = None) -> list[Rul
     return resolved
 
 
+def _head_args(head: str) -> list[str]:
+    """Top-level argument list of a clause head, e.g. ``aux_x(O,C2)`` -> ``['O', 'C2']``."""
+    m = re.match(r"\s*[a-z_][A-Za-z0-9_]*\s*\((.*)\)\s*$", head)
+    return _body_literals(m.group(1)) if m else []
+
+
+_HAS_ATOM_MOL_RE = re.compile(r"has_atom\(\s*([A-Z_][A-Za-z0-9_]*)\s*,")
+
+
+def predicate_arg_sorts(prog: RuleProgram) -> list[str]:
+    """Classify each argument of ``prog``'s own predicate as ``"mol"`` or ``"atom"``.
+
+    A head argument is a molecule when it appears as the *first* argument of a ``has_atom/2``
+    literal in one of the clauses defining ``prog.name`` (that is the shape every
+    molecule-level rule uses, ``aux_x(M) :- has_atom(M,_), ...``); otherwise it is an atom.
+    Across several defining clauses ``"mol"`` wins for a position. Returns ``[]`` when the
+    program does not define its own predicate as a clause head.
+
+    This is what tells :func:`~chebILP.ilp_classifier.build_seed_hypothesis` whether a chosen
+    predicate is used as ``aux_x(Molecule)`` or needs a ``has_atom(Molecule, Atom)`` link.
+    """
+    sorts_by_pos: dict[int, str] = {}
+    arity: int | None = None
+    for head, body in _clauses(prog.source):
+        m = _PRED_RE.match(head)
+        if m is None or m.group(1) != prog.name:
+            continue
+        args = _head_args(head)
+        arity = len(args)
+        mol_vars = set(_HAS_ATOM_MOL_RE.findall(body))
+        for i, arg in enumerate(args):
+            sort = "mol" if arg in mol_vars else "atom"
+            if sorts_by_pos.get(i) != "mol":
+                sorts_by_pos[i] = sort
+    if arity is None:
+        return []
+    return [sorts_by_pos.get(i, "atom") for i in range(arity)]
+
+
 def load_class_rules(chebi_id, library_dir: str | None = None) -> list[RuleProgram]:
     """Load the rule programs a ChEBI class uses (from ``class_map.json``).
 
