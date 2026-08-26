@@ -241,13 +241,10 @@ def main():
     parser.add_argument("--chebi_version", type=int, default=248)
     parser.add_argument("--predicate_dir", default=os.path.join("data", "llm_generated_predicates"),
                         help="Directory for storing generated predicates.")
-    parser.add_argument("--model", default="anthropic/claude-haiku-4-5",
-                        help="LLM as 'provider/name' (LiteLLM). Must support structured outputs, e.g. "
-                             "anthropic/claude-haiku-4-5, openai/gpt-4o, gemini/gemini-2.5-pro, "
-                             "ollama/llama3.1, hosted_vllm/<name> (with --api_base). The provider's API "
-                             "key is read from the environment (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...).")
-    parser.add_argument("--api_base", default=None,
-                        help="Base URL for self-hosted / OpenAI-compatible endpoints (e.g. vLLM, Ollama).")
+    parser.add_argument("--model", default="claude-haiku-4-5",
+                        help="Claude model id for the local `claude` CLI (e.g. claude-opus-5, "
+                             "claude-haiku-4-5). Calls run through the logged-in CLI and bill to your "
+                             "Claude subscription; set CHEBILP_CLAUDE_CLI if it is not on PATH.")
     parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
     parser.add_argument("--top_k", type=int, default=16,
                         help="Reuse candidates retrieved from the shared library per class.")
@@ -265,7 +262,7 @@ def main():
         chebi_ids = [line.strip() for line in f if line.strip()]
 
     PredicateGenerator(
-        args.predicate_dir, args.model, args.n_predicates, args.top_k, api_base=args.api_base,
+        args.predicate_dir, args.model, args.n_predicates, args.top_k,
     ).run(chebi_graph, chebi_ids)
 
 

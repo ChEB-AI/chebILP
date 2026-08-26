@@ -1,92 +1,58 @@
-"""Provider-agnostic LLM access for the auxiliary-generation pipelines.
+"""LLM access for the auxiliary-generation pipelines, over the Claude Agent SDK.
 
-Both generation pipelines ask a model for one structured answer per class and get back a
-Pydantic object. LiteLLM lets any provider serve that request behind a single
-``provider/name`` model string (``anthropic/claude-haiku-4-5``, ``openai/gpt-4o``,
-``gemini/gemini-2.5-pro``, ``ollama/llama3.1``, ``hosted_vllm/<name>`` with an
-``api_base``...). Provider API keys are read from the usual environment variables
-(``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, ``GEMINI_API_KEY``, ...).
+Each class needs one structured answer (a :class:`~pydantic.BaseModel`), so the request
+runs through the local, already-authenticated ``claude`` CLI: calls bill to the Claude
+subscription rather than a metered API key. The SDK drives the CLI as a subprocess and
+returns validated JSON matching the schema (``output_format`` / ``structured_output``),
+re-prompting itself on schema mismatch.
+
+The CLI must be installed and logged in to a Claude account (``claude`` then ``/login``).
+Set ``CHEBILP_CLAUDE_CLI`` to point at the binary if it is not on ``PATH``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import time
 
-import litellm
-from pydantic import BaseModel, ValidationError
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    CLIConnectionError,
+    ProcessError,
+    ResultMessage,
+    query,
+)
+from pydantic import BaseModel
 
-# Validate structured output against the schema even on providers without native strict
-# schema support, so weaker models fail loudly (and get reasked) instead of silently.
-litellm.enable_json_schema_validation = True
+# Point the SDK at a specific CLI binary; otherwise it auto-detects ``claude`` on PATH.
+_CLI_PATH = os.environ.get("CHEBILP_CLAUDE_CLI")
 
-
-# Anthropic models LiteLLM's own allowlist misses. Substrings are version-specific
-# ("opus-5" does not match "opus-4-5"), so an older model never lands here by accident.
-_NATIVE_STRUCTURED_OUTPUT_FAMILIES = ("fable", "mythos", "haiku", "opus-5", "sonnet-5")
-
-
-def _patch_litellm_native_structured_output() -> None:
-    """Route always-on-thinking Anthropic models through native structured output.
-
-    LiteLLM chooses the Anthropic structured-output path from a hardcoded model
-    allowlist that stops at Opus 4.7, so anything newer falls back to tool-based
-    JSON coercion with a forced ``tool_choice``. That is incompatible with always-on
-    thinking (the API can't force a tool while thinking is active), and the reply
-    comes back malformed: an empty ``{}`` on Fable/Mythos, or the whole answer
-    stuffed as a string under the literal placeholder key ``$PARAMETER_NAME`` on
-    Opus 5. Reroute them to the native ``output_config.format`` path LiteLLM already
-    uses for 4.6/4.7, which is thinking-compatible.
-    """
-    from litellm.constants import RESPONSE_FORMAT_TOOL_NAME
-    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
-
-    if getattr(AnthropicConfig, "_chebilp_native_output_patch", False):
-        return
-    original = AnthropicConfig.map_openai_params
-
-    def patched(self, non_default_params, optional_params, model, drop_params):
-        params = original(self, non_default_params, optional_params, model, drop_params)
-        response_format = non_default_params.get("response_format")
-        if (
-            isinstance(response_format, dict)
-            and "output_format" not in params
-            and any(family in model for family in _NATIVE_STRUCTURED_OUTPUT_FAMILIES)
-        ):
-            output_format = self.map_response_format_to_anthropic_output_format(response_format)
-            if output_format is not None:
-                params["output_format"] = output_format
-                params["tools"] = [t for t in params.get("tools", []) if t.get("name") != RESPONSE_FORMAT_TOOL_NAME]
-                if not params["tools"]:
-                    params.pop("tools", None)
-                tool_choice = params.get("tool_choice")
-                if isinstance(tool_choice, dict) and tool_choice.get("name") == RESPONSE_FORMAT_TOOL_NAME:
-                    params.pop("tool_choice", None)
-        return params
-
-    AnthropicConfig.map_openai_params = patched
-    AnthropicConfig._chebilp_native_output_patch = True
-
-
-_patch_litellm_native_structured_output()
 
 class ModelRefusal(RuntimeError):
     """The model's safety classifier declined the request (not a malformed reply).
 
-    Reasking is pointless — the classifier is deterministic per input — so this is
-    raised past the reask loop and fails the class outright. Seen on Claude Fable /
-    Mythos, whose research-biology and cyber classifiers can false-positive on benign
-    life-sciences prompts; models without those classifiers (e.g. Opus) are unaffected.
+    Surfaced by ``stop_reason == "refusal"``. Reasking is pointless — the classifier is
+    deterministic per input — so this is raised past the retry loop and fails the class.
     """
 
 
-# Provider-agnostic transient errors worth retrying with backoff.
-_TRANSIENT = (
-    litellm.APIConnectionError,
-    litellm.Timeout,
-    litellm.RateLimitError,
-    litellm.InternalServerError,
-    litellm.ServiceUnavailableError,
-)
+async def _run_query(model: str, system: str, prompt: str, schema: type[BaseModel]) -> ResultMessage | None:
+    """Drive one CLI query to completion and return its final ``ResultMessage``."""
+    options = ClaudeAgentOptions(
+        model=model,
+        system_prompt=system,          # our contract, replacing the CLI's default prompt
+        allowed_tools=[],              # no tools available, so there is no agentic loop to bound
+        setting_sources=[],            # do not load repo/user CLAUDE.md or settings
+        output_format={"type": "json_schema", "schema": schema.model_json_schema()},
+        **({"cli_path": _CLI_PATH} if _CLI_PATH else {}),
+    )
+    result: ResultMessage | None = None
+    async for message in query(prompt=prompt, options=options):
+        if isinstance(message, ResultMessage):
+            result = message
+    return result
 
 
 def structured_completion(
@@ -95,64 +61,63 @@ def structured_completion(
     prompt: str,
     schema: type[BaseModel],
     *,
-    max_tokens: int = 32000,
     max_retries: int = 5,
-    api_base: str | None = None,
 ):
     """Ask ``model`` for one structured answer. Returns ``(parsed, raw_json_text, attempts)``.
 
-    ``raw`` is the model's JSON string, kept for the exchange log. ``attempts`` is one
-    record per LLM call made (each ``{"error", "raw", "cost"}``), in order — the final
-    entry is the successful call (``error`` is ``None``); any earlier entries are reasks.
-    Retries transient connection/timeout/rate-limit errors with exponential backoff, and
-    reasks when a (typically weaker) model returns malformed or schema-invalid JSON. On
-    total failure the collected attempts are attached to the raised exception as
-    ``_chebilp_attempts`` so the caller can still log them.
+    ``raw`` is the answer re-serialized as JSON, kept for the exchange log. ``attempts`` is
+    one record per query made (each ``{"error", "raw", "cost"}``), in order — the final entry
+    is the successful call (``error`` is ``None``); earlier entries are retried CLI/connection
+    failures. The SDK does its own schema-mismatch re-prompting, so a run that finishes without
+    valid structured output is terminal and not retried here. On total failure the collected
+    attempts are attached to the raised exception as ``_chebilp_attempts`` so the caller can
+    still log them.
     """
-    last_exc = None
+    # The CLI takes a bare model id ("claude-opus-5"); strip any "provider/" prefix.
+    cli_model = model.split("/")[-1]
     attempts: list[dict] = []
+    last_exc: BaseException | None = None
+
     for attempt in range(max_retries):
-        cost = None
         try:
-            response = litellm.completion(
-                model=model,
-                # Generous: a truncated response is invalid JSON and loses the whole class.
-                max_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt},
-                ],
-                response_format=schema,
-                api_base=api_base,
-            )
-            cost = getattr(response, "_hidden_params", {}).get("response_cost")
-            choice = response.choices[0]
-            raw = choice.message.content
-            if choice.finish_reason == "content_filter":
-                raise ModelRefusal(f"{model} declined this request (safety classifier)")
-            if not raw:
-                reasoning = getattr(choice.message, "reasoning_content", None) or ""
-                original = getattr(response, "_hidden_params", {}).get("original_response")
-                raise ValueError(
-                    f"empty completion content (finish_reason={choice.finish_reason}, "
-                    f"reasoning_chars={len(reasoning)}); raw Anthropic blocks: {original!r}"
-                )
-            parsed = schema.model_validate_json(raw)
-            attempts.append({"error": None, "raw": raw, "cost": cost})
-            return parsed, raw, attempts
-        except _TRANSIENT as e:
+            result = asyncio.run(_run_query(cli_model, system, prompt, schema))
+        except (CLIConnectionError, ProcessError) as e:
             last_exc = e
             wait = 2 ** attempt
-            print(f"  Transient error (attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {e}")
+            print(f"  CLI error (attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {e}")
             time.sleep(wait)
-        except (ValidationError, ValueError, litellm.JSONSchemaValidationError) as e:
-            last_exc = e
-            raw = getattr(e, "raw_response", None)
-            attempts.append({"error": str(e), "raw": raw, "cost": cost})
-            detail = f"\n    raw response: {raw!r}" if raw else ""
-            print(f"  Invalid structured output (attempt {attempt + 1}/{max_retries}), reasking: {e}{detail}")
+            continue
+
+        if result is None:
+            last_exc = RuntimeError("Agent SDK query produced no result message")
+            wait = 2 ** attempt
+            print(f"  No result (attempt {attempt + 1}/{max_retries}), retrying in {wait}s")
+            time.sleep(wait)
+            continue
+
+        cost = result.total_cost_usd
+        if result.stop_reason == "refusal":
+            attempts.append({"error": "refusal", "raw": result.result, "cost": cost})
+            exc = ModelRefusal(f"{cli_model} declined this request (safety classifier)")
+            exc._chebilp_attempts = attempts
+            raise exc
+
+        structured = result.structured_output
+        if result.subtype == "success" and structured:
+            raw = json.dumps(structured, ensure_ascii=False, indent=2)
+            parsed = schema.model_validate(structured)
+            attempts.append({"error": None, "raw": raw, "cost": cost})
+            return parsed, raw, attempts
+
+        # No structured output despite the SDK's own retries — terminal, don't re-ask.
+        raw = json.dumps(structured, ensure_ascii=False) if structured else result.result
+        detail = f"subtype={result.subtype}, errors={result.errors}"
+        attempts.append({"error": detail, "raw": raw, "cost": cost})
+        last_exc = RuntimeError(f"no valid structured output ({detail})")
+        break
+
     try:
         last_exc._chebilp_attempts = attempts
     except (AttributeError, TypeError):
-        pass  # some exception types (e.g. pydantic's) forbid attribute assignment
+        pass  # some exception types forbid attribute assignment
     raise last_exc

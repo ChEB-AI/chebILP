@@ -107,9 +107,9 @@ Answer with a single JSON object:
 """
 
 
-def generate_one(prompt: str, system: str, model: str, selection_model, api_base: str | None = None):
+def generate_one(prompt: str, system: str, model: str, selection_model):
     """Ask the model for one class's selection. Returns ``(parsed, raw_json_text, attempts)``."""
-    return structured_completion(model, system, prompt, selection_model, api_base=api_base)
+    return structured_completion(model, system, prompt, selection_model)
 
 
 class AuxiliaryGenerator(ABC):
@@ -122,12 +122,11 @@ class AuxiliaryGenerator(ABC):
     noun = "predicate"  # log/console wording
     selection_model: type[Selection] = Selection
 
-    def __init__(self, library_dir, model, n_predicates, top_k, api_base=None):
+    def __init__(self, library_dir, model, n_predicates, top_k):
         self.library_dir = library_dir
         self.model = model
         self.n_predicates = n_predicates
         self.top_k = top_k
-        self.api_base = api_base
         self.retriever = None
 
     # --- hooks -------------------------------------------------------------------
@@ -207,7 +206,7 @@ class AuxiliaryGenerator(ABC):
         parsed, raw, attempts = None, None, []
         try:
             parsed, raw, attempts = generate_one(
-                prompt, self.system_prompt, self.model, self.selection_model, self.api_base
+                prompt, self.system_prompt, self.model, self.selection_model
             )
         except Exception as e:
             attempts = getattr(e, "_chebilp_attempts", [])

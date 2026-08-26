@@ -185,8 +185,8 @@ class RuleGenerator(AuxiliaryGenerator):
     noun = "rule"
 
     def __init__(self, library_dir, model, n_predicates, top_k, *, molecules,
-                 problem_dir, computed_facts, validate_max, prompt_samples, api_base=None):
-        super().__init__(library_dir, model, n_predicates, top_k, api_base=api_base)
+                 problem_dir, computed_facts, validate_max, prompt_samples):
+        super().__init__(library_dir, model, n_predicates, top_k)
         self.molecules = molecules
         self.problem_dir = problem_dir
         self.computed_facts = computed_facts
@@ -388,13 +388,10 @@ def main():
                         help="ILP problem tree holding each class's train exs.pl (for samples/validation).")
     parser.add_argument("--predicate_dir", default=DEFAULT_AUX_RULE_LIBRARY_DIR,
                         help="Shared auxiliary-RULE library directory.")
-    parser.add_argument("--model", default="anthropic/claude-haiku-4-5",
-                        help="LLM as 'provider/name' (LiteLLM). Must support structured outputs, e.g. "
-                             "anthropic/claude-haiku-4-5, openai/gpt-4o, gemini/gemini-2.5-pro, "
-                             "ollama/llama3.1, hosted_vllm/<name> (with --api_base). The provider's API "
-                             "key is read from the environment (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...).")
-    parser.add_argument("--api_base", default=None,
-                        help="Base URL for self-hosted / OpenAI-compatible endpoints (e.g. vLLM, Ollama).")
+    parser.add_argument("--model", default="claude-haiku-4-5",
+                        help="Claude model id for the local `claude` CLI (e.g. claude-opus-5, "
+                             "claude-haiku-4-5). Calls run through the logged-in CLI and bill to your "
+                             "Claude subscription; set CHEBILP_CLAUDE_CLI if it is not on PATH.")
     parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
     parser.add_argument("--top_k", type=int, default=16, help="Reuse candidates retrieved per class.")
     parser.add_argument("--computed_facts", dest="computed_facts", action="store_true", default=True,
@@ -424,7 +421,7 @@ def main():
     RuleGenerator(
         args.predicate_dir, args.model, args.n_predicates, args.top_k,
         molecules=molecules, problem_dir=args.problem_dir, computed_facts=args.computed_facts,
-        validate_max=args.validate_max, prompt_samples=args.prompt_samples, api_base=args.api_base,
+        validate_max=args.validate_max, prompt_samples=args.prompt_samples,
     ).run(chebi_graph, chebi_ids)
 
 
