@@ -153,7 +153,7 @@ Guidance (learned from failure analysis):
 # Header comments the model may repeat inside "program"; the pipeline synthesizes them.
 _HEADER_RE = re.compile(r"^\s*%\s*(PREDICATE_NAME|DESCRIPTION)\s*:", re.IGNORECASE)
 
-# Validate-and-reject grounds at most ``validate_max`` positives and negatives, which takes
+# Validate-and-reject grounds positives and negatives, which takes
 # well under a second; anything near this ceiling is pathological rather than merely slow.
 _VALIDATION_GROUNDING_TIMEOUT = 60.0
 
@@ -167,7 +167,7 @@ ERROR_DEGENERATE = "degenerate"
 ERROR_NO_VALIDATION_MOLECULES = "no_validation_molecules"
 
 
-def _load_train_samples(chebi_id, problem_dir, molecules, max_pos, max_neg):
+def _load_train_samples(chebi_id, problem_dir, molecules, max_pos=None, max_neg=None):
     """Return ``(pos_rows, neg_rows)`` DataFrames from the class's train exs.pl."""
     exs_path = get_exs_path(chebi_id, base_dir=problem_dir, split="train")
     pos_ids, neg_ids = [], []
@@ -178,7 +178,10 @@ def _load_train_samples(chebi_id, problem_dir, molecules, max_pos, max_neg):
                 continue
             mol_id = line.split("(")[-1].split(")")[0]
             (pos_ids if line.startswith("pos") else neg_ids).append(mol_id)
-    pos_ids, neg_ids = pos_ids[:max_pos], neg_ids[:max_neg]
+    if max_pos is not None:
+        pos_ids = pos_ids[:max_pos]
+    if max_neg is not None:
+        neg_ids = neg_ids[:max_neg]
     pos_rows = molecules[[i in set(pos_ids) for i in molecules.index]]
     neg_rows = molecules[[i in set(neg_ids) for i in molecules.index]]
     return pos_rows, neg_rows
@@ -243,12 +246,11 @@ class RuleGenerator(AuxiliaryGenerator):
     noun = "rule"
 
     def __init__(self, library_dir, model, n_predicates, top_k, *, molecules,
-                 problem_dir, computed_facts, validate_max, prompt_samples):
+                 problem_dir, computed_facts, prompt_samples):
         super().__init__(library_dir, model, n_predicates, top_k)
         self.molecules = molecules
         self.problem_dir = problem_dir
         self.computed_facts = computed_facts
-        self.validate_max = validate_max
         self.prompt_samples = prompt_samples
 
     @property
@@ -262,7 +264,7 @@ class RuleGenerator(AuxiliaryGenerator):
         import pandas as pd
 
         pos_rows, neg_rows = _load_train_samples(
-            chebi_id, self.problem_dir, self.molecules, self.validate_max, self.validate_max
+            chebi_id, self.problem_dir, self.molecules
         )
         val_facts, val_ids = _build_eval_facts(pd.concat([pos_rows, neg_rows]), self.computed_facts)
         return {
@@ -440,7 +442,7 @@ fit; only write NEW rules for properties they do not already cover.
 def main():
     parser = argparse.ArgumentParser(description="Generate LLM auxiliary predicates as ASP rules for ChEBI classes.")
     parser.add_argument("--labels_file", required=True, help="File with one ChEBI ID per line.")
-    parser.add_argument("--chebi_version", type=int, default=248)
+    parser.add_argument("--chebi_version", type=int, default=251)
     parser.add_argument("--molecules_path", required=True, help="Path to molecules.pkl (mols + SMILES).")
     parser.add_argument("--problem_dir", default=os.path.join("data", "ilp_problems"),
                         help="ILP problem tree holding each class's train exs.pl (for samples/validation).")
@@ -456,9 +458,7 @@ def main():
                         help="Offer mol_weight/ring_size facts to the model (default: on).")
     parser.add_argument("--no_computed_facts", dest="computed_facts", action="store_false",
                         help="Do not offer the computed facts (Tier D predicates unavailable).")
-    parser.add_argument("--validate_max", type=int, default=20,
-                        help="Max pos and max neg train molecules used for validate-and-reject.")
-    parser.add_argument("--prompt_samples", type=int, default=4,
+    parser.add_argument("--prompt_samples", type=int, default=6,
                         help="Number of pos and neg example SMILES shown in the prompt.")
     args = parser.parse_args()
 
@@ -479,7 +479,7 @@ def main():
     RuleGenerator(
         args.predicate_dir, args.model, args.n_predicates, args.top_k,
         molecules=molecules, problem_dir=args.problem_dir, computed_facts=args.computed_facts,
-        validate_max=args.validate_max, prompt_samples=args.prompt_samples,
+        prompt_samples=args.prompt_samples,
     ).run(chebi_graph, chebi_ids)
 
 

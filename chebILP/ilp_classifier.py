@@ -199,7 +199,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
     # Build settings parameters for Popper
     settings_parameters = {
         "noisy": True,
-        "anytime_solver": "nuwls",
+        "nuwls": True,
         "timeout": timeout,
     }
     if mdl_weight_fn != 1 or mdl_weight_fp != 1 or mdl_weight_size != 1:
