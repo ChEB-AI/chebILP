@@ -42,7 +42,11 @@ import re
 from dataclasses import dataclass
 
 from chebILP.predicate_generation.auxiliary_predicates import sanitize_predicate_name
-from chebILP.ilp_path_manager import get_aux_class_map_path, get_aux_programs_dir
+from chebILP.ilp_path_manager import (
+    get_aux_class_map_path,
+    get_aux_hypotheses_path,
+    get_aux_programs_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -717,6 +721,84 @@ def predicate_arg_sorts(prog: RuleProgram) -> list[str]:
     if arity is None:
         return []
     return [sorts_by_pos.get(i, "atom") for i in range(arity)]
+
+
+# A body literal is "datalog-simple" — usable in a Popper hypothesis — when it is a plain
+# positive predicate call: no negation, no aggregate (#), no comparison operator.
+_SIMPLE_LITERAL_RE = re.compile(r"[a-z_][A-Za-z0-9_]*\s*\(.*\)$")
+
+
+def analyze_hypothesis(clause_source: str) -> dict | None:
+    """Structural summary of an LLM class hypothesis ``chebi_<id>(A) :- <body>.``.
+
+    Returns ``{head: (name, arity), body_preds: {(name, arity), ...}, body_pred_names: [...],
+    n_vars, n_body, datalog_ok}`` or ``None`` when no clause with a body can be read.
+    ``datalog_ok`` is True only when every body literal is a plain positive predicate call —
+    the fragment a Popper seed / prefer_body_pred hint can consume; an aggregate, negation or
+    comparison sets it False. ``body_pred_names`` keeps first-seen order for stable hints.
+    """
+    clause = next((c for c in _clauses(clause_source) if c[1]), None)
+    if clause is None:
+        return None
+    head, body = clause
+    hm = _PRED_RE.match(head.strip())
+    if hm is None:
+        return None
+
+    literals = _body_literals(body)
+    body_preds: set[tuple[str, int]] = set()
+    names_in_order: list[str] = []
+    datalog_ok = True
+    for lit in literals:
+        stripped = lit.strip()
+        if _NOT_RE.match(stripped) or "#" in stripped or not _SIMPLE_LITERAL_RE.match(stripped):
+            datalog_ok = False
+            continue
+        m = _PRED_RE.match(stripped)
+        if m is None:
+            datalog_ok = False
+            continue
+        args = _head_args(stripped)
+        body_preds.add((m.group(1), len(args)))
+        if m.group(1) not in names_in_order:
+            names_in_order.append(m.group(1))
+
+    return {
+        "head": (hm.group(1), len(_head_args(head))),
+        "clause": f"{head.strip()} :- {body.strip()}.",
+        "body_preds": body_preds,
+        "body_pred_names": names_in_order,
+        "n_vars": len(set(_VAR_RE.findall(f"{head} {body}"))),
+        "n_body": len(literals),
+        "datalog_ok": datalog_ok,
+    }
+
+
+def save_class_hypothesis(chebi_id, entry: dict, library_dir: str | None = None) -> None:
+    """Record one class's LLM hypothesis (clause text + train-F1 metrics) in the library."""
+    import json
+
+    library_dir = library_dir or DEFAULT_AUX_RULE_LIBRARY_DIR
+    path = get_aux_hypotheses_path(base_dir=library_dir)
+    store: dict = {}
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            store = json.load(f)
+    store[str(chebi_id)] = entry
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(store, f, indent=2)
+
+
+def load_class_hypothesis(chebi_id, library_dir: str | None = None) -> dict | None:
+    """The saved LLM hypothesis entry for a class, or ``None`` if none was recorded."""
+    import json
+
+    library_dir = library_dir or DEFAULT_AUX_RULE_LIBRARY_DIR
+    path = get_aux_hypotheses_path(base_dir=library_dir)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f).get(str(chebi_id))
 
 
 def load_class_rules(chebi_id, library_dir: str | None = None) -> list[RuleProgram]:

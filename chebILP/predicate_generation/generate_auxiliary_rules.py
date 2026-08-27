@@ -23,6 +23,7 @@ from chebi_utils.extract_properties import mol_to_fol_atoms
 from chebILP.predicate_generation.auxiliary_generation import (
     OUTPUT_CONTRACT,
     AuxiliaryGenerator,
+    Selection,
     format_candidates,
     format_parents,
     one_line,
@@ -30,11 +31,15 @@ from chebILP.predicate_generation.auxiliary_generation import (
 from chebILP.predicate_generation.auxiliary_rules import (
     DEFAULT_AUX_RULE_LIBRARY_DIR,
     ERROR_UNBOUNDED_RECURSION,
+    RuleProgram,
     add_rule_to_library,
     aux_rule_path,
     derive_rule_extensions,
+    load_class_rules,
     parse_rule_program,
+    resolve_rule_dependencies,
     rule_program_error,
+    save_class_hypothesis,
     static_rule_errors,
 )
 from chebILP.ilp_path_manager import get_exs_path
@@ -46,7 +51,7 @@ from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetr
 _EXISTING_PREDICATES = """\
 - has_atom(M, A): molecule M contains atom A
 - c(A), n(A), p(A), cl(A), ...: atom element (lowercase)
-- charge_[p|n|0|1|-1|...](A): charge of atom A (p = positive, n = negative, 0 = neutral, m1 = -1, etc.)
+- charge_p/charge_n/charge0/charge1/charge_m1(A)/...: charge of atom A (p = positive, n = negative, 0 = neutral, m1 = -1, etc.)
 - has_X_hs(A) / has_at_least_X_hs(A): attached-hydrogen counts
 - cip_code_R(A), cip_code_S(A): R/S CIP stereochemistry
 - bSINGLE/bDOUBLE/bTRIPLE/bAROMATIC(A1, A2): bond type (symmetric)
@@ -147,7 +152,23 @@ Guidance (learned from failure analysis):
   classes.
 - Counting and absence are the highest-value predicates: a close sibling often differs only in
   the NUMBER of a group (N carbons, N sugar units, one vs two carboxyls). Reach for #count / not.
-- Prefer predicates TRUE for many molecules of the target class and FALSE for other molecules.\
+- Prefer predicates TRUE for many molecules of the target class and FALSE for other molecules.
+
+Finally, write a HYPOTHESIS: a single rule that defines the target class by ANDing the
+predicates you chose. This becomes the ILP system's starting guess, so it must be a plain
+conjunction — no aggregates, negation or arithmetic in the hypothesis itself (put those inside
+the aux_ predicates instead).
+
+    hypothesis: chebi_<id>(A) :- <literal>, <literal>, ... .
+
+Rules for the hypothesis:
+- The head is exactly chebi_<id>(A), with A the molecule variable.
+- Use ONLY the background predicates and the auxiliary predicates you reused or wrote above
+  (by their aux_ name). Do NOT use mol_weight/ring_size or #count/not/comparisons here.
+- A molecule-level predicate applies to A directly: aux_x(A). An atom-level one must be tied
+  to the molecule with has_atom(A, X) first: has_atom(A, X), aux_y(X).
+- Aim for the conjunction that best separates the target from its siblings; fewer, decisive
+  literals beat many weak ones.\
 """
 
 # Header comments the model may repeat inside "program"; the pipeline synthesizes them.
@@ -240,10 +261,21 @@ def _is_molecule_level(by_mol: dict[str, list[tuple[str, ...]]]) -> bool:
     )
 
 
+class RuleSelection(Selection):
+    """A rule pipeline's answer: the base selection plus a class hypothesis.
+
+    ``hypothesis`` is last so the model commits to its predicates before defining the class
+    in terms of them.
+    """
+
+    hypothesis: str
+
+
 class RuleGenerator(AuxiliaryGenerator):
     """Auxiliary predicates written as ASP/clingo rule programs."""
 
     noun = "rule"
+    selection_model = RuleSelection
 
     def __init__(self, library_dir, model, n_predicates, top_k, *, molecules,
                  problem_dir, computed_facts, prompt_samples):
@@ -272,6 +304,7 @@ class RuleGenerator(AuxiliaryGenerator):
             "neg_smiles": [Chem.MolToSmiles(m) for m in neg_rows["mol"][:self.prompt_samples] if m is not None],
             "val_facts": val_facts,
             "val_ids": val_ids,
+            "pos_ids": {str(i) for i in pos_rows.index},
         }
 
     def build_user_prompt(self, chebi_id, info, candidates, ctx) -> str:
@@ -314,6 +347,9 @@ fit; only write NEW rules for properties they do not already cover.
 
 {OUTPUT_CONTRACT}
   "program" is the clause text only — one molecule-level head plus any helper clauses.
+- "hypothesis": one rule `chebi_{chebi_id}(A) :- ...` that defines the class as a plain
+  conjunction of the background and auxiliary predicates you chose (no aggregates, negation or
+  arithmetic here; head variable A is the molecule).
 """
 
     def to_source(self, item) -> str:
@@ -437,6 +473,48 @@ fit; only write NEW rules for properties they do not already cover.
 
     def describe(self, saved, stem, reason) -> str:
         return f"{saved.name} -> library/{stem}.pl ({reason}): {saved.description}"
+
+    def finalize(self, chebi_id, info, parsed, stems, ctx) -> dict | None:
+        """Evaluate the model's class hypothesis on the train molecules and store it.
+
+        The hypothesis is grounded alongside the class's kept predicates (and their library
+        dependencies), exactly as ``build_bk`` will assemble them, and a molecule is a positive
+        prediction when it derives the ``chebi_<id>`` head. The resulting train-F1 and the
+        clause are saved to the library's ``hypotheses.json`` for ``--seed_hypothesis`` /
+        ``--heuristic_guidance`` to consume.
+        """
+        hypothesis = (getattr(parsed, "hypothesis", "") or "").strip()
+        if not hypothesis:
+            return None
+
+        head = f"chebi_{chebi_id}"
+        entry = {"hypothesis": hypothesis, "train_f1": None, "tp": None, "fp": None,
+                 "tn": None, "fn": None, "groundable": False}
+
+        if ctx["val_ids"]:
+            programs = load_class_rules(chebi_id, library_dir=self.library_dir)
+            dependencies = resolve_rule_dependencies(programs, self.library_dir)
+            hyp_prog = RuleProgram(name=head, description="LLM class hypothesis",
+                                   source=hypothesis, source_file="<hypothesis>")
+            try:
+                extensions = derive_rule_extensions(
+                    programs + dependencies + [hyp_prog],
+                    ctx["val_facts"], ctx["val_ids"], timeout=_VALIDATION_GROUNDING_TIMEOUT,
+                )
+                fired = set(extensions.get(head, {}))
+                pos = ctx["pos_ids"]
+                ids = {str(i) for i in ctx["val_ids"]}
+                neg = ids - pos
+                tp, fp = len(fired & pos), len(fired & neg)
+                fn, tn = len(pos - fired), len(neg - fired)
+                f1 = (2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn) > 0 else 0.0
+                entry.update(train_f1=f1, tp=tp, fp=fp, tn=tn, fn=fn, groundable=True)
+                print(f"    hypothesis train-F1 {f1:.3f} (TP {tp}, FP {fp}, TN {tn}, FN {fn})")
+            except Exception as e:
+                print(f"    hypothesis did not ground: {str(e).strip().splitlines()[0]}")
+
+        save_class_hypothesis(chebi_id, entry, library_dir=self.library_dir)
+        return entry
 
 
 def main():

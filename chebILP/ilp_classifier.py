@@ -50,9 +50,10 @@ def build_seed_hypothesis(target_id, programs, body_preds):
     is not a declared ``body_pred``; it is skipped, since Popper would reject a rule naming it.
 
     Returns ``(seed_str, n_vars, n_body)``, or ``None`` when no chosen predicate survives. The
-    counts let the caller raise ``max_vars`` / ``max_body`` to fit the seed rather than drop it —
-    the conjunction can need more variables than the default bias allows (e.g. a ring predicate
-    contributes one atom variable per ring atom).
+    counts let the caller drop a seed that exceeds the standard ``max_vars`` / ``max_body`` — the
+    conjunction can need more variables than the default bias allows (e.g. a ring predicate
+    contributes one atom variable per ring atom), and widening the bounds to fit it would also
+    widen the baseline's search, making the comparison unfair.
     """
     from chebILP.predicate_generation.auxiliary_rules import predicate_arg_sorts
 
@@ -82,20 +83,44 @@ def build_seed_hypothesis(target_id, programs, body_preds):
     return f"chebi_{target_id}(A) :- {body}.", len(all_vars), len(literals)
 
 
-def build_pred_heuristic_lines(programs, body_preds, level=DEFAULT_HEURISTIC_LEVEL):
-    """``prefer_body_pred`` directives steering generation toward the chosen predicates.
+def seed_from_hypothesis(clause, target_id, body_preds):
+    """Validate an LLM class hypothesis for use as Popper's ``best_hypothesis``.
 
-    One line per chosen predicate that is actually a declared ``body_pred`` — Popper
-    error-exits on a ``prefer_body_pred`` naming an undeclared predicate, so a predicate with
-    an empty extension is skipped.
+    Returns ``(seed_str, n_vars, n_body)`` when the clause is a plain Datalog rule whose head is
+    ``chebi_<target>(A)`` and whose every body predicate is declared as a ``body_pred`` in the
+    bias, else ``None``. An aggregate/negation/comparison (``datalog_ok`` False) or a predicate
+    that never reached ``bk.pl`` (so is not a declared ``body_pred``) makes it unusable, exactly
+    as for the auto-built conjunction. The caller still checks it against ``max_vars``/``max_body``.
     """
+    from chebILP.predicate_generation.auxiliary_rules import analyze_hypothesis
+
+    info = analyze_hypothesis(clause)
+    if info is None or not info["datalog_ok"] or not info["body_preds"]:
+        return None
+    if info["head"] != (f"chebi_{target_id}", 1):
+        return None
+    if not info["body_preds"] <= body_preds:
+        return None
+    return info["clause"], info["n_vars"], info["n_body"]
+
+
+def build_hypothesis_heuristic_lines(clause, body_preds, level=DEFAULT_HEURISTIC_LEVEL):
+    """``prefer_body_pred`` directives for the predicates appearing in an LLM hypothesis.
+
+    Only names that are actually declared as ``body_pred`` in the bias are kept (Popper
+    error-exits on an undeclared one), in the order they appear in the hypothesis body.
+    """
+    from chebILP.predicate_generation.auxiliary_rules import analyze_hypothesis
+
+    info = analyze_hypothesis(clause)
+    if info is None:
+        return []
     names_in_bk = {pred for pred, _ in body_preds}
-    lines, seen = [], set()
-    for prog in programs:
-        if prog.name in names_in_bk and prog.name not in seen:
-            seen.add(prog.name)
-            lines.append(f"prefer_body_pred({prog.name},{level}).")
-    return lines
+    return [
+        f"prefer_body_pred({name},{level})."
+        for name in info["body_pred_names"] if name in names_in_bk
+    ]
+
 
 def log_subprocess_output(log_dir, phase, result):
     """Write subprocess stdout/stderr to the run log with timestamp."""
@@ -183,9 +208,14 @@ def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["c
         # auxiliary predicates by appending prefer_body_pred/2 directives (only those actually
         # declared as body_pred in the template — Popper error-exits on an undeclared one).
         if heuristic_guidance and predicate_set == RULE_PREDICATE_SET:
-            from chebILP.predicate_generation.auxiliary_rules import load_class_rules
-            programs = load_class_rules(target_id, library_dir=aux_library_dir)
-            hint_lines = build_pred_heuristic_lines(programs, _parse_body_preds(bias_content), level=heuristic_level)
+            from chebILP.predicate_generation.auxiliary_rules import load_class_hypothesis
+            # Steer toward the predicates in the LLM's class hypothesis.
+            hypothesis = load_class_hypothesis(target_id, library_dir=aux_library_dir)
+            hint_lines = []
+            if hypothesis and hypothesis.get("hypothesis"):
+                hint_lines = build_hypothesis_heuristic_lines(
+                    hypothesis["hypothesis"], _parse_body_preds(bias_content), level=heuristic_level
+                )
             if hint_lines:
                 bias_content = bias_content.rstrip("\n") + "\n\n%% heuristic guidance toward LLM-chosen predicates\n" + "\n".join(hint_lines) + "\n"
 
@@ -242,37 +272,33 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
             print(f"Missing files for ChEBI:{chebi_id} - skipping. exs_path: {exs_path}, bk_path: {bk_path}, bias_path: {bias_path}")
             continue
 
-        # Seed the search with the conjunction of the class's chosen auxiliary predicates.
+        # Seed the search with the LLM's class hypothesis.
         # Per-class, so it goes into a copy of the shared settings rather than the shared dict.
         class_settings = settings_parameters
         if seed_hypothesis and predicate_set == RULE_PREDICATE_SET:
-            from chebILP.predicate_generation.auxiliary_rules import load_class_rules
+            from chebILP.predicate_generation.auxiliary_rules import load_class_hypothesis
             with open(bias_path, "r") as f:
                 body_preds = _parse_body_preds(f.read())
-            programs = load_class_rules(chebi_id, library_dir=aux_library_dir)
-            seed_info = build_seed_hypothesis(chebi_id, programs, body_preds)
+            hypothesis = load_class_hypothesis(chebi_id, library_dir=aux_library_dir)
+            seed_info = None
+            if hypothesis and hypothesis.get("groundable") and hypothesis.get("hypothesis"):
+                seed_info = seed_from_hypothesis(hypothesis["hypothesis"], chebi_id, body_preds)
             if seed_info:
                 seed, n_vars, n_body = seed_info
-                # The seed must satisfy the bias it is validated against, so raise max_vars /
-                # max_body to fit it and regenerate this class's bias at the wider bounds. The
-                # search then runs at those bounds too — the seed is only reachable there.
-                eff_vars, eff_body = max(max_vars, n_vars), max(max_body, n_body)
-                if eff_vars != max_vars or eff_body != max_body:
-                    print(f"    Seed needs max_vars={n_vars}, max_body={n_body}; "
-                          f"raising bounds to max_vars={eff_vars}, max_body={eff_body} for this class.")
-                    build_bias(problem_dir, predicate_set, [chebi_id], selection_mode=selection_mode,
-                               selection_k=selection_k, max_vars=eff_vars, max_body=eff_body,
-                               max_clauses=max_clauses, heuristic_guidance=heuristic_guidance,
-                               aux_library_dir=aux_library_dir, heuristic_level=heuristic_level)
-                    bias_path = get_bias_path(chebi_id, split="train", base_dir=problem_dir,
-                                              predicate_set=predicate_set, selection_mode=selection_mode,
-                                              selection_k=selection_k, max_vars=eff_vars,
-                                              max_body=eff_body, max_clauses=max_clauses)
-                print(f"    Seeding search with: {seed}")
-                class_settings = dict(settings_parameters, best_hypothesis=seed)
+                # The seed must satisfy the bias it is validated against. Widening max_vars /
+                # max_body to fit an oversized seed also widens the search the baseline runs at,
+                # making the comparison unfair (and the 100-class run showed it losing whole
+                # classes for no F1 gain). So keep the standard bounds and drop a seed that does
+                # not fit — running unseeded at the same bias as every other config.
+                if n_vars > max_vars or n_body > max_body:
+                    print(f"    Seed needs max_vars={n_vars}, max_body={n_body} > bounds "
+                          f"(max_vars={max_vars}, max_body={max_body}); running unseeded.")
+                else:
+                    print(f"    Seeding search with: {seed}")
+                    class_settings = dict(settings_parameters, best_hypothesis=seed)
             else:
-                print(f"    No seed hypothesis for ChEBI:{chebi_id} "
-                      f"(no usable predicates in bk.pl); running unseeded.")
+                print(f"    No usable LLM hypothesis for ChEBI:{chebi_id} "
+                      f"(missing, did not ground, or does not fit the bias); running unseeded.")
 
         train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, class_settings, log_dir=results_dir)
         prog_str = train_result["prog_str"]  # string representation for display/storage

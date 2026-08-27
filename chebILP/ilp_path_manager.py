@@ -28,6 +28,11 @@ def get_aux_class_map_path(base_dir):
     return os.path.join(base_dir, "class_map.json")
 
 
+def get_aux_hypotheses_path(base_dir):
+    """JSON file mapping ``chebi_id -> {hypothesis, train_f1, ...}`` (the LLM's class rule)."""
+    return os.path.join(base_dir, "hypotheses.json")
+
+
 def get_aux_generation_log_path(chebi_id, base_dir):
     """Per-class LLM exchange log, now kept inside the library."""
     logs_dir = os.path.join(base_dir, "generation_logs")

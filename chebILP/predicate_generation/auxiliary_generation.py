@@ -179,6 +179,15 @@ class AuxiliaryGenerator(ABC):
         work here and leaves the result in ``ctx`` for :meth:`accept` to read back.
         """
 
+    def finalize(self, chebi_id, info, parsed, stems, ctx) -> dict | None:
+        """Post-selection hook, after the class's predicates are fixed and stored.
+
+        Runs once ``stems`` (the kept reused + new predicates) is known. Returns an optional
+        dict recorded on the selection and rendered in the log; the rule pipeline uses it to
+        evaluate and save the model's class hypothesis. Default: nothing to do.
+        """
+        return None
+
     def retriever_entry(self, stem, saved) -> dict:
         return {"name": saved.name, "description": saved.description, "kind": "rule", "stem": stem}
 
@@ -275,6 +284,9 @@ class AuxiliaryGenerator(ABC):
         set_class_predicates(chebi_id, stems, problem_dir=self.library_dir)
 
         selection = {"reused": kept_reused, "new": new_records, "rejected": rejected}
+        hypothesis_eval = self.finalize(chebi_id, info, parsed, stems, ctx)
+        if hypothesis_eval is not None:
+            selection["hypothesis_eval"] = hypothesis_eval
         self._write_log(chebi_id, info, prompt, parsed, raw, selection, attempts)
         return len(stems)
 
@@ -358,6 +370,15 @@ class AuxiliaryGenerator(ABC):
                 parts.append(f"    - `{r['name']}`{origin} — {code}{r['reason']}\n")
         else:
             parts.append("- Rejected: (none)\n")
+        h = selection.get("hypothesis_eval")
+        if h is not None:
+            f1 = h.get("train_f1")
+            f1_str = f"{f1:.3f}" if isinstance(f1, (int, float)) else "n/a (did not ground)"
+            parts.append(
+                f"- Class hypothesis train-F1: {f1_str}"
+                f" (TP {h.get('tp')}, FP {h.get('fp')}, TN {h.get('tn')}, FN {h.get('fn')})\n"
+            )
+            parts.append(f"    - `{h.get('hypothesis', '')}`\n")
         parts.append("\n")
         return "".join(parts)
 
@@ -385,4 +406,7 @@ class AuxiliaryGenerator(ABC):
         for item in parsed.new:
             parts.append(f"#### `{item.name}`\n\n{item.description}\n\n")
             parts.append("```\n" + item.program.strip("\n") + "\n```\n\n")
+        hypothesis = getattr(parsed, "hypothesis", None)
+        if hypothesis:
+            parts.append("### Class hypothesis\n\n```\n" + hypothesis.strip("\n") + "\n```\n\n")
         return "".join(parts)
