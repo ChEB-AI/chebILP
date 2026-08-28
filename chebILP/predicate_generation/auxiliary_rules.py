@@ -774,6 +774,52 @@ def analyze_hypothesis(clause_source: str) -> dict | None:
     }
 
 
+def prune_hypothesis(clause_source: str, available_predicates) -> str | None:
+    """Drop hypothesis body literals that reference an ``aux_`` predicate not available.
+
+    A predicate rejected during validation is absent from ``bk.pl`` and grounds to nothing, so
+    a hypothesis literal naming it makes the whole conjunction fail (F1 0) and makes the clause
+    unusable as a Popper seed — the predicate is not a declared ``body_pred``. Removing such
+    literals is safe: a rejected predicate contributes nothing where it fired and, where it was
+    dropped for firing almost always, its removal does not change which molecules match.
+
+    ``available_predicates`` is the set of predicate names actually in play (the class's kept
+    programs and their dependencies). Only ``aux_`` literals outside it are dropped; background
+    literals are always kept. A ``has_atom(A, X)`` link left with an unused atom variable ``X``
+    is dropped too. Returns the pruned clause, or ``None`` if nothing survives.
+    """
+    clause = next((c for c in _clauses(clause_source) if c[1]), None)
+    if clause is None:
+        return None
+    head, body = clause
+    literals = _body_literals(body)
+
+    def _name(lit: str) -> str | None:
+        m = _PRED_RE.match(lit.strip())
+        return m.group(1) if m else None
+
+    kept = [
+        lit for lit in literals
+        if not ((n := _name(lit)) and n.startswith("aux_") and n not in available_predicates)
+    ]
+
+    # Drop has_atom(A, X) links whose atom variable no longer appears in any other literal.
+    pruned = []
+    for i, lit in enumerate(kept):
+        if _name(lit) == "has_atom":
+            args = _head_args(lit.strip())
+            atom_var = args[1] if len(args) == 2 else None
+            if atom_var is not None and not any(
+                j != i and atom_var in _VAR_RE.findall(other) for j, other in enumerate(kept)
+            ):
+                continue
+        pruned.append(lit.strip())
+
+    if not pruned:
+        return None
+    return f"{head.strip()} :- {', '.join(pruned)}."
+
+
 def save_class_hypothesis(chebi_id, entry: dict, library_dir: str | None = None) -> None:
     """Record one class's LLM hypothesis (clause text + train-F1 metrics) in the library."""
     import json

@@ -37,6 +37,7 @@ from chebILP.predicate_generation.auxiliary_rules import (
     derive_rule_extensions,
     load_class_rules,
     parse_rule_program,
+    prune_hypothesis,
     resolve_rule_dependencies,
     rule_program_error,
     save_class_hypothesis,
@@ -483,17 +484,25 @@ fit; only write NEW rules for properties they do not already cover.
         clause are saved to the library's ``hypotheses.json`` for ``--seed_hypothesis`` /
         ``--heuristic_guidance`` to consume.
         """
-        hypothesis = (getattr(parsed, "hypothesis", "") or "").strip()
-        if not hypothesis:
+        raw_hypothesis = (getattr(parsed, "hypothesis", "") or "").strip()
+        if not raw_hypothesis:
             return None
 
         head = f"chebi_{chebi_id}"
+        # Prune literals naming predicates that were rejected (so are absent from bk.pl and
+        # would ground empty): keeping them fails the whole conjunction and makes the clause
+        # unusable as a seed. Kept predicates + their library dependencies are what is in play.
+        programs = load_class_rules(chebi_id, library_dir=self.library_dir)
+        dependencies = resolve_rule_dependencies(programs, self.library_dir)
+        available = {p.name for p in programs + dependencies}
+        hypothesis = prune_hypothesis(raw_hypothesis, available) or raw_hypothesis
+
         entry = {"hypothesis": hypothesis, "train_f1": None, "tp": None, "fp": None,
                  "tn": None, "fn": None, "groundable": False}
+        if hypothesis != raw_hypothesis:
+            entry["pruned_from"] = raw_hypothesis
 
         if ctx["val_ids"]:
-            programs = load_class_rules(chebi_id, library_dir=self.library_dir)
-            dependencies = resolve_rule_dependencies(programs, self.library_dir)
             hyp_prog = RuleProgram(name=head, description="LLM class hypothesis",
                                    source=hypothesis, source_file="<hypothesis>")
             try:

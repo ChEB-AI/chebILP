@@ -38,8 +38,22 @@ class ModelRefusal(RuntimeError):
     """
 
 
+def _drop_api_key_auth() -> None:
+    """Remove API-key auth from the process env so the spawned CLI uses its OAuth login.
+
+    ``generate_auxiliary_*`` calls ``load_dotenv()``, which injects ``ANTHROPIC_API_KEY``
+    from ``.env`` into ``os.environ``. The Agent SDK builds the child's environment as
+    ``{**os.environ, **options.env}``, so a key present here takes precedence over the
+    CLI's logged-in subscription and bills the metered key instead. Passing ``options.env``
+    cannot mask it — a merge does not delete an inherited key — so it must be popped here.
+    """
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        os.environ.pop(var, None)
+
+
 async def _run_query(model: str, system: str, prompt: str, schema: type[BaseModel]) -> ResultMessage | None:
     """Drive one CLI query to completion and return its final ``ResultMessage``."""
+    _drop_api_key_auth()
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system,          # our contract, replacing the CLI's default prompt
