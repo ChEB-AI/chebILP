@@ -30,6 +30,7 @@ def _make_ilp_builder(args):
         aux_timeout = args.get("aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = args.get("predicate_dir")
         computed_facts = args.get("computed_facts", False)
+        write_aleph = not args.get("no_aleph", False)
     else:
         fg_mode = args.fg_mode
         chebi_version = args.chebi_version
@@ -40,6 +41,7 @@ def _make_ilp_builder(args):
         aux_timeout = getattr(args, "aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = getattr(args, "predicate_dir", None)
         computed_facts = getattr(args, "computed_facts", False)
+        write_aleph = not getattr(args, "no_aleph", False)
 
     if fg_mode:
         return FGILPProblemBuilder(
@@ -58,6 +60,7 @@ def _make_ilp_builder(args):
         aux_timeout=aux_timeout,
         aux_library_dir=aux_library_dir,
         computed_facts=computed_facts,
+        write_aleph=write_aleph,
     )
 
 
@@ -114,6 +117,7 @@ def _handle_learn(args):
             seed_hypothesis=args.seed_hypothesis,
             heuristic_guidance=args.heuristic_guidance,
             aux_library_dir=args.predicate_dir,
+            tool=args.tool,
         )
 
 
@@ -401,6 +405,8 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Minimum descendant molecules per label class; selects the dataset subset (default: 25).")
     parser.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
+    parser.add_argument("--no_aleph", action="store_true",
+                        help="Skip emitting the Aleph-format train files (.b/.f/.n).")
 
 
 def _handle_prepare_dataset(args):
@@ -478,6 +484,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run ILP learning (training + validation) for the given ChEBI classes.",
     )
     sp_learn.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
+    sp_learn.add_argument("--tool", type=str, default="popper", choices=["popper", "aleph"],
+                          help="ILP engine: 'popper' (default) or 'aleph'.")
     sp_learn.add_argument("--timeout", type=int, default=20, help="Timeout for ILP solver in seconds.")
     sp_learn.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use.")
     sp_learn.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")

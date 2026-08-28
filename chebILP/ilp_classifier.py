@@ -11,7 +11,7 @@ import traceback
 import tqdm
 from typing import Literal, Optional
 
-from chebILP.ilp_path_manager import get_bias_path, get_bk_path, get_exs_path
+from chebILP.ilp_path_manager import get_bias_path, get_bk_path, get_exs_path, get_aleph_stem
 from chebILP.utils import AVAILABLE_PREDICATE_SETS
 
 # The subsystem whose auxiliary predicates are ASP rules whose heads can be analysed for
@@ -183,7 +183,12 @@ print(json.dumps(result))
     except json.decoder.JSONDecodeError:
         output = {"prog_str": None, "score": None}
         print(f"    Failed to parse JSON output. See logs for details.")
-    
+
+    # Time-to-best hypothesis: Popper's anytime search prints "<seconds>s New best hypothesis:"
+    # to stderr on each improvement; the last one's timestamp is the time to the final program.
+    best_times = re.findall(r"([\d.]+)s New best hypothesis:", result.stderr or "")
+    output["time_to_best"] = float(best_times[-1]) if best_times else None
+
     return output
 
 
@@ -223,7 +228,7 @@ def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["c
             f.write(bias_content)
 
 
-def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL):
+def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, tool:Literal["popper", "aleph"]="popper"):
     if problem_dir is None:
         problem_dir = os.path.join("data", "ilp_problems")
     # Build settings parameters for Popper
@@ -238,6 +243,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         settings_parameters["size_weight"] = mdl_weight_size
 
     with open(os.path.join(results_dir, "config.yml"), "a+") as f:
+        f.write(f"tool: {tool}\n")
         f.write(f"problem_dir: {problem_dir}\n")
         f.write(f"predicate_set: {predicate_set}\n")
         f.write(f"selection_mode: {selection_mode}\n")
@@ -260,6 +266,9 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         print(f"Warning: --seed_hypothesis only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'.")
     if heuristic_guidance and predicate_set != RULE_PREDICATE_SET:
         print(f"Warning: --heuristic_guidance only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'.")
+    if tool == "aleph" and selection_mode is not None:
+        print(f"Warning: --tool aleph does not apply predicate selection; the Aleph problem uses "
+              f"the full '{predicate_set}' predicate set (selection_mode='{selection_mode}' ignored).")
 
     for chebi_id in classes_list:
         start_time = time.perf_counter()
@@ -275,6 +284,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         # Seed the search with the LLM's class hypothesis.
         # Per-class, so it goes into a copy of the shared settings rather than the shared dict.
         class_settings = settings_parameters
+        seed_clause = None  # captured for the Aleph runner too, not just Popper's best_hypothesis
         if seed_hypothesis and predicate_set == RULE_PREDICATE_SET:
             from chebILP.predicate_generation.auxiliary_rules import load_class_hypothesis
             with open(bias_path, "r") as f:
@@ -295,12 +305,23 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
                           f"(max_vars={max_vars}, max_body={max_body}); running unseeded.")
                 else:
                     print(f"    Seeding search with: {seed}")
+                    seed_clause = seed
                     class_settings = dict(settings_parameters, best_hypothesis=seed)
             else:
                 print(f"    No usable LLM hypothesis for ChEBI:{chebi_id} "
                       f"(missing, did not ground, or does not fit the bias); running unseeded.")
 
-        train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, class_settings, log_dir=results_dir)
+        if tool == "aleph":
+            from chebILP.aleph_runner import run_ilp_training_aleph
+            aleph_stem = get_aleph_stem(chebi_id, predicate_set=predicate_set, base_dir=problem_dir)
+            missing = [aleph_stem + ext for ext in (".b", ".f", ".n") if not os.path.exists(aleph_stem + ext)]
+            if missing:
+                print(f"Missing Aleph file(s) for ChEBI:{chebi_id}: {', '.join(missing)}; "
+                      f"run build_samples + build_bk (Aleph output on) first - skipping.")
+                continue
+            train_result = run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout=timeout, max_body=max_body, seed_clause=seed_clause, log_dir=results_dir)
+        else:
+            train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, class_settings, log_dir=results_dir)
         prog_str = train_result["prog_str"]  # string representation for display/storage
         score = train_result["score"]
         if score:
@@ -335,6 +356,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
                 "chebi_id": chebi_id,
                 "train_score": {"TP": tp, "FP": fp, "TN": tn, "FN": fn} if score else None,
                 "time_taken": time.perf_counter() - start_time,
+                "time_to_best": train_result.get("time_to_best"),
                 "num_programs": train_result.get("num_programs"),
                 "program": prog_str,
                 "validation_score": conf_matrix,

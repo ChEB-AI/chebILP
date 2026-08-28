@@ -12,7 +12,7 @@ from chebILP.molecule_processing.fg_matching import get_chembl_fgs, get_chebi_fg
 from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
-from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
+from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path, get_aleph_stem
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
 
 
@@ -43,12 +43,39 @@ def load_fowl_smarts(path=FOWL_SMARTS_PATH) -> dict[str, str]:
             mapping[chebi_id.strip()] = smarts.strip()
     return mapping
 
+def _aleph_mode_str(name, arity, is_head):
+    """Aleph mode declaration for a predicate:
+    head args are all ``+any`` (input); a body pred's first arg is ``+any`` and the rest
+    ``-any`` (output), giving the natural input/output chaining."""
+    if is_head or arity == 1:
+        args = ["+any"] * arity
+    else:
+        args = ["+any"] + ["-any"] * (arity - 1)
+    kind = "modeh" if is_head else "modeb"
+    return f":- {kind}(*, {name}({', '.join(args)}))."
+
+
+def build_aleph_background(head_name, body_predicates, train_bk_lines):
+    """Assemble the structural Aleph ``.b`` for a class from its Popper-format inputs.
+
+    Deliberately carries no ``:- set(...)`` or ``:- dynamic``
+    directives -- those are injected at learn time (chebILP.aleph_runner)."""
+    body = sorted(body_predicates)
+    lines = [":- use_module(library(lists)).", "", _aleph_mode_str(head_name, 1, True)]
+    lines += [_aleph_mode_str(name, arity, False) for name, arity in body]
+    lines.append("")
+    lines += [f":- determination({head_name}/1, {name}/{arity})." for name, arity in body]
+    lines += ["", "%% ===== background knowledge ====="]
+    return "\n".join(lines) + "\n" + "\n".join(train_bk_lines) + "\n"
+
+
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True):
+    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True, write_aleph: bool = True):
         self.predicate_set = predicate_set
         self.problem_dir = os.path.join(base_dir, "ilp_problems")
         os.makedirs(self.problem_dir, exist_ok=True)
+        self.write_aleph = write_aleph and predicate_set not in ("chebi_fg_rules", "chebi_fg_learned_rules")
         # Per-call wall-clock budget for LLM-generated auxiliary predicates.
         self.aux_timeout = aux_timeout
         self.aux_library_dir = aux_library_dir
@@ -252,6 +279,11 @@ class ILPProblemBuilder:
             with open(plain_bias_path, "w+") as f:
                 f.write("\n".join(bias_lines) + "\n")
 
+            if self.write_aleph:
+                aleph_b = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir) + ".b"
+                with open(aleph_b, "w+") as f:
+                    f.write(build_aleph_background(f"chebi_{target_id}", body_predicates, prolog_lines_by_split["train"]))
+
         if failed_rule_classes:
             print(f"\n{len(failed_rule_classes)} class(es) built without their auxiliary rule "
                   f"extensions because grounding failed: {', '.join(failed_rule_classes)}")
@@ -334,6 +366,13 @@ class ILPProblemBuilder:
             with open(exs_path, "w+" if posneg == "pos" else "a") as f:
                 for sample in df.index:
                     f.write(f"{posneg}(chebi_{target_id}({sample})).\n")
+
+        if self.write_aleph:
+            aleph_stem = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir)
+            for posneg, ext in [("pos", ".f"), ("neg", ".n")]:
+                with open(aleph_stem + ext, "w+") as f:
+                    for sample in samples_by_split[(posneg, "train")].index:
+                        f.write(f"chebi_{target_id}({sample}).\n")
 
         # sum up all positive and negative samples across splits
         return sum(len(v) for k, v in samples_by_split.items() if k[0] == "pos"), sum(len(v) for k, v in samples_by_split.items() if k[0] == "neg")
