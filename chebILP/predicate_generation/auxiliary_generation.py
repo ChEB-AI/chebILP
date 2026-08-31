@@ -179,6 +179,15 @@ class AuxiliaryGenerator(ABC):
         work here and leaves the result in ``ctx`` for :meth:`accept` to read back.
         """
 
+    def repair(self, parsed, blocks, ctx, chebi_id, info) -> None:
+        """One targeted feedback round per failing item, run right after :meth:`prepare`.
+
+        A pipeline that re-prompts the model to fix a failing program does so here: it mutates
+        ``blocks`` in place with repaired sources, re-validates, and records into ``ctx`` both
+        the feedback exchanges (``ctx["repairs"]``, rendered in the log) and any predicate it
+        gave up on (``ctx["excluded_labels"]`` / ``ctx["excluded_names"]``). Default: no round.
+        """
+
     def finalize(self, chebi_id, info, parsed, stems, ctx) -> dict | None:
         """Post-selection hook, after the class's predicates are fixed and stored.
 
@@ -235,6 +244,10 @@ class AuxiliaryGenerator(ABC):
 
         blocks = [(f"chebi_{chebi_id}_block_{i}", self.to_source(item)) for i, item in enumerate(parsed.new)]
         self.prepare(blocks, ctx)
+        # One targeted feedback round per failing item (no-op for pipelines that skip it). It
+        # rewrites blocks with repaired sources and marks any predicate it excluded, so the
+        # gate loops below store the repaired programs and drop only what stayed broken.
+        self.repair(parsed, blocks, ctx, chebi_id, info)
 
         rejected: list[dict] = []
 
@@ -287,6 +300,10 @@ class AuxiliaryGenerator(ABC):
         hypothesis_eval = self.finalize(chebi_id, info, parsed, stems, ctx)
         if hypothesis_eval is not None:
             selection["hypothesis_eval"] = hypothesis_eval
+        if ctx.get("repairs"):
+            selection["repairs"] = ctx["repairs"]
+        # Fold the feedback-round calls into the cost/reask totals the log reports.
+        attempts = list(attempts) + ctx.get("extra_attempts", [])
         self._write_log(chebi_id, info, prompt, parsed, raw, selection, attempts)
         return len(stems)
 
@@ -370,6 +387,8 @@ class AuxiliaryGenerator(ABC):
                 parts.append(f"    - `{r['name']}`{origin} — {code}{r['reason']}\n")
         else:
             parts.append("- Rejected: (none)\n")
+        if selection.get("repairs"):
+            parts.append(self._format_repairs(selection["repairs"]))
         h = selection.get("hypothesis_eval")
         if h is not None:
             f1 = h.get("train_f1")
@@ -380,6 +399,20 @@ class AuxiliaryGenerator(ABC):
             )
             parts.append(f"    - `{h.get('hypothesis', '')}`\n")
         parts.append("\n")
+        return "".join(parts)
+
+    def _format_repairs(self, repairs) -> str:
+        """Render the feedback round: what failed, the feedback given, and the outcome."""
+        parts = ["\n### Feedback rounds\n\n"]
+        for r in repairs:
+            outcome = r.get("outcome", "")
+            parts.append(f"- `{r.get('name')}` ({r.get('kind')}) → {outcome}\n")
+            if r.get("feedback"):
+                fb = r["feedback"].strip().replace("\n", "\n      ")
+                parts.append(f"    - feedback: {fb}\n")
+            if r.get("after"):
+                parts.append("    - repaired to:\n\n      ```\n      "
+                             + r["after"].strip().replace("\n", "\n      ") + "\n      ```\n")
         return "".join(parts)
 
     def _format_failed_attempts(self, failed) -> str:
