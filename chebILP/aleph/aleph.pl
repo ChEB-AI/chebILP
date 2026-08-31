@@ -1066,7 +1066,7 @@ get_modes(PSym/Arity,L):-
 search(S,Nodes):-
 	arg(36,S,Time),
 	Inf is inf,
-	Time =\= Inf, 
+	Time =\= Inf,
 	SearchTime is integer(Time),
 	SearchTime > 0, !,
 	catch(time_bound_call(SearchTime,searchlimit,graphsearch(S,_)),
@@ -1203,9 +1203,16 @@ get_search_settings(S):-
 %	. minacc and minpos values reached in rrr search
 %	. best hypothesis has accuracy 1.0 if evalfn=accuracy
 %	. best hypothesis covers all positive examples
+% chebILP: stop the search as soon as the total wall budget is spent. Polled per node
+% expansion, so it is reliable where Aleph's alarm-based searchtime is inert (modern SWI does
+% not flag alarm/3 built_in, so init/1 stubs alarm/remove_alarm as no-ops). Fails when
+% run_aleph.pl has not published a budget, leaving standalone Aleph behaviour unchanged.
+discontinue_search(_,_,_):-
+	wall_remaining(R), R =< 0, !,
+	p_message('wall budget reached').
 discontinue_search(S,[P,_,_,F|_]/_,_):-
 	arg(39,S,RlsType),
-	RlsType = rrr, 
+	RlsType = rrr,
 	arg(13,S,MinPos),
 	P >= MinPos,
 	arg(19,S,MinScore),
@@ -4527,11 +4534,11 @@ induce:-
         (setting(gcws,true) -> sphyp, addgcws; addhyp),
 	show_atoms_left,
 	record_atoms_left,
-        % chebILP: total-time budget for the greedy cover. searchtime bounds each clause's
-        % search; this bounds the whole induce, so --timeout is a real total budget and
-        % show(theory) always runs on the clauses committed so far (empty if none qualified).
-        ( setting(searchtime,TL), number(TL), TL > 0,
-          '$aleph_global'(induce_start,IT0), stopwatch(TNow), TNow - IT0 >= TL
+        % chebILP: total wall budget for the greedy cover. wall_remaining counts the seconds
+        % left in the --timeout (data load included, wall clock); when it is spent, end induce so
+        % show(theory) runs on the clauses committed so far (empty if none qualified).
+        % discontinue_search stops each search on the same remainder, so total wall stays in budget.
+        ( wall_remaining(R), R =< 0
           -> retractall('$aleph_global'(atoms_left,atoms_left(pos,_))),
              asserta('$aleph_global'(atoms_left,atoms_left(pos,[])))
           ; true ),
@@ -9670,6 +9677,14 @@ stopwatch(Time) :-
 
 wallclock(Time):-
 	statistics(real_time,[Time|_]).
+
+% chebILP: seconds of the total wall budget still remaining. Fails (no clamp, standalone
+% Aleph behaviour) unless run_aleph.pl published wall_start/wall_budget.
+wall_remaining(R):-
+	'$aleph_global'(wall_start, T0),
+	'$aleph_global'(wall_budget, B),
+	get_time(Now),
+	R is B - (Now - T0).
 
 time(P,N,[Mean,Sd]):-
         time_loop(N,P,Times),

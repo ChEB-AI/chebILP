@@ -22,10 +22,11 @@ ALEPH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aleph")
 RUN_ALEPH_PL = os.path.join(ALEPH_DIR, "run_aleph.pl")
 
 # Aleph search defaults (from the scripts/_aleph_driver.py prototype). clauselength is mapped
-# from the learn-time max_body; searchtime bounds each clause's search so a long run stops
-# cleanly and still prints its best theory (rather than being SIGKILLed on subprocess timeout).
+# from the learn-time max_body; searchtime (set below = timeout) is read by run_aleph.pl as the
+# total wall budget the run self-terminates within, so it stops cleanly and prints its best
+# theory rather than being SIGKILLed on the subprocess timeout.
 _DEFAULT_SETTINGS = {"i": 3, "noise": 200, "minpos": 2, "nodes": 50000, "verbosity": 0}
-_SUBPROCESS_TIMEOUT_BUFFER = 60  # extra wall-clock over the internal budget, for saturation + IO
+_SUBPROCESS_TIMEOUT_BUFFER = 30  # headroom over the internal wall budget for swipl startup + IO
 _MAX_SEED_UNITS = 6  # above this, seed with the full hypothesis only (avoid 2^n start nodes)
 
 _BODY_PRED_RE = re.compile(r"body_pred\(\s*([a-z_][A-Za-z0-9_]*)\s*,\s*(\d+)\s*\)")
@@ -264,11 +265,13 @@ def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=8,
         shutil.copyfile(aleph_stem + ext, run_stem + ext)
 
     swipl_stem = os.path.abspath(run_stem).replace("\\", "/")
-    # aleph.pl bounds the whole greedy induce by searchtime (= timeout), but that guard only
-    # fires between clauses, so the last clause can start near the budget and run ~timeout more.
-    # The outer wall-clock cap must exceed that (~2x) so the internal guard ends the run cleanly
-    # with a printed theory, rather than a SIGKILL mid-search.
-    hard_timeout = 2 * timeout + _SUBPROCESS_TIMEOUT_BUFFER
+    # run_aleph.pl publishes a wall budget (= timeout, spanning the problem data load) that
+    # aleph.pl enforces by polling: discontinue_search stops each search once the budget is spent
+    # and the induce loop ends with it, so the run self-terminates near timeout with a printed
+    # theory. This matches Popper, whose timeout is a single wall clock started before its data
+    # load. The outer cap is then only a safety net for swipl startup + final IO, not a 2x
+    # multiplier. (Aleph's own alarm-based searchtime is inert here -- SWI stubs alarm/3.)
+    hard_timeout = timeout + _SUBPROCESS_TIMEOUT_BUFFER
     try:
         result = subprocess.run(
             ["swipl", "-q", "-g", f"main('{swipl_stem}')", "-t", "halt", RUN_ALEPH_PL],
