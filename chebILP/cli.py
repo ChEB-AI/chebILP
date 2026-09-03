@@ -680,6 +680,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to chebi_graph.pkl for class name and parent lookup (optional).",
     )
+    sp_rtnl.add_argument(
+        "--aux_library_dir", type=str,
+        default=None,
+        help="Auxiliary library directory (llm_generated_rules/... ) whose aux_* predicate "
+             "descriptions annotate the LLM-generated predicates in the rule (optional).",
+    )
     sp_rtnl.set_defaults(func=_handle_rule_to_nl)
 
     return parser
@@ -701,7 +707,7 @@ def _handle_rule_to_nl(args):
     elif args.chebi_graph_path:
         print(f"Warning: chebi_graph_path '{args.chebi_graph_path}' does not exist. Proceeding without ChEBI graph.")
 
-    print(translate_rule(rule, chebi_graph=chebi_graph))
+    print(translate_rule(rule, chebi_graph=chebi_graph, aux_library_dir=args.aux_library_dir))
 
 
 def _handle_explain(args):

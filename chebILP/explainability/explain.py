@@ -7,7 +7,9 @@ from xclingo import XclingoControl
 
 from chebILP.ilp_problem_builder import build_background_chemlog
 from chebILP.utils import split_prolog_literals
-from chebILP.explainability.rule_to_nl import _ELEMENT_NAMES, _num_word, _sort_clause_literals, _get_a_an
+from chebILP.explainability.rule_to_nl import (
+    _ELEMENT_NAMES, _num_word, _sort_clause_literals, _get_a_an, _format_aux_name,
+)
 
 
 def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
@@ -21,16 +23,22 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
             return f'%!trace {{"% is {article} {name} atom", {A}}} {call}.'
         if pred_name == "charge0":
             return f'%!trace {{"% has no formal charge", {A}}} {call}.'
-        m = re.fullmatch(r"charge_?([pm])(\d*)", pred_name)
+        if pred_name == "charge_p":
+            return f'%!trace {{"% has a positive formal charge", {A}}} {call}.'
+        if pred_name == "charge_n":
+            return f'%!trace {{"% has a negative formal charge", {A}}} {call}.'
+        m = re.fullmatch(r"charge_m(\d+)", pred_name)
         if m:
-            sign = "+" if m.group(1) == "p" else "-"
-            val = m.group(2) or "1"
-            return f'%!trace {{"% has formal charge {sign}{val}", {A}}} {call}.'
+            return f'%!trace {{"% has formal charge -{m.group(1)}", {A}}} {call}.'
+        m = re.fullmatch(r"charge(\d+)", pred_name)
+        if m:
+            return f'%!trace {{"% has formal charge +{m.group(1)}", {A}}} {call}.'
         m = re.fullmatch(r"has_(\d+)_hs", pred_name)
         if m:
             n = int(m.group(1))
             noun = "hydrogen atom" if n == 1 else "hydrogen atoms"
-            return f'%!trace {{"% has {_num_word(n)} {noun}", {A}}} {call}.'
+            count = "no" if n == 0 else _num_word(n)
+            return f'%!trace {{"% has {count} {noun}", {A}}} {call}.'
         m = re.fullmatch(r"has_at_least_(\d+)_hs", pred_name)
         if m:
             n = int(m.group(1))
@@ -42,6 +50,11 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
         if pred_name.startswith("steroid_"):
             num = pred_name.replace("steroid_", "")
             return f'%!trace {{"% is at steroid position {num}", {A}}} {call}.'
+        if pred_name == "in_ring":
+            return f'%!trace {{"% is in a ring", {A}}} {call}.'
+        m = re.fullmatch(r"in_ring(\d+)", pred_name)
+        if m:
+            return f'%!trace {{"% is in a {m.group(1)}-membered ring", {A}}} {call}.'
         if pred_name == "aromatic":
             return f'%!trace {{"% is aromatic", {A}}} {call}.'
         if pred_name == "aliphatic":
@@ -52,6 +65,8 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
             return f'%!trace {{"% has a negative net charge", {A}}} {call}.'
         if pred_name == "net_charge_neutral":
             return f'%!trace {{"% has no net charge", {A}}} {call}.'
+        if pred_name.startswith("aux_"):
+            return f'%!trace {{"% satisfies the property \'{_format_aux_name(pred_name)}\'", {A}}} {call}.'
         return f'%!trace {{"% satisfies {pred_name}", {A}}} {call}.'
 
     if arity == 2:
@@ -61,10 +76,15 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
             return f'%!trace {{"% has atom %", {A1}, {A2}}} {call}.'
         if pred_name == "has_bond_to":
             return f'%!trace {{"% has a bond to %", {A1}, {A2}}} {call}.'
+        m = re.fullmatch(r"bSTEREO([A-Z]+)", pred_name)
+        if m:
+            return f'%!trace {{"% has a stereo bond to % ({m.group(1)} configuration)", {A1}, {A2}}} {call}.'
         if re.fullmatch(r"b[A-Z]+", pred_name):
             bond_type = pred_name[1:].lower()
             article = _get_a_an(bond_type)
             return f'%!trace {{"% has {article} {bond_type} bond to %", {A1}, {A2}}} {call}.'
+        if pred_name.startswith("aux_"):
+            return f'%!trace {{"% and % form a {_format_aux_name(pred_name)}", {A1}, {A2}}} {call}.'
         return f'%!trace {{"% is related to % via {pred_name}", {A1}, {A2}}} {call}.'
 
     return None
