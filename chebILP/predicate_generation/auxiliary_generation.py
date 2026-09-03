@@ -401,8 +401,18 @@ class AuxiliaryGenerator(ABC):
         parts.append("\n")
         return "".join(parts)
 
+    @staticmethod
+    def _format_confusion(m) -> str | None:
+        """One-line ``F1 (TP.. FP.. TN.. FN..)`` for a metrics dict, or ``None`` if absent."""
+        if not m:
+            return None
+        f1 = m.get("train_f1")
+        f1_str = f"{f1:.3f}" if isinstance(f1, (int, float)) else "n/a"
+        return f"F1 {f1_str} (TP {m.get('tp')}, FP {m.get('fp')}, TN {m.get('tn')}, FN {m.get('fn')})"
+
     def _format_repairs(self, repairs) -> str:
-        """Render the feedback round: what failed, the feedback given, and the outcome."""
+        """Render the feedback round: what failed, the feedback given, the before/after metrics,
+        and the outcome. The before→after lines make plain whether the repair helped or hurt."""
         parts = ["\n### Feedback rounds\n\n"]
         for r in repairs:
             outcome = r.get("outcome", "")
@@ -410,6 +420,18 @@ class AuxiliaryGenerator(ABC):
             if r.get("feedback"):
                 fb = r["feedback"].strip().replace("\n", "\n      ")
                 parts.append(f"    - feedback: {fb}\n")
+            before_cm = self._format_confusion(r.get("before_metrics"))
+            after_cm = self._format_confusion(r.get("after_metrics"))
+            if before_cm is not None or after_cm is not None:
+                parts.append(f"    - before: {before_cm or 'n/a (did not ground)'}\n")
+                if after_cm is not None:
+                    parts.append(f"    - after:  {after_cm}\n")
+            bf, af = r.get("before_fire"), r.get("after_fire")
+            if bf is not None or af is not None:
+                line = f"    - fires: {bf:.0%}" if bf is not None else "    - fires: n/a"
+                if af is not None:
+                    line += f" → {af:.0%}"
+                parts.append(line + "\n")
             if r.get("after"):
                 parts.append("    - repaired to:\n\n      ```\n      "
                              + r["after"].strip().replace("\n", "\n      ") + "\n      ```\n")

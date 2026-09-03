@@ -510,6 +510,14 @@ fit; only write NEW rules for properties they do not already cover.
         by_mol = ctx["extensions"].get(prog.name, {})
         return f"fires on {len(by_mol) / len(ctx['val_ids']):.0%}"
 
+    def _fire_fraction(self, label, ctx) -> float | None:
+        """Fraction of validation molecules a new predicate currently fires on, or ``None`` when
+        it has no grounding (structural failure, or no validation molecules)."""
+        prog = ctx["progs"].get(label)
+        if prog is None or not ctx.get("val_ids"):
+            return None
+        return len(ctx["extensions"].get(prog.name, {})) / len(ctx["val_ids"])
+
     def _predicate_status(self, label, ctx) -> tuple[str, str]:
         """Classify one new predicate's current state as ``ok``/``structural``/``no_fire``/``over_fire``.
 
@@ -615,7 +623,8 @@ fit; only write NEW rules for properties they do not already cover.
                     self.prepare(blocks, ctx)
                 continue
             record = {"name": item.name, "kind": kind, "feedback": feedback,
-                      "before": item.program, "after": None, "outcome": "kept"}
+                      "before": item.program, "after": None, "outcome": "kept",
+                      "before_fire": self._fire_fraction(label, ctx)}
             ctx["repairs"].append(record)
             repaired.add(i)
             new_program = self._repair_predicate_call(chebi_id, info, ctx, item, feedback)
@@ -628,6 +637,7 @@ fit; only write NEW rules for properties they do not already cover.
             record["after"] = new_program
             blocks[i] = (label, self._source_text(item.name, item.description, new_program))
             self.prepare(blocks, ctx)  # re-validate + re-ground with the repaired program
+            record["after_fire"] = self._fire_fraction(label, ctx)
             kind2, _ = self._predicate_status(label, ctx)
             if kind2 == "structural":
                 self._exclude(label, item.name, ctx)
@@ -728,6 +738,21 @@ Answer with a single JSON object:
             return "low_accuracy", feedback, metrics
         return "ok", "", metrics
 
+    @staticmethod
+    def _repair_improves(before_metrics, after_metrics) -> bool:
+        """Whether a repaired hypothesis should replace the original.
+
+        The repair must ground (``after_metrics`` present); if the original also ground it must
+        score at least as well. A non-grounding original is beaten by any groundable repair. Ties
+        keep the repair — the model was explicitly asked to improve, and an equal train-F1 is not a
+        regression.
+        """
+        if after_metrics is None:
+            return False
+        if before_metrics is None:
+            return True
+        return after_metrics["train_f1"] >= before_metrics["train_f1"]
+
     def finalize(self, chebi_id, info, parsed, stems, ctx) -> dict | None:
         """Evaluate the model's class hypothesis, give it one feedback round, and store it.
 
@@ -748,22 +773,35 @@ Answer with a single JSON object:
         available = {p.name for p in programs + dependencies}
 
         hypothesis = raw_hypothesis
-        repaired = False
+        kept_repair = False
+        hyp_record = None
         if ctx["val_ids"]:
-            kind, feedback, _ = self._score_hypothesis(chebi_id, hypothesis, programs, dependencies, ctx)
+            kind, feedback, before_metrics = self._score_hypothesis(chebi_id, hypothesis, programs, dependencies, ctx)
             if kind != "ok":
-                record = {"name": "hypothesis", "kind": kind, "feedback": feedback,
-                          "before": hypothesis, "after": None, "outcome": "kept"}
-                ctx["repairs"].append(record)
+                hyp_record = {"name": "hypothesis", "kind": kind, "feedback": feedback,
+                              "before": hypothesis, "after": None, "outcome": "kept",
+                              "before_metrics": before_metrics}
+                ctx["repairs"].append(hyp_record)
                 new_hypothesis = self._repair_hypothesis_call(
                     chebi_id, info, ctx, hypothesis, feedback, available
                 )
-                repaired = True
-                if new_hypothesis:
-                    hypothesis = new_hypothesis.strip()
-                    record["after"] = hypothesis
+                if not new_hypothesis:
+                    hyp_record["outcome"] = "call failed"
                 else:
-                    record["outcome"] = "call failed"
+                    new_hypothesis = new_hypothesis.strip()
+                    hyp_record["after"] = new_hypothesis
+                    _, _, after_metrics = self._score_hypothesis(
+                        chebi_id, new_hypothesis, programs, dependencies, ctx)
+                    hyp_record["after_metrics"] = after_metrics
+                    # Keep the repair only when it does not regress: it must ground, and if the
+                    # original also ground it must not lower train-F1. A repair that grounds worse
+                    # — or no longer grounds — is discarded and the original hypothesis stands, so
+                    # a feedback round can never lower the class's train-F1.
+                    if self._repair_improves(before_metrics, after_metrics):
+                        hypothesis = new_hypothesis
+                        kept_repair = True
+                    else:
+                        hyp_record["outcome"] = "reverted (no improvement)"
 
         # Safety net: drop any lingering reference to an excluded/unavailable aux predicate so
         # the clause stays usable as a Popper seed even if the repair left one in.
@@ -774,7 +812,7 @@ Answer with a single JSON object:
                  "tn": None, "fn": None, "groundable": False}
         if final_hypothesis != raw_hypothesis:
             entry["pruned_from"] = raw_hypothesis
-        if repaired:
+        if kept_repair:
             entry["repaired"] = True
         if ctx["val_ids"]:
             _, _, metrics = self._score_hypothesis(chebi_id, final_hypothesis, programs, dependencies, ctx)
@@ -816,8 +854,7 @@ Problem:
 {feedback}
 {avail_str}{self._excluded_note(ctx)}
 Rewrite the hypothesis: one rule `chebi_{chebi_id}(A) :- ...` defining the class as a plain
-conjunction of the available predicates (no aggregates, negation or arithmetic; head variable
-A is the molecule; tie an atom-level predicate to the molecule with has_atom(A, X) first).
+conjunction of the available predicates (no aggregates, negation or arithmetic).
 
 Answer with a single JSON object:
 - "reasoning": think briefly about what to change.
