@@ -242,9 +242,11 @@ def main():
     parser.add_argument("--predicate_dir", default=os.path.join("data", "llm_generated_predicates"),
                         help="Directory for storing generated predicates.")
     parser.add_argument("--model", default="claude-haiku-4-5",
-                        help="Claude model id for the local `claude` CLI (e.g. claude-opus-5, "
-                             "claude-haiku-4-5). Calls run through the logged-in CLI and bill to your "
-                             "Claude subscription; set CHEBILP_CLAUDE_CLI if it is not on PATH.")
+                        help="A bare Claude id (claude-opus-5, claude-haiku-4-5) runs through the "
+                             "logged-in `claude` CLI and bills your Claude subscription (set "
+                             "CHEBILP_CLAUDE_CLI if it is not on PATH). A 'provider/name' id "
+                             "(openai/gpt-4o) runs through an OpenAI-compatible endpoint set by "
+                             "OPENAI_API_BASE and OPENAI_API_KEY.")
     parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
     parser.add_argument("--top_k", type=int, default=16,
                         help="Reuse candidates retrieved from the shared library per class.")
