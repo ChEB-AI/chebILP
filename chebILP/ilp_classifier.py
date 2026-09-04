@@ -1,4 +1,7 @@
 import os
+import re
+import itertools
+import string
 import subprocess
 import sys
 import json
@@ -8,8 +11,116 @@ import traceback
 import tqdm
 from typing import Literal, Optional
 
-from chebILP.ilp_path_manager import get_bias_path, get_bk_path, get_exs_path
+from chebILP.ilp_path_manager import get_bias_path, get_bk_path, get_exs_path, get_aleph_stem
 from chebILP.utils import AVAILABLE_PREDICATE_SETS
+
+# The subsystem whose auxiliary predicates are ASP rules whose heads can be analysed for
+# seeding and heuristic guidance. Both features only apply here.
+RULE_PREDICATE_SET = "llm_generated_rules"
+# Clingo heuristic level for prefer_body_pred hints. Any non-zero value below the size
+# heuristic's ~1000 works; when every hint shares a level the value only sets relative
+# priority, so a single constant is enough (see popper-sfluegel/search-guidance.md).
+DEFAULT_HEURISTIC_LEVEL = 10
+
+_BODY_PRED_RE = re.compile(r"body_pred\(\s*([a-z_][A-Za-z0-9_]*)\s*,\s*(\d+)\s*\)")
+
+
+def _parse_body_preds(bias_text: str) -> set[tuple[str, int]]:
+    """The ``(name, arity)`` pairs declared as ``body_pred`` in a bias file's text."""
+    return {(m.group(1), int(m.group(2))) for m in _BODY_PRED_RE.finditer(bias_text)}
+
+
+def _var_stream():
+    """Fresh variable names for seed atoms: B, C, ... then V1, V2, ... (A is the molecule)."""
+    yield from string.ascii_uppercase[1:]
+    for i in itertools.count(1):
+        yield f"V{i}"
+
+
+def build_seed_hypothesis(target_id, programs, body_preds):
+    """A single rule ANDing a class's chosen auxiliary predicates, with its var/body counts.
+
+    ``chebi_<target>(A)`` holds when every chosen predicate holds. A molecule-level predicate
+    is applied to the molecule variable ``A`` directly (``aux_x(A)``); an atom-level one is
+    tied to the molecule with a ``has_atom(A, Atom)`` link, exactly as the task specifies.
+    A predicate with several atom arguments (e.g. a ring's atoms) binds its remaining atoms
+    through the aux literal itself, so one ``has_atom`` per predicate suffices.
+
+    A predicate whose extension was empty for every molecule is not written to ``bk.pl`` and so
+    is not a declared ``body_pred``; it is skipped, since Popper would reject a rule naming it.
+
+    Returns ``(seed_str, n_vars, n_body)``, or ``None`` when no chosen predicate survives. The
+    counts let the caller drop a seed that exceeds the standard ``max_vars`` / ``max_body`` — the
+    conjunction can need more variables than the default bias allows (e.g. a ring predicate
+    contributes one atom variable per ring atom), and widening the bounds to fit it would also
+    widen the baseline's search, making the comparison unfair.
+    """
+    from chebILP.predicate_generation.auxiliary_rules import predicate_arg_sorts
+
+    mol_var = "A"
+    fresh = _var_stream()
+    literals: list[tuple[str, list[str]]] = []
+    for prog in programs:
+        sorts = predicate_arg_sorts(prog)
+        if not sorts or (prog.name, len(sorts)) not in body_preds:
+            continue
+        args, atom_vars = [], []
+        for sort in sorts:
+            if sort == "mol":
+                args.append(mol_var)
+            else:
+                v = next(fresh)
+                args.append(v)
+                atom_vars.append(v)
+        if atom_vars:
+            literals.append(("has_atom", [mol_var, atom_vars[0]]))
+        literals.append((prog.name, args))
+
+    if not literals:
+        return None
+    all_vars = {v for _, args in literals for v in args}
+    body = ", ".join(f"{pred}({','.join(args)})" for pred, args in literals)
+    return f"chebi_{target_id}(A) :- {body}.", len(all_vars), len(literals)
+
+
+def seed_from_hypothesis(clause, target_id, body_preds):
+    """Validate an LLM class hypothesis for use as Popper's ``best_hypothesis``.
+
+    Returns ``(seed_str, n_vars, n_body)`` when the clause is a plain Datalog rule whose head is
+    ``chebi_<target>(A)`` and whose every body predicate is declared as a ``body_pred`` in the
+    bias, else ``None``. An aggregate/negation/comparison (``datalog_ok`` False) or a predicate
+    that never reached ``bk.pl`` (so is not a declared ``body_pred``) makes it unusable, exactly
+    as for the auto-built conjunction. The caller still checks it against ``max_vars``/``max_body``.
+    """
+    from chebILP.predicate_generation.auxiliary_rules import analyze_hypothesis
+
+    info = analyze_hypothesis(clause)
+    if info is None or not info["datalog_ok"] or not info["body_preds"]:
+        return None
+    if info["head"] != (f"chebi_{target_id}", 1):
+        return None
+    if not info["body_preds"] <= body_preds:
+        return None
+    return info["clause"], info["n_vars"], info["n_body"]
+
+
+def build_hypothesis_heuristic_lines(clause, body_preds, level=DEFAULT_HEURISTIC_LEVEL):
+    """``prefer_body_pred`` directives for the predicates appearing in an LLM hypothesis.
+
+    Only names that are actually declared as ``body_pred`` in the bias are kept (Popper
+    error-exits on an undeclared one), in the order they appear in the hypothesis body.
+    """
+    from chebILP.predicate_generation.auxiliary_rules import analyze_hypothesis
+
+    info = analyze_hypothesis(clause)
+    if info is None:
+        return []
+    names_in_bk = {pred for pred, _ in body_preds}
+    return [
+        f"prefer_body_pred({name},{level})."
+        for name in info["body_pred_names"] if name in names_in_bk
+    ]
+
 
 def log_subprocess_output(log_dir, phase, result):
     """Write subprocess stdout/stderr to the run log with timestamp."""
@@ -47,12 +158,13 @@ import pickle
 import base64
 from popper.loop import popper
 from popper.util import Settings, format_prog
+from popper import stats as popper_stats
 
 settings = Settings(ex_file=r"{exs_file}", bk_file=r"{bk_file}", bias_file=r"{bias_file}", **{repr(settings_parameters)})
 prog, score = popper(settings)
 prog_str = format_prog(prog) if prog else None
 
-result = {{"prog_str": prog_str, "score": list(score) if score else None}}
+result = {{"prog_str": prog_str, "score": list(score) if score else None, "num_programs": popper_stats.stats.total_programs}}
 print(json.dumps(result))
 '''
     result = subprocess.run(
@@ -71,11 +183,16 @@ print(json.dumps(result))
     except json.decoder.JSONDecodeError:
         output = {"prog_str": None, "score": None}
         print(f"    Failed to parse JSON output. See logs for details.")
-    
+
+    # Time-to-best hypothesis: Popper's anytime search prints "<seconds>s New best hypothesis:"
+    # to stderr on each improvement; the last one's timestamp is the time to the final program.
+    best_times = re.findall(r"([\d.]+)s New best hypothesis:", result.stderr or "")
+    output["time_to_best"] = float(best_times[-1]) if best_times else None
+
     return output
 
 
-def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2):
+def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL):
     # use bias template generated in build_bk and create settings-specific bias files
     for target_id in tqdm.tqdm(target_ids, desc="Building bias files for ChEBI classes"):
         plain_bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k) # template bias file created in build_bk
@@ -90,19 +207,34 @@ def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["c
             bias_content = f.read()
         bias_content = bias_content.replace("%% max_vars(TODO).", f"max_vars({max_vars}).")
         bias_content = bias_content.replace("%% max_body(TODO).", f"max_body({max_body}).")
-        bias_content = bias_content.replace("%% max_clauses(TODO).", f"max_clauses({max_clauses}).") 
-                
+        bias_content = bias_content.replace("%% max_clauses(TODO).", f"max_clauses({max_clauses}).")
+
+        # Heuristic guidance: steer Popper's non-recursive generator toward the class's chosen
+        # auxiliary predicates by appending prefer_body_pred/2 directives (only those actually
+        # declared as body_pred in the template — Popper error-exits on an undeclared one).
+        if heuristic_guidance and predicate_set == RULE_PREDICATE_SET:
+            from chebILP.predicate_generation.auxiliary_rules import load_class_hypothesis
+            # Steer toward the predicates in the LLM's class hypothesis.
+            hypothesis = load_class_hypothesis(target_id, library_dir=aux_library_dir)
+            hint_lines = []
+            if hypothesis and hypothesis.get("hypothesis"):
+                hint_lines = build_hypothesis_heuristic_lines(
+                    hypothesis["hypothesis"], _parse_body_preds(bias_content), level=heuristic_level
+                )
+            if hint_lines:
+                bias_content = bias_content.rstrip("\n") + "\n\n%% heuristic guidance toward LLM-chosen predicates\n" + "\n".join(hint_lines) + "\n"
+
         with open(bias_path, "w+") as f:
             f.write(bias_content)
 
 
-def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1):
+def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, tool:Literal["popper", "aleph"]="popper"):
     if problem_dir is None:
         problem_dir = os.path.join("data", "ilp_problems")
     # Build settings parameters for Popper
     settings_parameters = {
         "noisy": True,
-        "anytime_solver": "nuwls",
+        "nuwls": True,
         "timeout": timeout,
     }
     if mdl_weight_fn != 1 or mdl_weight_fp != 1 or mdl_weight_size != 1:
@@ -111,6 +243,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         settings_parameters["size_weight"] = mdl_weight_size
 
     with open(os.path.join(results_dir, "config.yml"), "a+") as f:
+        f.write(f"tool: {tool}\n")
         f.write(f"problem_dir: {problem_dir}\n")
         f.write(f"predicate_set: {predicate_set}\n")
         f.write(f"selection_mode: {selection_mode}\n")
@@ -119,11 +252,23 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         f.write(f"max_vars: {max_vars}\n")
         f.write(f"max_body: {max_body}\n")
         f.write(f"max_clauses: {max_clauses}\n")
+        f.write(f"seed_hypothesis: {seed_hypothesis}\n")
+        f.write(f"heuristic_guidance: {heuristic_guidance}\n")
+        if seed_hypothesis or heuristic_guidance:
+            f.write(f"aux_library_dir: {aux_library_dir}\n")
         f.write("popper_settings:\n")
         for key, value in settings_parameters.items():
             f.write(f"\t{key}: {value}\n")
 
-    build_bias(problem_dir, predicate_set, classes_list, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses)
+    build_bias(problem_dir, predicate_set, classes_list, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses, heuristic_guidance=heuristic_guidance, aux_library_dir=aux_library_dir, heuristic_level=heuristic_level)
+
+    if seed_hypothesis and predicate_set != RULE_PREDICATE_SET:
+        print(f"Warning: --seed_hypothesis only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'.")
+    if heuristic_guidance and predicate_set != RULE_PREDICATE_SET:
+        print(f"Warning: --heuristic_guidance only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'.")
+    if tool == "aleph" and selection_mode is not None:
+        print(f"Warning: --tool aleph does not apply predicate selection; the Aleph problem uses "
+              f"the full '{predicate_set}' predicate set (selection_mode='{selection_mode}' ignored).")
 
     for chebi_id in classes_list:
         start_time = time.perf_counter()
@@ -135,7 +280,48 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         if not os.path.exists(exs_path) or not os.path.exists(bk_path) or not os.path.exists(bias_path):
             print(f"Missing files for ChEBI:{chebi_id} - skipping. exs_path: {exs_path}, bk_path: {bk_path}, bias_path: {bias_path}")
             continue
-        train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, settings_parameters, log_dir=results_dir)
+
+        # Seed the search with the LLM's class hypothesis.
+        # Per-class, so it goes into a copy of the shared settings rather than the shared dict.
+        class_settings = settings_parameters
+        seed_clause = None  # captured for the Aleph runner too, not just Popper's best_hypothesis
+        if seed_hypothesis and predicate_set == RULE_PREDICATE_SET:
+            from chebILP.predicate_generation.auxiliary_rules import load_class_hypothesis
+            with open(bias_path, "r") as f:
+                body_preds = _parse_body_preds(f.read())
+            hypothesis = load_class_hypothesis(chebi_id, library_dir=aux_library_dir)
+            seed_info = None
+            if hypothesis and hypothesis.get("groundable") and hypothesis.get("hypothesis"):
+                seed_info = seed_from_hypothesis(hypothesis["hypothesis"], chebi_id, body_preds)
+            if seed_info:
+                seed, n_vars, n_body = seed_info
+                # The seed must satisfy the bias it is validated against. Widening max_vars /
+                # max_body to fit an oversized seed also widens the search the baseline runs at,
+                # making the comparison unfair (and the 100-class run showed it losing whole
+                # classes for no F1 gain). So keep the standard bounds and drop a seed that does
+                # not fit — running unseeded at the same bias as every other config.
+                if n_vars > max_vars or n_body > max_body:
+                    print(f"    Seed needs max_vars={n_vars}, max_body={n_body} > bounds "
+                          f"(max_vars={max_vars}, max_body={max_body}); running unseeded.")
+                else:
+                    print(f"    Seeding search with: {seed}")
+                    seed_clause = seed
+                    class_settings = dict(settings_parameters, best_hypothesis=seed)
+            else:
+                print(f"    No usable LLM hypothesis for ChEBI:{chebi_id} "
+                      f"(missing, did not ground, or does not fit the bias); running unseeded.")
+
+        if tool == "aleph":
+            from chebILP.aleph_runner import run_ilp_training_aleph
+            aleph_stem = get_aleph_stem(chebi_id, predicate_set=predicate_set, base_dir=problem_dir)
+            missing = [aleph_stem + ext for ext in (".b", ".f", ".n") if not os.path.exists(aleph_stem + ext)]
+            if missing:
+                print(f"Missing Aleph file(s) for ChEBI:{chebi_id}: {', '.join(missing)}; "
+                      f"run build_samples + build_bk (Aleph output on) first - skipping.")
+                continue
+            train_result = run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout=timeout, max_body=max_body, seed_clause=seed_clause, log_dir=results_dir)
+        else:
+            train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, class_settings, log_dir=results_dir)
         prog_str = train_result["prog_str"]  # string representation for display/storage
         score = train_result["score"]
         if score:
@@ -170,6 +356,8 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
                 "chebi_id": chebi_id,
                 "train_score": {"TP": tp, "FP": fp, "TN": tn, "FN": fn} if score else None,
                 "time_taken": time.perf_counter() - start_time,
+                "time_to_best": train_result.get("time_to_best"),
+                "num_programs": train_result.get("num_programs"),
                 "program": prog_str,
                 "validation_score": conf_matrix,
             }

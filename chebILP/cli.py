@@ -30,6 +30,7 @@ def _make_ilp_builder(args):
         aux_timeout = args.get("aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = args.get("predicate_dir")
         computed_facts = args.get("computed_facts", False)
+        write_aleph = not args.get("no_aleph", False)
     else:
         fg_mode = args.fg_mode
         chebi_version = args.chebi_version
@@ -40,6 +41,7 @@ def _make_ilp_builder(args):
         aux_timeout = getattr(args, "aux_timeout", DEFAULT_AUX_TIMEOUT)
         aux_library_dir = getattr(args, "predicate_dir", None)
         computed_facts = getattr(args, "computed_facts", False)
+        write_aleph = not getattr(args, "no_aleph", False)
 
     if fg_mode:
         return FGILPProblemBuilder(
@@ -58,6 +60,7 @@ def _make_ilp_builder(args):
         aux_timeout=aux_timeout,
         aux_library_dir=aux_library_dir,
         computed_facts=computed_facts,
+        write_aleph=write_aleph,
     )
 
 
@@ -111,6 +114,10 @@ def _handle_learn(args):
             mdl_weight_fn=args.mdl_weight_fn,
             mdl_weight_fp=args.mdl_weight_fp,
             mdl_weight_size=args.mdl_weight_size,
+            seed_hypothesis=args.seed_hypothesis,
+            heuristic_guidance=args.heuristic_guidance,
+            aux_library_dir=args.predicate_dir,
+            tool=args.tool,
         )
 
 
@@ -398,6 +405,8 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Minimum descendant molecules per label class; selects the dataset subset (default: 25).")
     parser.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
     parser.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use for background knowledge.")
+    parser.add_argument("--no_aleph", action="store_true",
+                        help="Skip emitting the Aleph-format train files (.b/.f/.n).")
 
 
 def _handle_prepare_dataset(args):
@@ -475,6 +484,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run ILP learning (training + validation) for the given ChEBI classes.",
     )
     sp_learn.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
+    sp_learn.add_argument("--tool", type=str, default="popper", choices=["popper", "aleph"],
+                          help="ILP engine: 'popper' (default) or 'aleph'.")
     sp_learn.add_argument("--timeout", type=int, default=20, help="Timeout for ILP solver in seconds.")
     sp_learn.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use.")
     sp_learn.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
@@ -484,10 +495,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--selection_k", type=int, default=10, help="Number of predicates selection with selection_mode (required if selection_mode is set).")
     sp_learn.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
     sp_learn.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")
-    sp_learn.add_argument("--max_clauses", type=int, default=2, help="Maximum number of clauses in the learned program.")
+    sp_learn.add_argument("--max_clauses", type=int, default=2, help="Maximum number of clauses in the learned program. Inert: Popper forces max_rules=1 unless recursion or predicate invention is enabled, and the noisy MDL combiner caps nothing.")
     sp_learn.add_argument("--mdl_weight_fn", type=int, default=1, help="Weight β for false negatives in MDL cost (default: 1).")
     sp_learn.add_argument("--mdl_weight_fp", type=int, default=1, help="Weight γ for false positives in MDL cost (default: 1).")
     sp_learn.add_argument("--mdl_weight_size", type=int, default=1, help="Weight α for program size in MDL cost (default: 1).")
+    sp_learn.add_argument("--predicate_dir", type=str, default=None,
+                          help="Auxiliary-rule library directory (llm_generated_rules), needed for "
+                               "--seed_hypothesis / --heuristic_guidance to read the class's saved hypothesis.")
+    sp_learn.add_argument("--seed_hypothesis", action="store_true",
+                          help="Seed Popper's search with the LLM's saved class hypothesis, when it grounds "
+                               "and fits the bias (llm_generated_rules only; requires --noisy, which is on).")
+    sp_learn.add_argument("--heuristic_guidance", action="store_true",
+                          help="Steer generation toward the predicates in the LLM's class hypothesis via "
+                               "prefer_body_pred directives in the bias file (llm_generated_rules only).")
     sp_learn.set_defaults(func=_handle_learn)
 
     # ── select_predicates ────────────────────────────────────────────────
@@ -660,6 +680,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to chebi_graph.pkl for class name and parent lookup (optional).",
     )
+    sp_rtnl.add_argument(
+        "--aux_library_dir", type=str,
+        default=None,
+        help="Auxiliary library directory (llm_generated_rules/... ) whose aux_* predicate "
+             "descriptions annotate the LLM-generated predicates in the rule (optional).",
+    )
     sp_rtnl.set_defaults(func=_handle_rule_to_nl)
 
     return parser
@@ -681,7 +707,7 @@ def _handle_rule_to_nl(args):
     elif args.chebi_graph_path:
         print(f"Warning: chebi_graph_path '{args.chebi_graph_path}' does not exist. Proceeding without ChEBI graph.")
 
-    print(translate_rule(rule, chebi_graph=chebi_graph))
+    print(translate_rule(rule, chebi_graph=chebi_graph, aux_library_dir=args.aux_library_dir))
 
 
 def _handle_explain(args):

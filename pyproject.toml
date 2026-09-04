@@ -21,7 +21,7 @@ explain = [
 ]
 llm = [
     "anthropic>=0.104.1",
-    "litellm>=1.55.0",
+    "claude-agent-sdk>=0.2.87",
     "langsmith>=0.8.5",
     "python-dotenv>=1.2.2",
     "rank-bm25>=0.2.2",
@@ -33,3 +33,7 @@ chebILP = "chebILP.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["chebILP*"]
+
+[tool.setuptools.package-data]
+# The vendored Aleph engine + runner are Prolog, loaded by swipl via their on-disk path.
+chebILP = ["aleph/*.pl"]

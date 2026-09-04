@@ -7,14 +7,13 @@ from chebILP.molecule_processing.data_preparation import ChEBIDataset
 from chebILP.molecule_processing.mol_to_fol import mol_to_fol_fgs
 from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
 from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
-from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules
+from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules, resolve_rule_dependencies
 from chebILP.molecule_processing.fg_matching import get_chembl_fgs, get_chebi_fgs
 from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
-from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path
+from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path, get_aleph_stem
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
-from chebi_utils.sample_filters import get_direct_neighbors
 
 
 CHEBI_FG_RULES_PATH = os.path.join("data", "chebi_fg_rules_from_smiles.pl")
@@ -44,12 +43,39 @@ def load_fowl_smarts(path=FOWL_SMARTS_PATH) -> dict[str, str]:
             mapping[chebi_id.strip()] = smarts.strip()
     return mapping
 
+def _aleph_mode_str(name, arity, is_head):
+    """Aleph mode declaration for a predicate:
+    head args are all ``+any`` (input); a body pred's first arg is ``+any`` and the rest
+    ``-any`` (output), giving the natural input/output chaining."""
+    if is_head or arity == 1:
+        args = ["+any"] * arity
+    else:
+        args = ["+any"] + ["-any"] * (arity - 1)
+    kind = "modeh" if is_head else "modeb"
+    return f":- {kind}(*, {name}({', '.join(args)}))."
+
+
+def build_aleph_background(head_name, body_predicates, train_bk_lines):
+    """Assemble the structural Aleph ``.b`` for a class from its Popper-format inputs.
+
+    Deliberately carries no ``:- set(...)`` or ``:- dynamic``
+    directives -- those are injected at learn time (chebILP.aleph_runner)."""
+    body = sorted(body_predicates)
+    lines = [":- use_module(library(lists)).", "", _aleph_mode_str(head_name, 1, True)]
+    lines += [_aleph_mode_str(name, arity, False) for name, arity in body]
+    lines.append("")
+    lines += [f":- determination({head_name}/1, {name}/{arity})." for name, arity in body]
+    lines += ["", "%% ===== background knowledge ====="]
+    return "\n".join(lines) + "\n" + "\n".join(train_bk_lines) + "\n"
+
+
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True):
+    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True, write_aleph: bool = True):
         self.predicate_set = predicate_set
         self.problem_dir = os.path.join(base_dir, "ilp_problems")
         os.makedirs(self.problem_dir, exist_ok=True)
+        self.write_aleph = write_aleph and predicate_set not in ("chebi_fg_rules", "chebi_fg_learned_rules")
         # Per-call wall-clock budget for LLM-generated auxiliary predicates.
         self.aux_timeout = aux_timeout
         self.aux_library_dir = aux_library_dir
@@ -62,23 +88,29 @@ class ILPProblemBuilder:
         self.dataset = ChEBIDataset(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
         self.hierarchy_graph = nx.transitive_closure_dag(self.dataset.chebi_graph)
         self.splits = self.dataset.load_splits_from_csv()
+
+        # Invariant across target classes, so built once rather than per class.
+        self._mol_index = set(self.dataset.molecules.index)
+        self._split_ids = {split: set(self.splits[self.splits["split"] == split]["id"].astype(str))
+                           for split in ["train", "validation", "test"]}
+        # Size of the molecule graph, used to prefer small molecules when a split is
+        # capped. This is the same count that drives the has_atom facts in bk.pl, so it
+        # includes explicit hydrogens where a molecule carries them.
+        self._atom_counts = self.dataset.molecules["mol"].map(lambda m: m.GetNumAtoms())
             
             
     def build_examples(self, target_ids: list[str], min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
-        min_n_pos = max_pos_samples + 1
-        min_n_pos_id = None
-        min_n_neg = max_neg_samples + 1
-        min_n_neg_id = None
+        # Counts are summed over the three splits, so they are not comparable against the
+        # per-split max_*_samples caps; take the minimum over what was actually written.
+        counts = {}
         for target_id in tqdm.tqdm(target_ids, desc="Building examples for ChEBI classes"):
-            n_pos, n_neg = self.gather_samples_for_chebi_cls(target_id, min_pos_samples, max_pos_samples, min_neg_samples, max_neg_samples)
-            if n_pos < min_n_pos:
-                min_n_pos = n_pos
-                min_n_pos_id = target_id
-            if n_neg < min_n_neg:
-                min_n_neg = n_neg
-                min_n_neg_id = target_id
-        print(f"Label with least positive samples: ChEBI:{min_n_pos_id} with {min_n_pos} samples")
-        print(f"Label with least negative samples: ChEBI:{min_n_neg_id} with {min_n_neg} samples")
+            counts[target_id] = self.gather_samples_for_chebi_cls(target_id, min_pos_samples, max_pos_samples, min_neg_samples, max_neg_samples)
+        if not counts:
+            return
+        min_n_pos_id = min(counts, key=lambda c: counts[c][0])
+        min_n_neg_id = min(counts, key=lambda c: counts[c][1])
+        print(f"Label with least positive samples: ChEBI:{min_n_pos_id} with {counts[min_n_pos_id][0]} samples across all splits")
+        print(f"Label with least negative samples: ChEBI:{min_n_neg_id} with {counts[min_n_neg_id][1]} samples across all splits")
 
 
     def build_bk(self, target_ids):
@@ -89,28 +121,38 @@ class ILPProblemBuilder:
             """
 
         rules, rule_predicates = [], []
+        failed_rule_classes: list[str] = []
         if self.predicate_set in ["chebi_fg_rules", "chebi_fg_learned_rules"]:
             prolog_lines_rules, body_predicates_rules = build_background_chebi_fg_rules(CHEBI_FG_RULES_PATH if self.predicate_set == "chebi_fg_rules" else CHEBI_FG_LEARNED_RULES_PATH)
             rules = prolog_lines_rules
             rule_predicates = body_predicates_rules
         
-        for target_id in tqdm.tqdm(target_ids, desc="Building background knowledge for ChEBI classes"):
-            print(f"Building background knowledge for ChEBI:{target_id}...")
+        pbar = tqdm.tqdm(target_ids, desc="Building background knowledge")
+        for target_id in pbar:
+            # The per-class status goes into the bar itself; printing it would redraw the bar
+            # on every iteration. Only warnings and failures are written as their own lines.
+            pbar.set_description(f"Building background knowledge for ChEBI:{target_id}")
+            pbar.set_postfix_str("")
 
             # LLM-generated auxiliary predicates are specific to the target class,
             # so they are loaded once per target and merged into the atom-level BK.
             aux_predicates = None
             if self.predicate_set == "llm_generated_fgs":
                 aux_predicates = load_auxiliary_predicates(target_id, library_dir=self.aux_library_dir)
-                print(f"  Loaded {len(aux_predicates)} auxiliary predicate(s) for ChEBI:{target_id}")
+                pbar.set_postfix_str(f"{len(aux_predicates)} aux predicate(s)")
 
             # llm_generated_rules: the class's auxiliary predicates are ASP rules,
             # evaluated (below) against the atom facts plus optional computed facts.
             # Only the derived aux_* extensions are written to bk.pl.
-            rule_programs = None
+            rule_programs, dependency_programs = None, []
             if self.predicate_set == "llm_generated_rules":
                 rule_programs = load_class_rules(target_id, library_dir=self.aux_library_dir)
-                print(f"  Loaded {len(rule_programs)} auxiliary rule(s) for ChEBI:{target_id}")
+                # class_map.json records only the predicates the class chose, not the ones
+                # they build on, so the dependencies have to be pulled in from the library
+                # or the rules ground against an empty body and derive nothing.
+                dependency_programs = resolve_rule_dependencies(rule_programs, self.aux_library_dir)
+                pbar.set_postfix_str(f"{len(rule_programs)} rule(s)"
+                                     + (f" +{len(dependency_programs)} dep(s)" if dependency_programs else ""))
 
             # The fowl set adds a single class-specific predicate, fowl_<target_id>,
             # derived from a SMARTS pattern, on top of the atom predicates. Not every
@@ -121,9 +163,9 @@ class ILPProblemBuilder:
                     self._fowl_smarts = load_fowl_smarts()
                 smarts = self._fowl_smarts.get(target_id)
                 if smarts is None:
-                    print(f"  No fowl SMARTS for ChEBI:{target_id}; falling back to plain atom predicates.")
+                    pbar.set_postfix_str("no fowl SMARTS, plain atom predicates")
                 else:
-                    print(f"  Loaded fowl SMARTS for ChEBI:{target_id}: {smarts}")
+                    pbar.set_postfix_str(f"fowl SMARTS {smarts}")
                     fowl_smarts = {target_id: smarts}
 
             selected_ids_by_split = dict()
@@ -186,8 +228,20 @@ class ILPProblemBuilder:
                     eval_facts += [line for split in ["train", "validation", "test"] for line in computed_lines_by_split.get(split, [])]
                 # The class's rules are grounded as one program, so a rule may use a predicate
                 # another of its rules defines. The head may be of any arity; each derived
-                # atom is written to the split of the molecule it belongs to.
-                extensions = derive_rule_extensions(rule_programs, eval_facts, all_selected_ids)
+                # atom is written to the split of the molecule it belongs to. Dependencies
+                # take part in the grounding but never reach bk.pl.
+                try:
+                    extensions = derive_rule_extensions(
+                        rule_programs + dependency_programs, eval_facts, all_selected_ids
+                    )
+                except (RuntimeError, MemoryError) as e:
+                    # One class's rules must not end a run that is hours long. The class keeps
+                    # its atom-level bk.pl and simply goes without its aux_* extensions.
+                    pbar.write(f"  Grounding failed for ChEBI:{target_id} ({e}); "
+                               f"continuing without its auxiliary extensions. "
+                               f"Rules: {', '.join(rp.name for rp in rule_programs)}")
+                    failed_rule_classes.append(target_id)
+                    extensions = {}
                 for rp in rule_programs:
                     emitted = {split: set() for split in ["train", "validation", "test"]}
                     for example, arg_tuples in extensions.get(rp.name, {}).items():
@@ -225,61 +279,100 @@ class ILPProblemBuilder:
             with open(plain_bias_path, "w+") as f:
                 f.write("\n".join(bias_lines) + "\n")
 
+            if self.write_aleph:
+                aleph_b = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir) + ".b"
+                with open(aleph_b, "w+") as f:
+                    f.write(build_aleph_background(f"chebi_{target_id}", body_predicates, prolog_lines_by_split["train"]))
 
-    def build_negative_mix(self, neg_pool: pd.DataFrame, sibling_ids: set, max_samples: int, random_state: int = 42) -> pd.DataFrame:
-        """50:50 mix of direct-sibling negatives and random negatives from ``neg_pool``.
+        if failed_rule_classes:
+            print(f"\n{len(failed_rule_classes)} class(es) built without their auxiliary rule "
+                  f"extensions because grounding failed: {', '.join(failed_rule_classes)}")
 
-        Up to half of ``max_samples`` are the target's direct siblings (near-misses); the rest
-        are drawn uniformly at random from the non-sibling remainder. When a class has fewer
-        siblings than half, the random draw takes up the slack rather than the set shrinking, so
-        the objective is global classification instead of separation from the superclass alone.
+
+    def _take_smallest(self, df: pd.DataFrame, max_samples: int) -> pd.DataFrame:
+        """The ``max_samples`` smallest molecules of ``df``, by atom count.
+
+        Ties resolve by the frame's own order, so the pick is deterministic without a seed.
         """
-        half = max_samples // 2
-        sibling_negs = neg_pool[neg_pool.index.astype(str).isin(sibling_ids)]
-        if len(sibling_negs) > half:
-            sibling_negs = sibling_negs.sample(half, random_state=random_state)
-        random_pool = neg_pool[~neg_pool.index.astype(str).isin(sibling_ids)]
-        n_random = min(max_samples - len(sibling_negs), len(random_pool))
-        random_negs = random_pool.sample(n_random, random_state=random_state) if n_random > 0 else random_pool.iloc[:0]
-        return pd.concat([sibling_negs, random_negs])
+        if len(df) <= max_samples:
+            return df
+        return df.loc[self._atom_counts[df.index].nsmallest(max_samples, keep="first").index]
+
+    def _direct_neighbors(self, target_id: str) -> tuple[set[str], set[str]]:
+        """Molecule ids at or below ``target_id``, and those shared by all its direct parents.
+
+        The second set is the near-miss pool: descendants of every parent that are not
+        descendants of the target itself. Like
+        ``chebi_utils.sample_filters.get_direct_neighbors``, but reuses ``hierarchy_graph``
+        instead of rebuilding the transitive closure once per class, and counts a target
+        that is itself a molecule as its own positive. That also keeps it out of the
+        negative pool: it is a descendant of each of its parents, so leaving it out of
+        ``pos_ids`` would make it a negative of itself (364 of the 1763 v251 labels are
+        molecules).
+        """
+        pos_ids = ({str(d) for d in self.hierarchy_graph.predecessors(target_id)} | {str(target_id)}) & self._mol_index
+        parent_spaces = [
+            {str(d) for d in self.hierarchy_graph.predecessors(parent)} & self._mol_index
+            for parent in self.dataset.chebi_graph.successors(target_id)
+        ]
+        if not parent_spaces:
+            return pos_ids, set()
+        return pos_ids, set.intersection(*parent_spaces) - pos_ids
+
+    def build_negatives(self, neg_pool: pd.DataFrame, max_samples: int, random_state: int = 42, prefer_smallest: bool = False) -> pd.DataFrame:
+        """At most ``max_samples`` of ``neg_pool``, which holds direct siblings only.
+
+        Every negative is a near-miss, so the objective is separating the target from its
+        superclass rather than global classification -- the learned rule is only ever asked
+        about molecules a classifier for the parent classes has already admitted.
+
+        With ``prefer_smallest``, an over-full pool keeps the smallest molecules rather than
+        a random draw, which shrinks the derived bk.pl. Only the training split sets it;
+        validation and test stay random so their scores remain size-unbiased.
+        """
+        if len(neg_pool) <= max_samples:
+            return neg_pool
+        return self._take_smallest(neg_pool, max_samples) if prefer_smallest else neg_pool.sample(max_samples, random_state=random_state)
 
     def gather_samples_for_chebi_cls(self, target_id: str, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
-        descendants = list(self.hierarchy_graph.predecessors(target_id)) + [target_id]
-        # not all descendants are molecules (i.e., have a SMILES annotation) -> only take the ones that are in the samples_df (i.e. have a SMILES annotation and are in the 3_STAR subset)
-
-        df_pos = self.dataset.molecules[[id in descendants for id in self.dataset.molecules.index]]
-        df_neg = self.dataset.molecules[[id not in df_pos.index for id in self.dataset.molecules.index]]
+        # Positives are the molecules at or below the target; negatives are only its direct
+        # siblings -- the molecules shared by all of its direct parents. Nothing outside the
+        # parents' subtrees enters any split, so train, validation and test pose the same
+        # near-miss problem and all three assume a classifier for the parent classes.
+        # Not every descendant is a molecule, so both pools are intersected with the
+        # molecules frame (a SMILES annotation, and the 3-star subset where selected).
+        pos_ids, sibling_neg_ids = self._direct_neighbors(target_id)
+        df_pos = self.dataset.molecules.loc[sorted(pos_ids)]
+        df_neg = self.dataset.molecules.loc[sorted(sibling_neg_ids)]
         if len(df_pos) < min_pos_samples:
             print(f"ChEBI class {target_id} does not have enough positive samples (found {len(df_pos)}, required are at least {min_pos_samples}). Got samples {df_pos.index.tolist()}")
         if len(df_neg) < min_neg_samples:
-            print(f"ChEBI class {target_id} does not have enough negative samples (found {len(df_neg)}, required are at least {min_neg_samples}). Got samples {df_neg.index.tolist()}")
-        
-        # Direct-sibling molecules: subclasses shared with the target's parents. They form the
-        # near-miss half of every split's negatives; the other half is drawn uniformly at random
-        # from the full negative pool. The objective is therefore global classification, not
-        # separating the target from its superclass only.
-        mol_index = set(str(i) for i in self.dataset.molecules.index)
-        pos_ids, sibling_neg_ids = get_direct_neighbors(mol_index, self.dataset.chebi_graph, target_id)
-        sibling_neg_ids = set(sibling_neg_ids)
+            print(f"ChEBI class {target_id} does not have enough direct-sibling negatives (found {len(df_neg)}, required are at least {min_neg_samples}). Got samples {df_neg.index.tolist()}")
+
+        split_ids = self._split_ids
 
         samples_by_split = dict()
-        pos_train_samples = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "train"])]
-        samples_by_split[("pos", "train")] = pos_train_samples.sample(min(max_pos_samples, len(pos_train_samples)), random_state=42) # if there are more positives than max_pos_samples, sample randomly
-        neg_train_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "train"])]
-        samples_by_split[("neg", "train")] = self.build_negative_mix(neg_train_samples, sibling_neg_ids, max_neg_samples)
-        
-        samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "validation"]) & df_pos.index.astype(str).isin(pos_ids)]
-        neg_val_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "validation"])]
-        samples_by_split[("neg", "validation")] = self.build_negative_mix(neg_val_samples, sibling_neg_ids, max_neg_samples)
-        samples_by_split[("pos", "test")] = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "test"]) & df_pos.index.astype(str).isin(pos_ids)]
-        neg_test_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "test"])]
-        samples_by_split[("neg", "test")] = self.build_negative_mix(neg_test_samples, sibling_neg_ids, max_neg_samples)
-        
+        for split in ["train", "validation", "test"]:
+            pos_split = df_pos[df_pos.index.astype(str).isin(split_ids[split])]
+            neg_split = df_neg[df_neg.index.astype(str).isin(split_ids[split])]
+            # Over the cap, training keeps the smallest molecules: they carry the class just
+            # as well while keeping bk.pl small enough to ground cheaply. Validation and test
+            # keep every positive, so their scores cover the whole held-out class.
+            samples_by_split[("pos", split)] = self._take_smallest(pos_split, max_pos_samples) if split == "train" else pos_split
+            samples_by_split[("neg", split)] = self.build_negatives(neg_split, max_neg_samples, prefer_smallest=(split == "train"))
+
         for (posneg, split), df in samples_by_split.items():
             exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split=split)
             with open(exs_path, "w+" if posneg == "pos" else "a") as f:
                 for sample in df.index:
                     f.write(f"{posneg}(chebi_{target_id}({sample})).\n")
+
+        if self.write_aleph:
+            aleph_stem = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir)
+            for posneg, ext in [("pos", ".f"), ("neg", ".n")]:
+                with open(aleph_stem + ext, "w+") as f:
+                    for sample in samples_by_split[(posneg, "train")].index:
+                        f.write(f"chebi_{target_id}({sample}).\n")
 
         # sum up all positive and negative samples across splits
         return sum(len(v) for k, v in samples_by_split.items() if k[0] == "pos"), sum(len(v) for k, v in samples_by_split.items() if k[0] == "neg")
@@ -399,7 +492,9 @@ def build_full_background(
     aux_failures=None,
     fowl_smarts=None,
     rule_programs=None,
+    rule_dependencies=None,
     computed_facts: bool = True,
+    aux_library_dir: str | None = None,
 ) -> list[str]:
     """Build one flat background-knowledge fact list for the molecules in ``rows``.
 
@@ -413,6 +508,11 @@ def build_full_background(
     Clingo grounding memory). ``aux_predicates`` (for ``llm_generated_fgs``) are the
     name-deduplicated predicates gathered across all classes; their extensions are
     evaluated on ``rows`` here.
+
+    ``rule_dependencies`` (``llm_generated_rules``) are the library programs ``rule_programs``
+    build on. They are ground alongside but emit no facts of their own. Pass them when the
+    caller has already resolved them — resolving here instead costs a full parse of the
+    library per call, and needs ``aux_library_dir`` to point at the right one.
     """
     prolog_lines, _ = build_background_chemlog(
         rows, aux_predicates=aux_predicates, aux_timeout=aux_timeout, aux_failures=aux_failures,
@@ -440,7 +540,15 @@ def build_full_background(
         if computed_facts:
             eval_facts += build_computed_facts(rows)
         mol_ids = [str(i) for i in rows.index]
-        extensions = derive_rule_extensions(rule_programs, eval_facts, mol_ids)
+        if rule_dependencies is None:
+            rule_dependencies = resolve_rule_dependencies(rule_programs, aux_library_dir)
+        try:
+            extensions = derive_rule_extensions(
+                rule_programs + rule_dependencies, eval_facts, mol_ids,
+            )
+        except (RuntimeError, MemoryError) as e:
+            print(f"Grounding failed ({e}); returning background knowledge without aux_* facts.")
+            extensions = {}
         for rp in rule_programs:
             emitted = set()
             for arg_tuples in extensions.get(rp.name, {}).values():
