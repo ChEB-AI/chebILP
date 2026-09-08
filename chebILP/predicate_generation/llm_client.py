@@ -65,9 +65,9 @@ async def _run_query(model: str, system: str, prompt: str, schema: type[BaseMode
     _drop_api_key_auth()
     options = ClaudeAgentOptions(
         model=model,
-        system_prompt=system,          # our contract, replacing the CLI's default prompt
-        allowed_tools=[],              # no tools available, so there is no agentic loop to bound
-        setting_sources=[],            # do not load repo/user CLAUDE.md or settings
+        system_prompt=system,  
+        tools=[],
+        setting_sources=[],         
         output_format={"type": "json_schema", "schema": schema.model_json_schema()},
         **({"cli_path": _CLI_PATH} if _CLI_PATH else {}),
     )
@@ -76,6 +76,11 @@ async def _run_query(model: str, system: str, prompt: str, schema: type[BaseMode
         if isinstance(message, ResultMessage):
             result = message
     return result
+
+
+# A wedged ``claude`` CLI subprocess (auth prompt, network stall, ...) otherwise blocks
+# ``asyncio.run`` forever with no error and no output, indistinguishable from a slow class.
+_CLI_TIMEOUT = float(os.environ.get("CHEBILP_CLAUDE_CLI_TIMEOUT", "300"))
 
 
 def structured_completion(
@@ -122,7 +127,16 @@ def _cli_structured_completion(
 
     for attempt in range(max_retries):
         try:
-            result = asyncio.run(_run_query(cli_model, system, prompt, schema))
+            started = time.monotonic()
+            print(f"  requesting {cli_model} via CLI (attempt {attempt + 1}/{max_retries}, timeout {_CLI_TIMEOUT:.0f}s)...")
+            result = asyncio.run(asyncio.wait_for(_run_query(cli_model, system, prompt, schema), timeout=_CLI_TIMEOUT))
+            print(f"  response in {time.monotonic() - started:.0f}s")
+        except asyncio.TimeoutError:
+            last_exc = TimeoutError(f"CLI query timed out after {_CLI_TIMEOUT:.0f}s")
+            wait = 2 ** attempt
+            print(f"  CLI timeout (attempt {attempt + 1}/{max_retries}), retrying in {wait}s")
+            time.sleep(wait)
+            continue
         except (CLIConnectionError, ProcessError) as e:
             last_exc = e
             wait = 2 ** attempt
@@ -198,7 +212,10 @@ def _openai_structured_completion(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set (needed for the 'provider/name' backend)")
 
-    client = openai.OpenAI(base_url=api_base, api_key=api_key)
+    # A hung/slow endpoint must surface as a retryable APITimeoutError, not an invisible
+    # block: the SDK default is 600s per request, long enough to look like a wedged run.
+    request_timeout = float(os.environ.get("OPENAI_TIMEOUT", "300"))
+    client = openai.OpenAI(base_url=api_base, api_key=api_key, timeout=request_timeout)
     api_model = model.split("/", 1)[1]  # drop the "provider/" prefix; keep the rest verbatim
 
     schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
@@ -222,11 +239,17 @@ def _openai_structured_completion(
 
     for attempt in range(max_retries):
         try:
+            started = time.monotonic()
+            print(f"  requesting {api_model} (attempt {attempt + 1}/{max_retries}, timeout {request_timeout:.0f}s)...")
             response = client.chat.completions.create(
                 model=api_model,
                 messages=messages,
                 response_format={"type": "json_object"},
             )
+            elapsed = time.monotonic() - started
+            finish = response.choices[0].finish_reason
+            chars = len(response.choices[0].message.content or "")
+            print(f"  response in {elapsed:.0f}s (finish_reason={finish}, {chars} chars)")
         except transient as e:
             last_exc = e
             wait = 2 ** attempt

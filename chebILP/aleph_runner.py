@@ -65,17 +65,30 @@ def literal_vars(lit):
     return [a for a in literal_args(lit) if _VAR_RE.match(a)]
 
 
+def clause_head(clause):
+    return clause.split(":-", 1)[0].strip()
+
+
 def clause_body_literals(clause):
     return split_conj(clause.split(":-", 1)[1].strip().rstrip("."))
 
 
-def hypothesis_units(clause, mol_var="A"):
+def head_variables(clause):
+    """The variables in a clause's head (the anchor variables an example binds)."""
+    return literal_vars(clause_head(clause))
+
+
+def hypothesis_units(clause, anchor_vars=("A",)):
     """Split a hypothesis body into droppable units, each a list of literal strings.
 
-    A unit is a connected component of the body's atom variables (sharing a variable directly
-    or transitively through a link like ``has_bond_to``), together with the ``has_atom``
-    literals binding those atoms to the molecule. A literal mentioning only the molecule
-    variable is its own unit. Any subset of units stays range-restricted."""
+    A unit is a connected component of the body's non-anchor variables (sharing a variable
+    directly or transitively through a link like ``has_bond_to``), together with the literals
+    binding those variables back to an anchor (head) variable. A literal mentioning only anchor
+    variables is its own unit. Any subset of units stays range-restricted.
+
+    ``anchor_vars`` are the head variables (for a ChEBI class, the single molecule variable
+    ``A``); everything else is a body variable that defines connectivity."""
+    anchor = set(anchor_vars)
     lits = clause_body_literals(clause)
     parent = {}
 
@@ -91,7 +104,7 @@ def hypothesis_units(clause, mol_var="A"):
 
     lit_atomvars = []
     for lit in lits:
-        vs = [v for v in literal_vars(lit) if v != mol_var]
+        vs = [v for v in literal_vars(lit) if v not in anchor]
         lit_atomvars.append(vs)
         for v in vs[1:]:
             union(vs[0], v)
@@ -110,10 +123,10 @@ def hypothesis_units(clause, mol_var="A"):
 
 
 # ── Runnable-.b assembly ─────────────────────────────────────────────────────────────────
-def _dynamic_decls(head_name, body_preds):
+def _dynamic_decls(head_name, head_arity, body_preds):
     """``:- dynamic p/a.`` for the head and every body pred, so a pred declared in the bias
     but with zero facts in bk.pl fails gracefully instead of throwing existence_error in SWI."""
-    decls = [f"{head_name}/1"] + [f"{n}/{a}" for n, a in sorted(body_preds)]
+    decls = [f"{head_name}/{head_arity}"] + [f"{n}/{a}" for n, a in sorted(body_preds)]
     return "".join(f":- dynamic {d}.\n" for d in decls)
 
 
@@ -121,11 +134,12 @@ def _settings_lines(settings):
     return "".join(f":- set({k}, {v}).\n" for k, v in settings.items())
 
 
-def _refine_block(head_name, units, body_preds):
+def _refine_block(head, units, body_preds):
     """User refinement graph: start nodes are every non-empty subset of the hypothesis units
     (the full seed and its generalizations), refined by adding one so-far-unused unary
-    qualifier on any existing variable. Ported from _aleph_driver.write_seed_b."""
-    head = f"{head_name}(A)"
+    qualifier on any existing variable. ``head`` is the seed's head term (e.g. ``chebi_1(A)``
+    or ``next_count(A,B)``), used verbatim so the refinement clauses share the seed's variables.
+    Ported from _aleph_driver.write_seed_b."""
     start_lines = []
     n = len(units)
     if n > _MAX_SEED_UNITS:
@@ -167,18 +181,18 @@ conj_snoc(A, Lit, (A,Lit)).
 """
 
 
-def _assemble_runnable_b(structural_b, head_name, body_preds, settings, seed_clause):
+def _assemble_runnable_b(structural_b, head_name, head_arity, body_preds, settings, seed_clause):
     """Inject dynamic decls + settings (+ seed refine graph) into the structural .b text."""
     settings = dict(settings)
     if seed_clause:
         settings["refine"] = "user"
-    pre = "\n" + _dynamic_decls(head_name, body_preds) + "\n" + _settings_lines(settings)
+    pre = "\n" + _dynamic_decls(head_name, head_arity, body_preds) + "\n" + _settings_lines(settings)
     anchor = ":- use_module(library(lists)).\n"
     body = structural_b.replace(anchor, anchor + pre, 1)
     if seed_clause:
-        units = hypothesis_units(seed_clause)
+        units = hypothesis_units(seed_clause, head_variables(seed_clause))
         if units:
-            body += _refine_block(head_name, units, body_preds)
+            body += _refine_block(clause_head(seed_clause), units, body_preds)
     return body
 
 
@@ -187,9 +201,11 @@ def _normalize_clause(clause_text):
     return re.sub(r"\s+", " ", clause_text).strip().rstrip(".") + "."
 
 
-def parse_aleph_output(text, chebi_id):
+def parse_aleph_output(text, head_name):
     """Extract the learned program, train score, clause count and time-to-best from the
-    run_aleph.pl output. Returns the run_ilp_training dict shape."""
+    run_aleph.pl output. ``head_name`` is the target predicate's name (``chebi_<id>`` for a
+    ChEBI class, or e.g. ``zendo`` / ``next_count`` for another problem). Returns the
+    run_ilp_training dict shape."""
     def last_num(pat, cast=float):
         vals = re.findall(pat, text)
         return cast(vals[-1]) if vals else None
@@ -199,19 +215,21 @@ def parse_aleph_output(text, chebi_id):
         num_programs = last_num(r"\[clauses constructed\] \[(\d+)\]", int)
     time_to_best = last_num(r"=== TIME_TO_BEST: ([\d.]+) s ===")
 
+    head_re = re.escape(head_name) + r"\([^)]*\)"
+
     # Program: clauses from the final theory section (empty if the run found none).
     prog_str = None
     fi = text.find("=== FINAL THEORY ===")
     if fi != -1:
         seg = text[fi:]
-        bodies = re.findall(r"(chebi_\d+\(A\) :-\s*\n(?:\s+.*\n)*?)(?=\n\[|\n\n|\nchebi_)", seg)
+        bodies = re.findall(rf"({head_re} :-\s*\n(?:\s+.*\n)*?)(?=\n\[|\n\n|\n{re.escape(head_name)})", seg)
         clauses = [_normalize_clause(b) for b in bodies if ":-" in b]
         if clauses:
             prog_str = "\n".join(clauses)
     if prog_str is None:
         # Fallback: the last best-so-far clause, which survives even a search cut short.
         found = re.findall(
-            r"\[found clause\]\s*\n(chebi_\d+\(A\)[^\[]*?)\n\[pos cover = \d+ neg cover = \d+\]",
+            rf"\[found clause\]\s*\n({head_re}[^\[]*?)\n\[pos cover = \d+ neg cover = \d+\]",
             text)
         if found:
             prog_str = _normalize_clause(found[-1])
@@ -232,13 +250,23 @@ def parse_aleph_output(text, chebi_id):
 
 # ── Entry point ──────────────────────────────────────────────────────────────────────────
 def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=8,
-                           seed_clause=None, log_dir=None, settings_overrides=None):
+                           seed_clause=None, log_dir=None, settings_overrides=None,
+                           head_name=None, head_arity=1, run_stem_name=None):
     """Learn one class with Aleph. Mirrors run_ilp_training_subprocess's return contract.
 
     ``aleph_stem`` is the build-time stem (``get_aleph_stem``); ``<stem>.b/.f/.n`` must exist.
     The runnable .b (settings + optional seed graph injected) and the copied .f/.n are written
-    under ``log_dir/aleph/`` so a run is reproducible and inspectable."""
+    under ``log_dir/aleph/`` so a run is reproducible and inspectable.
+
+    The target defaults to a ChEBI class (``head_name = chebi_<chebi_id>``, unary), so the CLI
+    caller need not change. For another problem (e.g. a minted Zendo/IGGP task), pass the target
+    ``head_name``/``head_arity`` explicitly, and ``run_stem_name`` for the run's file basename."""
     from chebILP.ilp_classifier import log_subprocess_output
+
+    if head_name is None:
+        head_name = f"chebi_{chebi_id}"
+        head_arity = 1
+    stem_name = run_stem_name if run_stem_name is not None else str(chebi_id)
 
     with open(bias_path) as f:
         body_preds = {(m.group(1), int(m.group(2))) for m in _BODY_PRED_RE.finditer(f.read())}
@@ -253,12 +281,12 @@ def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=8,
     if settings_overrides:
         settings.update(settings_overrides)
 
-    head_name = f"chebi_{chebi_id}"
-    runnable_b = _assemble_runnable_b(structural_b, head_name, body_preds, settings, seed_clause)
+    runnable_b = _assemble_runnable_b(structural_b, head_name, head_arity, body_preds,
+                                      settings, seed_clause)
 
     run_dir = os.path.join(log_dir or ".", "aleph")
     os.makedirs(run_dir, exist_ok=True)
-    run_stem = os.path.join(run_dir, str(chebi_id))
+    run_stem = os.path.join(run_dir, stem_name)
     with open(run_stem + ".b", "w") as f:
         f.write(runnable_b)
     for ext in (".f", ".n"):
@@ -286,4 +314,4 @@ def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=8,
         f.write(out)
     if log_dir:
         log_subprocess_output(log_dir, f"Aleph training: {run_stem}.b", out)
-    return parse_aleph_output(out, chebi_id)
+    return parse_aleph_output(out, head_name)

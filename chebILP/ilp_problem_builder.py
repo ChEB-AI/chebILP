@@ -55,16 +55,16 @@ def _aleph_mode_str(name, arity, is_head):
     return f":- {kind}(*, {name}({', '.join(args)}))."
 
 
-def build_aleph_background(head_name, body_predicates, train_bk_lines):
+def build_aleph_background(head_name, body_predicates, train_bk_lines, head_arity=1):
     """Assemble the structural Aleph ``.b`` for a class from its Popper-format inputs.
 
     Deliberately carries no ``:- set(...)`` or ``:- dynamic``
     directives -- those are injected at learn time (chebILP.aleph_runner)."""
     body = sorted(body_predicates)
-    lines = [":- use_module(library(lists)).", "", _aleph_mode_str(head_name, 1, True)]
+    lines = [":- use_module(library(lists)).", "", _aleph_mode_str(head_name, head_arity, True)]
     lines += [_aleph_mode_str(name, arity, False) for name, arity in body]
     lines.append("")
-    lines += [f":- determination({head_name}/1, {name}/{arity})." for name, arity in body]
+    lines += [f":- determination({head_name}/{head_arity}, {name}/{arity})." for name, arity in body]
     lines += ["", "%% ===== background knowledge ====="]
     return "\n".join(lines) + "\n" + "\n".join(train_bk_lines) + "\n"
 
