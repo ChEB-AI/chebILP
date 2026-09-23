@@ -28,6 +28,11 @@ def get_aux_class_map_path(base_dir):
     return os.path.join(base_dir, "class_map.json")
 
 
+def get_aux_hypotheses_path(base_dir):
+    """JSON file mapping ``chebi_id -> {hypothesis, train_f1, ...}`` (the LLM's class rule)."""
+    return os.path.join(base_dir, "hypotheses.json")
+
+
 def get_aux_generation_log_path(chebi_id, base_dir):
     """Per-class LLM exchange log, now kept inside the library."""
     logs_dir = os.path.join(base_dir, "generation_logs")
@@ -58,3 +63,17 @@ def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", 
         bias_file += f"_max_clauses={max_clauses}"
     bias_file += ".pl"
     return os.path.join(bk_dir, bias_file)
+
+
+def get_aleph_stem(chebi_id, predicate_set, base_dir=None, selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None):
+    """Aleph file stem for a class (train split only): callers append ``.b``/``.f``/``.n``.
+
+    The stem basename is the bare ChEBI id, so files are e.g.
+    ``.../train/atoms/13248.b``."""
+    problem_dir = get_problem_dir(chebi_id, "train", base_dir)
+    bk_dir = os.path.join(problem_dir, predicate_set)
+    os.makedirs(bk_dir, exist_ok=True)
+    if selection_mode is not None and selection_k is not None:
+        bk_dir = os.path.join(bk_dir, f"selection_{selection_mode}_k={selection_k}")
+        os.makedirs(bk_dir, exist_ok=True)
+    return os.path.join(bk_dir, str(chebi_id))

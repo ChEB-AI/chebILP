@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict
 
-from chebILP.predicate_generation.auxiliary_predicates import set_class_predicates
+from chebILP.predicate_generation.auxiliary_predicates import load_class_map, set_class_predicates
 from chebILP.ilp_path_manager import get_aux_generation_log_path
 from chebILP.predicate_generation.llm_client import structured_completion
 from chebILP.utils import sort_labels_by_hierarchy
@@ -107,9 +107,9 @@ Answer with a single JSON object:
 """
 
 
-def generate_one(prompt: str, system: str, model: str, selection_model, api_base: str | None = None):
-    """Ask the model for one class's selection. Returns ``(parsed, raw_json_text)``."""
-    return structured_completion(model, system, prompt, selection_model, api_base=api_base)
+def generate_one(prompt: str, system: str, model: str, selection_model):
+    """Ask the model for one class's selection. Returns ``(parsed, raw_json_text, attempts)``."""
+    return structured_completion(model, system, prompt, selection_model)
 
 
 class AuxiliaryGenerator(ABC):
@@ -122,12 +122,11 @@ class AuxiliaryGenerator(ABC):
     noun = "predicate"  # log/console wording
     selection_model: type[Selection] = Selection
 
-    def __init__(self, library_dir, model, n_predicates, top_k, api_base=None):
+    def __init__(self, library_dir, model, n_predicates, top_k):
         self.library_dir = library_dir
         self.model = model
         self.n_predicates = n_predicates
         self.top_k = top_k
-        self.api_base = api_base
         self.retriever = None
 
     # --- hooks -------------------------------------------------------------------
@@ -148,6 +147,16 @@ class AuxiliaryGenerator(ABC):
     @abstractmethod
     def accept(self, source, label, ctx) -> tuple[bool, str]:
         """Validate a program. Returns ``(accepted, reason)``; reason is shown when rejected."""
+
+    def accept_reused(self, stem, ctx) -> tuple[bool, str]:
+        """Validate a library program the model chose to reuse, same contract as :meth:`accept`.
+
+        Retrieval matches a candidate on its name and description, which says nothing about how
+        it behaves on *this* class's molecules, so a reuse is worth the same check a new program
+        gets. Pipelines whose validation needs the class's molecules override this; the default
+        keeps every reuse, which is the behaviour of a pipeline that cannot tell.
+        """
+        return True, ""
 
     @abstractmethod
     def add_to_library(self, source, chebi_id):
@@ -170,8 +179,35 @@ class AuxiliaryGenerator(ABC):
         work here and leaves the result in ``ctx`` for :meth:`accept` to read back.
         """
 
+    def repair(self, parsed, blocks, ctx, chebi_id, info) -> None:
+        """One targeted feedback round per failing item, run right after :meth:`prepare`.
+
+        A pipeline that re-prompts the model to fix a failing program does so here: it mutates
+        ``blocks`` in place with repaired sources, re-validates, and records into ``ctx`` both
+        the feedback exchanges (``ctx["repairs"]``, rendered in the log) and any predicate it
+        gave up on (``ctx["excluded_labels"]`` / ``ctx["excluded_names"]``). Default: no round.
+        """
+
+    def finalize(self, chebi_id, info, parsed, stems, ctx) -> dict | None:
+        """Post-selection hook, after the class's predicates are fixed and stored.
+
+        Runs once ``stems`` (the kept reused + new predicates) is known. Returns an optional
+        dict recorded on the selection and rendered in the log; the rule pipeline uses it to
+        evaluate and save the model's class hypothesis. Default: nothing to do.
+        """
+        return None
+
     def retriever_entry(self, stem, saved) -> dict:
         return {"name": saved.name, "description": saved.description, "kind": "rule", "stem": stem}
+
+    def rejection_code(self, label, ctx) -> str | None:
+        """Stable identifier for *why* ``label`` was rejected, or ``None`` if uncategorised.
+
+        Recorded alongside the human-readable reason so a later pass — a repair prompt that
+        feeds the failure back to the model, say — can branch on the error type instead of
+        parsing prose. Only pipelines that categorise their rejections override this.
+        """
+        return None
 
     def describe(self, saved, stem, reason) -> str:
         return f"{saved.name} -> library/{stem} ({reason}): {saved.description}"
@@ -185,12 +221,17 @@ class AuxiliaryGenerator(ABC):
         candidates = self.retriever.retrieve(query, top_k=self.top_k) if len(self.retriever) else []
         prompt = self.build_user_prompt(chebi_id, info, candidates, ctx)
 
-        parsed, raw = None, None
+        parsed, raw, attempts = None, None, []
         try:
-            parsed, raw = generate_one(prompt, self.system_prompt, self.model, self.selection_model, self.api_base)
+            parsed, raw, attempts = generate_one(
+                prompt, self.system_prompt, self.model, self.selection_model
+            )
+        except Exception as e:
+            attempts = getattr(e, "_chebilp_attempts", [])
+            raise
         finally:
             # Log the exchange even if the request failed; rewritten below once resolved.
-            log_path = self._write_log(chebi_id, info, prompt, parsed, raw, None)
+            log_path = self._write_log(chebi_id, info, prompt, parsed, raw, None, attempts)
             print(f"    logged full exchange to {log_path}")
 
         reused_stems: list[str] = []
@@ -203,33 +244,67 @@ class AuxiliaryGenerator(ABC):
 
         blocks = [(f"chebi_{chebi_id}_block_{i}", self.to_source(item)) for i, item in enumerate(parsed.new)]
         self.prepare(blocks, ctx)
+        # One targeted feedback round per failing item (no-op for pipelines that skip it). It
+        # rewrites blocks with repaired sources and marks any predicate it excluded, so the
+        # gate loops below store the repaired programs and drop only what stayed broken.
+        self.repair(parsed, blocks, ctx, chebi_id, info)
+
+        rejected: list[dict] = []
+
+        # Reuses face the same gate as new programs. A reuse a new program builds on is still
+        # pulled back in by ``resolve_rule_dependencies`` at build_bk time, so dropping one here
+        # only keeps it out of the ILP's feature set — it never breaks a body that needs it.
+        kept_reused: list[dict] = []
+        for stem in reused_stems:
+            ok, reason = self.accept_reused(stem, ctx)
+            if not ok:
+                code = self.rejection_code(stem, ctx)
+                print(f"    rejected reused {stem}" + (f" [{code}]" if code else "") + f": {reason}")
+                record = {"name": stem, "reason": reason, "reused": True}
+                if code is not None:
+                    record["code"] = code
+                rejected.append(record)
+                continue
+            kept_reused.append({"name": stem, "reason": reason})
 
         new_stems: list[str] = []
-        rejected: list[str] = []
+        new_records: list[dict] = []
         seen: set[str] = set()
         for item, (label, source) in zip(parsed.new, blocks):
             ok, reason = self.accept(source, label, ctx)
             if not ok:
-                print(f"    rejected {item.name}: {reason}")
-                rejected.append(f"{item.name} ({reason})")
+                code = self.rejection_code(label, ctx)
+                print(f"    rejected {item.name}" + (f" [{code}]" if code else "") + f": {reason}")
+                record = {"name": item.name, "reason": reason}
+                if code is not None:
+                    record["code"] = code
+                rejected.append(record)
                 continue
             added = self.add_to_library(source, chebi_id)
             if added is None:
-                rejected.append(f"{item.name} (invalid program)")
+                rejected.append({"name": item.name, "reason": "invalid program"})
                 continue
             stem, saved = added
             if saved.name in seen:
                 continue
             seen.add(saved.name)
             new_stems.append(stem)
+            new_records.append({"name": saved.name, "stem": stem, "reason": reason})
             self.retriever.add_entry(self.retriever_entry(stem, saved))
             print(f"    new {self.describe(saved, stem, reason)}")
 
-        stems = reused_stems + new_stems
+        stems = [r["name"] for r in kept_reused] + new_stems
         set_class_predicates(chebi_id, stems, problem_dir=self.library_dir)
 
-        selection = {"reused": reused_stems, "new": new_stems, "rejected": rejected}
-        self._write_log(chebi_id, info, prompt, parsed, raw, selection)
+        selection = {"reused": kept_reused, "new": new_records, "rejected": rejected}
+        hypothesis_eval = self.finalize(chebi_id, info, parsed, stems, ctx)
+        if hypothesis_eval is not None:
+            selection["hypothesis_eval"] = hypothesis_eval
+        if ctx.get("repairs"):
+            selection["repairs"] = ctx["repairs"]
+        # Fold the feedback-round calls into the cost/reask totals the log reports.
+        attempts = list(attempts) + ctx.get("extra_attempts", [])
+        self._write_log(chebi_id, info, prompt, parsed, raw, selection, attempts)
         return len(stems)
 
     def run(self, chebi_graph, chebi_ids) -> int:
@@ -238,8 +313,14 @@ class AuxiliaryGenerator(ABC):
         self.retriever = self.build_retriever()
         print(f"  {len(self.retriever)} {self.noun}(s) in the library.")
 
+        done = set(load_class_map(self.library_dir))
+        if done:
+            print(f"  Resuming: {len(done)} class(es) already in class_map.json will be skipped.")
+
         total = 0
         for chebi_id in sort_labels_by_hierarchy(chebi_ids, chebi_graph):
+            if str(chebi_id) in done:
+                continue
             info = get_class_info(chebi_graph, chebi_id)
             print(f"CHEBI:{chebi_id} ({info['name']})...")
             try:
@@ -253,26 +334,120 @@ class AuxiliaryGenerator(ABC):
 
     # --- logging -----------------------------------------------------------------
 
-    def _write_log(self, chebi_id, info, prompt, parsed, raw, selection):
+    def _write_log(self, chebi_id, info, prompt, parsed, raw, selection, attempts=None):
+        attempts = attempts or []
+        failed = [a for a in attempts if a.get("error")]
+        costs = [a["cost"] for a in attempts if a.get("cost") is not None]
+        total_cost = sum(costs) if costs else None
         log_path = get_aux_generation_log_path(chebi_id, base_dir=self.library_dir)
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"# Auxiliary-{self.noun} generation log — CHEBI:{chebi_id} ({info['name']})\n\n")
-            f.write(f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n- Model: {self.model}\n\n")
+            f.write(f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n- Model: {self.model}\n")
+            if attempts:
+                cost_str = f"${total_cost:.4f}" if total_cost is not None else "unknown"
+                f.write(f"- Cost: {cost_str} across {len(attempts)} call(s), {len(failed)} reasked\n")
+            f.write("\n")
             if selection is not None:
-                f.write("## Resolved selection\n\n")
-                f.write(f"- Reused from library: {', '.join(selection['reused']) or '(none)'}\n")
-                f.write(f"- New {self.noun}s added: {', '.join(selection['new']) or '(none)'}\n")
-                f.write(f"- Rejected: {'; '.join(selection['rejected']) or '(none)'}\n\n")
+                f.write(self._format_selection(selection))
             if parsed is not None:
                 f.write(f"## Model reasoning\n\n{parsed.reasoning}\n\n")
                 f.write(self._format_output(parsed))
             f.write("## System prompt\n\n```\n" + self.system_prompt + "\n```\n\n")
             f.write("## User prompt\n\n```\n" + prompt + "\n```\n\n")
-            if parsed is None:
+            if parsed is None and not failed:
                 f.write("## Raw LLM response\n\n```json\n")
                 f.write(raw if raw is not None else "(no response — request failed)")
-                f.write("\n```\n")
+                f.write("\n```\n\n")
+            if failed:
+                # Kept at the bottom: the resolved result is what matters; the reasks are
+                # diagnostic context for why an extra call (or several) was needed.
+                f.write(self._format_failed_attempts(failed))
         return log_path
+
+    def _format_selection(self, selection) -> str:
+        """Render the resolved selection: reused, accepted (with fire fraction), rejected."""
+        parts = ["## Resolved selection\n\n"]
+        if selection["reused"]:
+            parts.append("- Reused from library:\n")
+            for r in selection["reused"]:
+                parts.append(f"    - `{r['name']}`" + (f" — {r['reason']}\n" if r.get("reason") else "\n"))
+        else:
+            parts.append("- Reused from library: (none)\n")
+        if selection["new"]:
+            parts.append(f"- New {self.noun}s added:\n")
+            for r in selection["new"]:
+                parts.append(f"    - `{r['name']}` — {r['reason']}\n")
+        else:
+            parts.append(f"- New {self.noun}s added: (none)\n")
+        if selection["rejected"]:
+            parts.append("- Rejected:\n")
+            for r in selection["rejected"]:
+                code = f"**[{r['code']}]** " if r.get("code") else ""
+                origin = " (reused)" if r.get("reused") else ""
+                parts.append(f"    - `{r['name']}`{origin} — {code}{r['reason']}\n")
+        else:
+            parts.append("- Rejected: (none)\n")
+        if selection.get("repairs"):
+            parts.append(self._format_repairs(selection["repairs"]))
+        h = selection.get("hypothesis_eval")
+        if h is not None:
+            f1 = h.get("train_f1")
+            f1_str = f"{f1:.3f}" if isinstance(f1, (int, float)) else "n/a (did not ground)"
+            parts.append(
+                f"- Class hypothesis train-F1: {f1_str}"
+                f" (TP {h.get('tp')}, FP {h.get('fp')}, TN {h.get('tn')}, FN {h.get('fn')})\n"
+            )
+            parts.append(f"    - `{h.get('hypothesis', '')}`\n")
+        parts.append("\n")
+        return "".join(parts)
+
+    @staticmethod
+    def _format_confusion(m) -> str | None:
+        """One-line ``F1 (TP.. FP.. TN.. FN..)`` for a metrics dict, or ``None`` if absent."""
+        if not m:
+            return None
+        f1 = m.get("train_f1")
+        f1_str = f"{f1:.3f}" if isinstance(f1, (int, float)) else "n/a"
+        return f"F1 {f1_str} (TP {m.get('tp')}, FP {m.get('fp')}, TN {m.get('tn')}, FN {m.get('fn')})"
+
+    def _format_repairs(self, repairs) -> str:
+        """Render the feedback round: what failed, the feedback given, the before/after metrics,
+        and the outcome. The before→after lines make plain whether the repair helped or hurt."""
+        parts = ["\n### Feedback rounds\n\n"]
+        for r in repairs:
+            outcome = r.get("outcome", "")
+            parts.append(f"- `{r.get('name')}` ({r.get('kind')}) → {outcome}\n")
+            if r.get("feedback"):
+                fb = r["feedback"].strip().replace("\n", "\n      ")
+                parts.append(f"    - feedback: {fb}\n")
+            before_cm = self._format_confusion(r.get("before_metrics"))
+            after_cm = self._format_confusion(r.get("after_metrics"))
+            if before_cm is not None or after_cm is not None:
+                parts.append(f"    - before: {before_cm or 'n/a (did not ground)'}\n")
+                if after_cm is not None:
+                    parts.append(f"    - after:  {after_cm}\n")
+            bf, af = r.get("before_fire"), r.get("after_fire")
+            if bf is not None or af is not None:
+                line = f"    - fires: {bf:.0%}" if bf is not None else "    - fires: n/a"
+                if af is not None:
+                    line += f" → {af:.0%}"
+                parts.append(line + "\n")
+            if r.get("after"):
+                parts.append("    - repaired to:\n\n      ```\n      "
+                             + r["after"].strip().replace("\n", "\n      ") + "\n      ```\n")
+        return "".join(parts)
+
+    def _format_failed_attempts(self, failed) -> str:
+        """Render reasked calls (malformed / schema-invalid output) at the log's tail."""
+        parts = [f"## Failed attempts ({len(failed)} reasked)\n\n"]
+        for i, a in enumerate(failed, 1):
+            cost = a.get("cost")
+            cost_str = f" — cost ${cost:.4f}" if cost is not None else ""
+            parts.append(f"### Attempt {i}{cost_str}\n\n")
+            parts.append(f"- Error: {a['error']}\n\n")
+            raw = a.get("raw")
+            parts.append("```json\n" + (raw if raw else "(no raw response captured)") + "\n```\n\n")
+        return "".join(parts)
 
     def _format_output(self, parsed) -> str:
         """Render the model's parsed answer as readable Markdown."""
@@ -286,4 +461,7 @@ class AuxiliaryGenerator(ABC):
         for item in parsed.new:
             parts.append(f"#### `{item.name}`\n\n{item.description}\n\n")
             parts.append("```\n" + item.program.strip("\n") + "\n```\n\n")
+        hypothesis = getattr(parsed, "hypothesis", None)
+        if hypothesis:
+            parts.append("### Class hypothesis\n\n```\n" + hypothesis.strip("\n") + "\n```\n\n")
         return "".join(parts)
