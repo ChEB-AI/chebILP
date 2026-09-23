@@ -92,6 +92,7 @@ Generate them before `build_bk`:
 python -m chebILP.predicate_generation.generate_auxiliary_rules \
   --labels_file data/chebi_v251/ChEBI25_3_STAR/labels.txt \
   --chebi_version 251 \
+  --molecules_path data/chebi_v251/ChEBI25_3_STAR/molecules.pkl \ 
   --n_predicates 4 \
   --predicate_dir data/llm_generated_rules
 ```
@@ -151,7 +152,7 @@ Combine ILP rules with a deep learning (DL) model for hierarchical multi-label c
 python -m chebILP build_ilp_preds_for_ensemble \
   --run_dir data/results/run_20260101_120000 \
   --predict_on validation \
-  --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
+  --chebi_split data/chebi_v251/ChEBI25_3_STAR/splits.csv \
   --chebi_version 251
 ```
 
@@ -160,11 +161,11 @@ This writes `full_val_preds.npy` and `full_val_preds_metadata.json` into the run
 **Step 2 — Model selection and ILP tensor assembly:**
 ```bash
 python -m chebILP ensemble_construct \
-  --chebi_split data/chebi_v248/ChEBI25_3_STAR/splits.csv \
+  --chebi_split data/chebi_v251/ChEBI25_3_STAR/splits.csv \
   --dl_val_preds_npy data/preds/val_preds.npy \
   --dl_val_preds_meta data/preds/val_preds_metadata.json \
   --ilp_val_runs data/results_val/run_A data/results_val/run_B \
-  --labels_file data/chebi_v248/ChEBI25_3_STAR/labels.txt \
+  --labels_file data/chebi_v251/ChEBI25_3_STAR/labels.txt \
   --predict_on test \
   --output data/ensemble_predictions/ensemble
 ```
@@ -181,7 +182,7 @@ python -m chebILP ensemble_aggregate \
   --ilp_preds_npy data/ensemble_predictions/ensemble_ilp_preds.npy \
   --ilp_preds_meta data/ensemble_predictions/ensemble_ilp_preds_metadata.json \
   --trusted_models data/ensemble_predictions/ensemble_trusted_models.csv \
-  --label_stats data/chebi_v248/ChEBI25_3_STAR/processed/class_stats.csv \
+  --label_stats data/chebi_v251/ChEBI25_3_STAR/processed/class_stats.csv \
   --output data/ensemble_predictions/final_predictions.npy
 ```
 
@@ -193,7 +194,7 @@ DL predictions propagate freely through the class hierarchy; ILP and always-posi
 
 **Translate a rule to natural language (global explanation):**
 ```bash
-python -m chebILP rule_to_nl --rule "chebi_15734(V0) :- has_atom(V0,V1), c(V1), has_2_hs(V1), bSINGLE(V1,V2), o(V2), has_1_hs(V2)." --chebi_graph_path data/chebi_v248/chebi_graph.pkl
+python -m chebILP rule_to_nl --rule "chebi_15734(V0) :- has_atom(V0,V1), c(V1), has_2_hs(V1), bSINGLE(V1,V2), o(V2), has_1_hs(V2)." --chebi_graph_path data/chebi_v251/chebi_graph.pkl
 ```
 
 **Explain why a molecule satisfies a rule (local explanation):**
@@ -201,6 +202,6 @@ python -m chebILP rule_to_nl --rule "chebi_15734(V0) :- has_atom(V0,V1), c(V1), 
 python -m chebILP explain \
   --smiles "CCO" \
   --rule "chebi_15734(V0) :- has_atom(V0,V1), c(V1), has_2_hs(V1), bSINGLE(V1,V2), o(V2), has_1_hs(V2)." \
-  --chebi_graph_path data/chebi_v248/chebi_graph.pkl \
+  --chebi_graph_path data/chebi_v251/chebi_graph.pkl \
   --output explanation.png
 ```
