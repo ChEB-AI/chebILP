@@ -7,8 +7,11 @@ from chebILP.molecule_processing.data_preparation import ChEBIDataset
 from chebILP.molecule_processing.mol_to_fol import mol_to_fol_fgs
 from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
 from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
-from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules, resolve_rule_dependencies
-from chebILP.molecule_processing.fg_matching import get_chembl_fgs, get_chebi_fgs
+from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules, resolve_rule_dependencies, referenced_fact_predicates
+from chebILP.molecule_processing.fg_matching import (
+    get_chembl_fgs, get_chebi_fgs, get_efg_fgs,
+    FG_SEED_SOURCES, FG_SEED_PREFIXES, is_fg_seed_name, fg_fact_lines,
+)
 from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
@@ -113,6 +116,35 @@ class ILPProblemBuilder:
         print(f"Label with least negative samples: ChEBI:{min_n_neg_id} with {counts[min_n_neg_id][1]} samples across all splits")
 
 
+    def _get_fg_matches(self, source_key: str) -> dict:
+        """Dataset-wide functional-group matches for a seed source, computed once and cached.
+
+        Used to supply/emit facts for seeded ``chembl_fg_*`` / ``efg_*`` predicates the LLM rule
+        library reuses. Keyed by molecule id -> list of full predicate names.
+        """
+        cache = getattr(self, "_fg_matches_cache", None)
+        if cache is None:
+            cache = self._fg_matches_cache = {}
+        if source_key not in cache:
+            _prefix, matcher, _vocab, cache_name = FG_SEED_SOURCES[source_key]
+            cache[source_key] = matcher(
+                self.dataset.molecules,
+                cache_path=os.path.join(self.dataset.processed_dir, cache_name),
+            )
+        return cache[source_key]
+
+    def _fg_seed_fact_lines(self, names, ids) -> list[str]:
+        """Presence facts for the given seeded FG predicate ``names``, over molecule ``ids``.
+
+        Groups the names by seed source (prefix) so each source's matcher runs once.
+        """
+        lines: list[str] = []
+        for source_key, (prefix, *_rest) in FG_SEED_SOURCES.items():
+            want = {n for n in names if n.startswith(prefix)}
+            if want:
+                lines += fg_fact_lines(self._get_fg_matches(source_key), ids, needed=want)
+        return lines
+
     def build_bk(self, target_ids):
         """
         Build ILP background knowledge.
@@ -144,15 +176,20 @@ class ILPProblemBuilder:
             # llm_generated_rules: the class's auxiliary predicates are ASP rules,
             # evaluated (below) against the atom facts plus optional computed facts.
             # Only the derived aux_* extensions are written to bk.pl.
-            rule_programs, dependency_programs = None, []
+            rule_programs, dependency_programs, fg_seed_programs = None, [], []
             if self.predicate_set == "llm_generated_rules":
-                rule_programs = load_class_rules(target_id, library_dir=self.aux_library_dir)
+                selected_programs = load_class_rules(target_id, library_dir=self.aux_library_dir)
+                # A seeded chembl_fg_*/efg_* predicate is not an ASP rule: its extension is the
+                # RDKit functional-group match, emitted directly below rather than ground by clingo.
+                fg_seed_programs = [p for p in selected_programs if is_fg_seed_name(p.name)]
+                rule_programs = [p for p in selected_programs if not is_fg_seed_name(p.name)]
                 # class_map.json records only the predicates the class chose, not the ones
                 # they build on, so the dependencies have to be pulled in from the library
                 # or the rules ground against an empty body and derive nothing.
                 dependency_programs = resolve_rule_dependencies(rule_programs, self.aux_library_dir)
                 pbar.set_postfix_str(f"{len(rule_programs)} rule(s)"
-                                     + (f" +{len(dependency_programs)} dep(s)" if dependency_programs else ""))
+                                     + (f" +{len(dependency_programs)} dep(s)" if dependency_programs else "")
+                                     + (f" +{len(fg_seed_programs)} fg_seed" if fg_seed_programs else ""))
 
             # The fowl set adds a single class-specific predicate, fowl_<target_id>,
             # derived from a SMARTS pattern, on top of the atom predicates. Not every
@@ -185,11 +222,16 @@ class ILPProblemBuilder:
                 prolog_lines_atoms, body_predicates_atoms = build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set, fowl_smarts=fowl_smarts)
                 prolog_lines += prolog_lines_atoms
                 body_predicates.update(body_predicates_atoms)
-                if self.predicate_set in ["chembl_fgs", "chebi_fgs"]:
+                if self.predicate_set in ["chembl_fgs", "chebi_fgs", "efg"]:
                     # add fgs as samples
                     if not hasattr(self, "_fg_data"):
                         if self.predicate_set == "chembl_fgs":
                             self._fg_data = get_chembl_fgs(self.dataset.molecules)
+                        elif self.predicate_set == "efg":
+                            self._fg_data = get_efg_fgs(
+                                self.dataset.molecules,
+                                cache_path=os.path.join(self.dataset.processed_dir, "efg_fgs.pkl"),
+                            )
                         else:
                             self._fg_data = get_chebi_fgs(self.dataset.molecules)
                     prolog_lines_fgs, body_predicates_fgs = build_background_fg_data(self._fg_data, selected_rows, source=self.predicate_set)
@@ -226,6 +268,11 @@ class ILPProblemBuilder:
                 eval_facts = [line for split in ["train", "validation", "test"] for line in prolog_lines_by_split[split]]
                 if self.computed_facts:
                     eval_facts += [line for split in ["train", "validation", "test"] for line in computed_lines_by_split.get(split, [])]
+                # A rule body may reference a seeded chembl_fg_*/efg_* predicate; supply exactly
+                # those FG facts so the rule fires. Like computed facts, they feed grounding only.
+                referenced_fg = referenced_fact_predicates(rule_programs + dependency_programs, FG_SEED_PREFIXES)
+                if referenced_fg:
+                    eval_facts += self._fg_seed_fact_lines(referenced_fg, all_selected_ids)
                 # The class's rules are grounded as one program, so a rule may use a predicate
                 # another of its rules defines. The head may be of any arity; each derived
                 # atom is written to the split of the molecule it belongs to. Dependencies
@@ -255,6 +302,16 @@ class ILPProblemBuilder:
                                 emitted[split].add(line)
                                 body_predicates.add((rp.name, len(args)))
                                 prolog_lines_by_split[split].append(line)
+
+            # Seeded chembl_fg_*/efg_* predicates a class chose: emit their RDKit match as a
+            # molecule-level presence fact per split (an arity-1 feature), exactly like the
+            # chembl_fgs/efg predicate sets but scoped to the predicates this class selected.
+            if self.predicate_set == "llm_generated_rules" and fg_seed_programs:
+                selected_names = {p.name for p in fg_seed_programs}
+                for split in ["train", "validation", "test"]:
+                    for line in self._fg_seed_fact_lines(selected_names, selected_ids_by_split[split]):
+                        prolog_lines_by_split[split].append(line)
+                        body_predicates.add((line.split("(")[0], 1))
 
             for split in ["train", "validation", "test"]:
                 prolog_lines = prolog_lines_by_split[split]
@@ -520,8 +577,13 @@ def build_full_background(
     )
     prolog_lines = list(prolog_lines)
 
-    if predicate_set in ("chembl_fgs", "chebi_fgs"):
-        fg_data = get_chembl_fgs(rows) if predicate_set == "chembl_fgs" else get_chebi_fgs(rows)
+    if predicate_set in ("chembl_fgs", "chebi_fgs", "efg"):
+        if predicate_set == "chembl_fgs":
+            fg_data = get_chembl_fgs(rows)
+        elif predicate_set == "efg":
+            fg_data = get_efg_fgs(rows)
+        else:
+            fg_data = get_chebi_fgs(rows)
         fg_lines, _ = build_background_fg_data(fg_data, rows, source=predicate_set)
         prolog_lines += fg_lines
 
@@ -536,27 +598,53 @@ def build_full_background(
     # learned program's aux_* body literals resolve. Computed facts stay local to the
     # grounding and are not added to the returned BK.
     if predicate_set == "llm_generated_rules" and rule_programs:
+        mol_ids = [str(i) for i in rows.index]
+        # Seeded chembl_fg_*/efg_* predicates are RDKit matches, not ASP rules: emit their facts
+        # directly and keep them out of the clingo grounding below.
+        fg_seed_programs = [p for p in rule_programs if is_fg_seed_name(p.name)]
+        asp_programs = [p for p in rule_programs if not is_fg_seed_name(p.name)]
+        if rule_dependencies is None:
+            rule_dependencies = resolve_rule_dependencies(asp_programs, aux_library_dir)
+
+        selected_fg = {p.name for p in fg_seed_programs}
+        referenced_fg = referenced_fact_predicates(asp_programs + rule_dependencies, FG_SEED_PREFIXES)
+        # Match each involved seed source once, then filter per use (feature vs grounding-only).
+        matches_by_source = {}
+        for key, (prefix, matcher, _v, _c) in FG_SEED_SOURCES.items():
+            if any(n.startswith(prefix) for n in selected_fg | referenced_fg):
+                matches_by_source[key] = (prefix, matcher(rows))
+
+        def _fg_lines(want):
+            out = []
+            for _key, (prefix, m) in matches_by_source.items():
+                sub = {n for n in want if n.startswith(prefix)}
+                if sub:
+                    out += fg_fact_lines(m, mol_ids, needed=sub)
+            return out
+
+        prolog_lines += _fg_lines(selected_fg)  # selected FG predicates -> features in the BK
+
         eval_facts = list(prolog_lines)
         if computed_facts:
             eval_facts += build_computed_facts(rows)
-        mol_ids = [str(i) for i in rows.index]
-        if rule_dependencies is None:
-            rule_dependencies = resolve_rule_dependencies(rule_programs, aux_library_dir)
-        try:
-            extensions = derive_rule_extensions(
-                rule_programs + rule_dependencies, eval_facts, mol_ids,
-            )
-        except (RuntimeError, MemoryError) as e:
-            print(f"Grounding failed ({e}); returning background knowledge without aux_* facts.")
-            extensions = {}
-        for rp in rule_programs:
-            emitted = set()
-            for arg_tuples in extensions.get(rp.name, {}).values():
-                for args in arg_tuples:
-                    line = f"{rp.name}({','.join(args)})."
-                    if line not in emitted:
-                        emitted.add(line)
-                        prolog_lines.append(line)
+        eval_facts += _fg_lines(referenced_fg - selected_fg)  # referenced-only -> grounding
+
+        if asp_programs:
+            try:
+                extensions = derive_rule_extensions(
+                    asp_programs + rule_dependencies, eval_facts, mol_ids,
+                )
+            except (RuntimeError, MemoryError) as e:
+                print(f"Grounding failed ({e}); returning background knowledge without aux_* facts.")
+                extensions = {}
+            for rp in asp_programs:
+                emitted = set()
+                for arg_tuples in extensions.get(rp.name, {}).values():
+                    for args in arg_tuples:
+                        line = f"{rp.name}({','.join(args)})."
+                        if line not in emitted:
+                            emitted.add(line)
+                            prolog_lines.append(line)
 
     return prolog_lines
 
@@ -590,7 +678,7 @@ def build_background_chebi_fg_rules(rules_path=None):
     return prolog_lines, body_predicates
 
 
-def build_background_fg_data(fg_data: dict[int, list[str]], rows, source: Literal["chembl_fgs", "chebi_fgs"]):
+def build_background_fg_data(fg_data: dict[int, list[str]], rows, source: Literal["chembl_fgs", "chebi_fgs", "efg"]):
     lines_by_predicate = dict()
 
     for row in rows.itertuples():

@@ -16,7 +16,6 @@ import os
 import re
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 
@@ -34,7 +33,6 @@ from chebILP.predicate_generation.auxiliary_rules import (
     DEFAULT_AUX_RULE_LIBRARY_DIR,
     ERROR_UNBOUNDED_RECURSION,
     RuleProgram,
-    _referenced_predicates,
     add_rule_to_library,
     analyze_hypothesis,
     aux_rule_path,
@@ -42,10 +40,18 @@ from chebILP.predicate_generation.auxiliary_rules import (
     load_class_rules,
     parse_rule_program,
     prune_hypothesis,
+    referenced_fact_predicates,
     resolve_rule_dependencies,
     rule_program_error,
     save_class_hypothesis,
     static_rule_errors,
+)
+from chebILP.molecule_processing.fg_matching import (
+    FG_SEED_PREFIXES,
+    FG_SEED_SOURCES,
+    fg_fact_lines,
+    is_fg_seed_name,
+    seed_fg_library,
 )
 from chebILP.ilp_path_manager import get_exs_path
 from chebILP.utils import get_atom_id
@@ -255,15 +261,6 @@ def _load_library_rule(stem: str, library_dir: str):
         return parse_rule_program(f.read(), source_file=path)
 
 
-def _is_molecule_level(by_mol: dict[str, list[tuple[str, ...]]]) -> bool:
-    """True when every derived atom is just ``pred(<molecule>)`` — a per-molecule flag."""
-    return all(
-        len(args) == 1 and args[0] == mol
-        for mol, arg_tuples in by_mol.items()
-        for args in arg_tuples
-    )
-
-
 class RuleSelection(Selection):
     """A rule pipeline's answer: the base selection plus a class hypothesis.
 
@@ -274,24 +271,6 @@ class RuleSelection(Selection):
     hypothesis: str
 
 
-class PredicateRepair(BaseModel):
-    """The model's answer to a single-predicate feedback round: a rewritten program."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    reasoning: str
-    program: str
-
-
-class HypothesisRepair(BaseModel):
-    """The model's answer to a hypothesis feedback round: a rewritten class hypothesis."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    reasoning: str
-    hypothesis: str
-
-
 class RuleGenerator(AuxiliaryGenerator):
     """Auxiliary predicates written as ASP/clingo rule programs."""
 
@@ -299,13 +278,12 @@ class RuleGenerator(AuxiliaryGenerator):
     selection_model = RuleSelection
 
     def __init__(self, library_dir, model, n_predicates, top_k, *, molecules,
-                 problem_dir, computed_facts, prompt_samples, hypothesis_min_f1=0.5):
+                 problem_dir, computed_facts, prompt_samples):
         super().__init__(library_dir, model, n_predicates, top_k)
         self.molecules = molecules
         self.problem_dir = problem_dir
         self.computed_facts = computed_facts
         self.prompt_samples = prompt_samples
-        self.hypothesis_min_f1 = hypothesis_min_f1
 
     @property
     def system_prompt(self) -> str:
@@ -320,7 +298,8 @@ class RuleGenerator(AuxiliaryGenerator):
         pos_rows, neg_rows = _load_train_samples(
             chebi_id, self.problem_dir, self.molecules
         )
-        val_facts, val_ids = _build_eval_facts(pd.concat([pos_rows, neg_rows]), self.computed_facts)
+        val_rows = pd.concat([pos_rows, neg_rows])
+        val_facts, val_ids = _build_eval_facts(val_rows, self.computed_facts)
         # SMILES by molecule id, so feedback can name the exact molecules a predicate missed or
         # wrongly fired on (not only the first prompt_samples used in the initial prompt).
         smiles_by_id = {}
@@ -334,13 +313,8 @@ class RuleGenerator(AuxiliaryGenerator):
             "smiles_by_id": smiles_by_id,
             "val_facts": val_facts,
             "val_ids": val_ids,
+            "val_rows": val_rows,
             "pos_ids": {str(i) for i in pos_rows.index},
-            # Feedback-round bookkeeping (filled by repair; read back by prepare on re-runs).
-            "excluded_labels": set(),
-            "excluded_names": set(),
-            "excluded_reasons": {},
-            "repairs": [],
-            "extra_attempts": [],
         }
 
     def build_user_prompt(self, chebi_id, info, candidates, ctx) -> str:
@@ -404,23 +378,14 @@ fit; only write NEW rules for properties they do not already cover.
         first checked on its own, which localises a syntax error to the one program that has
         it; the rest are then grounded as a set, alongside the library programs being reused,
         exactly as ``build_bk`` will ground them. A program that only fails behaviourally
-        (fires on nothing, or on everything) is kept — the feedback round handles those; only a
-        structural failure (unparseable, clingo error, static-safety, does-not-ground) is
-        recorded here, and excludes the program only if it survives its one repair.
+        (fires on nothing, or on everything) is kept; only a structural failure (unparseable,
+        clingo error, static-safety, does-not-ground) is recorded here, and such a program is
+        the only kind :meth:`accept` drops.
         """
         ctx["errors"] = {}
         ctx["error_codes"] = {}
         ctx["progs"] = {}
-        # A predicate excluded by an earlier feedback round stays out of grounding — its
-        # program is the one that could not ground safely — but keeps its recorded error so the
-        # gate loop still reports it. ``repair`` re-runs prepare after each change.
-        excluded = ctx.get("excluded_labels", set())
-        for label, (code, message) in ctx.get("excluded_reasons", {}).items():
-            ctx["errors"][label] = message
-            ctx["error_codes"][label] = code
         for label, source in blocks:
-            if label in excluded:
-                continue
             prog = parse_rule_program(source, source_file=label)
             if prog is None:
                 ctx["errors"][label] = "unparseable program"
@@ -472,7 +437,8 @@ fit; only write NEW rules for properties they do not already cover.
             return
         try:
             ctx["extensions"] = derive_rule_extensions(
-                together, ctx["val_facts"], ctx["val_ids"], timeout=_VALIDATION_GROUNDING_TIMEOUT
+                together, self._augment_with_fg_seeds(together, ctx), ctx["val_ids"],
+                timeout=_VALIDATION_GROUNDING_TIMEOUT,
             )
             ctx["extensions_valid"] = True
         except Exception as e:
@@ -502,190 +468,35 @@ fit; only write NEW rules for properties they do not already cover.
         # Reuses are library programs already validated when first written; keep them all.
         return True, ""
 
-    # --- feedback round ----------------------------------------------------------
-
     def _fire_summary(self, prog, ctx) -> str:
         if not ctx.get("val_ids"):
             return "kept (no validation molecules)"
         by_mol = ctx["extensions"].get(prog.name, {})
         return f"fires on {len(by_mol) / len(ctx['val_ids']):.0%}"
 
-    def _fire_fraction(self, label, ctx) -> float | None:
-        """Fraction of validation molecules a new predicate currently fires on, or ``None`` when
-        it has no grounding (structural failure, or no validation molecules)."""
-        prog = ctx["progs"].get(label)
-        if prog is None or not ctx.get("val_ids"):
-            return None
-        return len(ctx["extensions"].get(prog.name, {})) / len(ctx["val_ids"])
+    def _augment_with_fg_seeds(self, progs, ctx) -> list[str]:
+        """``ctx["val_facts"]`` plus the seeded functional-group facts ``progs`` reference.
 
-    def _predicate_status(self, label, ctx) -> tuple[str, str]:
-        """Classify one new predicate's current state as ``ok``/``structural``/``no_fire``/``over_fire``.
-
-        The second element is the feedback text for a repair prompt (empty when ``ok``).
+        A seeded ``chembl_fg_*`` / ``efg_*`` predicate has no clause body — its extension is the
+        RDKit match — so any program (a reused seed, a rule that builds on one, or the
+        hypothesis) referencing it needs those facts supplied at grounding, exactly as
+        ``build_bk`` does. Matches are computed once per source for the class's validation
+        molecules and cached in ctx.
         """
-        if label in ctx["errors"]:
-            return "structural", ctx["errors"][label]
-        prog = ctx["progs"].get(label)
-        if prog is None or not ctx.get("val_ids"):
-            return "ok", ""
-        by_mol = ctx["extensions"].get(prog.name, {})
-        n = len(ctx["val_ids"])
-        frac = len(by_mol) / n
-        if frac == 0.0:
-            samples = ctx.get("pos_smiles", [])[:self.prompt_samples]
-            feedback = (
-                f"This predicate fires on 0% of the {n} training molecules — it never matches, "
-                "so it adds nothing. Rewrite it so it matches at least the positive examples.\n"
-                "Positive example molecules it SHOULD match (SMILES):\n"
-                + "\n".join(f"  + {s}" for s in samples)
-            )
-            return "no_fire", feedback
-        # A molecule-level flag true of ~every molecule carries no information. An atom-/pair-level
-        # predicate that fires everywhere still says WHICH atoms, so it is fine.
-        if frac >= 0.95 and _is_molecule_level(by_mol):
-            neg = {str(i) for i in ctx["val_ids"]} - ctx["pos_ids"]
-            wrong = [ctx["smiles_by_id"].get(m) for m in (set(by_mol) & neg)]
-            wrong = [s for s in wrong if s][:self.prompt_samples]
-            feedback = (
-                f"This predicate fires as a molecule-level flag on {frac:.0%} of molecules, "
-                "including negatives, so it is too unspecific to separate the class. Make it "
-                "more selective.\nNegative molecules it WRONGLY fires on (SMILES):\n"
-                + "\n".join(f"  - {s}" for s in wrong)
-            )
-            return "over_fire", feedback
-        return "ok", ""
-
-    def _dependency_order(self, blocks, ctx) -> list[int]:
-        """Block indices in dependency order: a predicate another builds on comes first.
-
-        Ties and cycles keep the model's proposal order. Processing this way means a dependent
-        is (re)evaluated only after the predicate it builds on has taken its final form, so a
-        fix upstream is seen before we decide whether the dependent needs its own repair.
-        """
-        n = len(blocks)
-        progs, name_to_idx = [], {}
-        for i, (label, source) in enumerate(blocks):
-            prog = ctx["progs"].get(label) or parse_rule_program(source, source_file=label)
-            progs.append(prog)
-            if prog is not None:
-                name_to_idx[prog.name] = i
-        needs = {i: set() for i in range(n)}
-        for i, prog in enumerate(progs):
-            if prog is None:
+        needed = {p.name for p in progs if is_fg_seed_name(p.name)}
+        needed |= referenced_fact_predicates(progs, FG_SEED_PREFIXES)
+        if not needed:
+            return ctx["val_facts"]
+        matches = ctx.setdefault("_fg_matches", {})
+        lines: list[str] = []
+        for key, (prefix, matcher, _vocab, _cache) in FG_SEED_SOURCES.items():
+            want = {n for n in needed if n.startswith(prefix)}
+            if not want:
                 continue
-            for ref in _referenced_predicates(prog):
-                j = name_to_idx.get(ref)
-                if j is not None and j != i:
-                    needs[i].add(j)
-        order, done = [], set()
-        while len(order) < n:
-            ready = [i for i in range(n) if i not in done and needs[i] <= done]
-            if not ready:  # cycle: emit the rest in proposal order
-                ready = [i for i in range(n) if i not in done]
-            for i in ready:
-                order.append(i)
-                done.add(i)
-        return order
-
-    def _exclude(self, label, name, ctx) -> None:
-        """Give up on a predicate that stayed structurally broken; advertise it to later prompts."""
-        ctx["excluded_labels"].add(label)
-        ctx["excluded_names"].add(name)
-        code = ctx["error_codes"].get(label, ERROR_UNPARSEABLE)
-        message = ctx["errors"].get(label, "excluded: still invalid after one feedback round")
-        ctx["excluded_reasons"][label] = (code, message)
-
-    def repair(self, parsed, blocks, ctx, chebi_id, info) -> None:
-        """One targeted feedback round per failing predicate, in dependency order.
-
-        Each predicate is (re)evaluated against the current state; a still-failing one that has
-        not yet had its round is re-prompted once with the specific reason (error text, missed
-        positives, or wrongly-fired negatives) plus the running list of excluded predicates.
-        The reply replaces the program in ``blocks`` and everything is re-validated. A predicate
-        that stays structurally broken is excluded; behavioural weakness is kept. The hypothesis
-        is handled later, in :meth:`finalize`, once every predicate is final.
-        """
-        if not parsed.new:
-            return
-        repaired: set[int] = set()
-        for i in self._dependency_order(blocks, ctx):
-            label = blocks[i][0]
-            if label in ctx["excluded_labels"]:
-                continue
-            item = parsed.new[i]
-            kind, feedback = self._predicate_status(label, ctx)
-            if kind == "ok":
-                continue
-            if i in repaired:
-                # No second round: keep a behaviourally weak one, drop a structural one.
-                if kind == "structural":
-                    self._exclude(label, item.name, ctx)
-                    self.prepare(blocks, ctx)
-                continue
-            record = {"name": item.name, "kind": kind, "feedback": feedback,
-                      "before": item.program, "after": None, "outcome": "kept",
-                      "before_fire": self._fire_fraction(label, ctx)}
-            ctx["repairs"].append(record)
-            repaired.add(i)
-            new_program = self._repair_predicate_call(chebi_id, info, ctx, item, feedback)
-            if new_program is None:
-                record["outcome"] = "call failed"
-                if kind == "structural":
-                    self._exclude(label, item.name, ctx)
-                    self.prepare(blocks, ctx)
-                continue
-            record["after"] = new_program
-            blocks[i] = (label, self._source_text(item.name, item.description, new_program))
-            self.prepare(blocks, ctx)  # re-validate + re-ground with the repaired program
-            record["after_fire"] = self._fire_fraction(label, ctx)
-            kind2, _ = self._predicate_status(label, ctx)
-            if kind2 == "structural":
-                self._exclude(label, item.name, ctx)
-                self.prepare(blocks, ctx)
-                record["outcome"] = "excluded"
-            print(f"    repaired {item.name} ({kind} -> {kind2})")
-
-    def _repair_predicate_call(self, chebi_id, info, ctx, item, feedback):
-        """Ask the model to rewrite one predicate; return the new program text or ``None``."""
-        prompt = self.build_predicate_repair_prompt(chebi_id, info, ctx, item, feedback)
-        try:
-            parsed, _raw, attempts = generate_one(prompt, self.system_prompt, self.model, PredicateRepair)
-        except Exception as e:
-            ctx["extra_attempts"].extend(getattr(e, "_chebilp_attempts", []))
-            print(f"    repair of {item.name} failed: {e}")
-            return None
-        ctx["extra_attempts"].extend(attempts)
-        return parsed.program
-
-    def _excluded_note(self, ctx) -> str:
-        if not ctx["excluded_names"]:
-            return ""
-        names = ", ".join(sorted(ctx["excluded_names"]))
-        return ("\nThese predicates were EXCLUDED (they could not be made to work) and are NOT "
-                f"available — do not reference them:\n  {names}\n")
-
-    def build_predicate_repair_prompt(self, chebi_id, info, ctx, item, feedback) -> str:
-        definition_str = f"Definition: {info['definition']}\n" if info["definition"] else ""
-        return f"""\
-Target class: {info['name']} (CHEBI:{chebi_id})
-{definition_str}
-You previously wrote this auxiliary predicate, but it needs fixing.
-
-  name:        {item.name}
-  description: {item.description}
-  program:
-{item.program.strip()}
-
-Problem:
-{feedback}
-{self._excluded_note(ctx)}
-Rewrite the program to fix this problem. Keep the SAME predicate name ({item.name}) and the
-same overall intent. Follow the same contract and safety rules as before.
-
-Answer with a single JSON object:
-- "reasoning": think briefly about what to change.
-- "program": the rewritten clause text only (one head plus any helper clauses).
-"""
+            if key not in matches:
+                matches[key] = matcher(ctx["val_rows"])
+            lines += fg_fact_lines(matches[key], ctx["val_ids"], needed=want)
+        return ctx["val_facts"] + lines
 
     def rejection_code(self, label, ctx) -> str | None:
         return ctx.get("error_codes", {}).get(label)
@@ -697,125 +508,62 @@ Answer with a single JSON object:
         return f"{saved.name} -> library/{stem}.pl ({reason}): {saved.description}"
 
     def _score_hypothesis(self, chebi_id, hypothesis, programs, dependencies, ctx):
-        """Ground one candidate hypothesis and return ``(kind, feedback, metrics)``.
+        """Ground one hypothesis and return its confusion-matrix + train-F1 metrics, or ``None``.
 
-        ``kind`` is ``ok`` / ``structural`` (does not parse or ground) / ``low_accuracy``
-        (grounds but train-F1 below the threshold). ``metrics`` is the confusion matrix + F1
-        when it ground, else ``None``.
+        ``None`` means the hypothesis is not a valid clause or did not ground. Grounded alongside
+        the class's kept predicates (and their library dependencies) plus any referenced ChEMBL
+        facts, exactly as ``build_bk`` will assemble them; a molecule is a positive prediction
+        when it derives the ``chebi_<id>`` head.
         """
         head = f"chebi_{chebi_id}"
         if analyze_hypothesis(hypothesis) is None:
-            return "structural", "The hypothesis is not a valid clause `chebi_<id>(A) :- ... .`", None
+            return None
         hyp_prog = RuleProgram(name=head, description="LLM class hypothesis",
                                source=hypothesis, source_file="<hypothesis>")
+        all_progs = programs + dependencies + [hyp_prog]
         try:
             extensions = derive_rule_extensions(
-                programs + dependencies + [hyp_prog],
-                ctx["val_facts"], ctx["val_ids"], timeout=_VALIDATION_GROUNDING_TIMEOUT,
+                all_progs, self._augment_with_fg_seeds(all_progs, ctx), ctx["val_ids"],
+                timeout=_VALIDATION_GROUNDING_TIMEOUT,
             )
-        except Exception as e:
-            return "structural", f"The hypothesis did not ground: {str(e).strip().splitlines()[0]}", None
+        except Exception:
+            return None
         fired = set(extensions.get(head, {}))
         pos = ctx["pos_ids"]
         neg = {str(i) for i in ctx["val_ids"]} - pos
         tp, fp = len(fired & pos), len(fired & neg)
         fn, tn = len(pos - fired), len(neg - fired)
         f1 = (2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn) > 0 else 0.0
-        metrics = {"train_f1": f1, "tp": tp, "fp": fp, "tn": tn, "fn": fn, "groundable": True}
-        if f1 < self.hypothesis_min_f1:
-            fp_smiles = [ctx["smiles_by_id"].get(m) for m in (fired & neg)]
-            fp_smiles = [s for s in fp_smiles if s][:self.prompt_samples]
-            fn_smiles = [ctx["smiles_by_id"].get(m) for m in (pos - fired)]
-            fn_smiles = [s for s in fn_smiles if s][:self.prompt_samples]
-            feedback = (
-                f"The hypothesis scores train-F1 {f1:.3f} (TP {tp}, FP {fp}, TN {tn}, FN {fn}), "
-                f"below the target of {self.hypothesis_min_f1:.2f}.\n"
-                + ("Negative molecules it WRONGLY matches (SMILES):\n"
-                   + "\n".join(f"  - {s}" for s in fp_smiles) + "\n" if fp_smiles else "")
-                + ("Positive molecules it MISSES (SMILES):\n"
-                   + "\n".join(f"  + {s}" for s in fn_smiles) if fn_smiles else "")
-            )
-            return "low_accuracy", feedback, metrics
-        return "ok", "", metrics
-
-    @staticmethod
-    def _repair_improves(before_metrics, after_metrics) -> bool:
-        """Whether a repaired hypothesis should replace the original.
-
-        The repair must ground (``after_metrics`` present); if the original also ground it must
-        score at least as well. A non-grounding original is beaten by any groundable repair. Ties
-        keep the repair — the model was explicitly asked to improve, and an equal train-F1 is not a
-        regression.
-        """
-        if after_metrics is None:
-            return False
-        if before_metrics is None:
-            return True
-        return after_metrics["train_f1"] >= before_metrics["train_f1"]
+        return {"train_f1": f1, "tp": tp, "fp": fp, "tn": tn, "fn": fn, "groundable": True}
 
     def finalize(self, chebi_id, info, parsed, stems, ctx) -> dict | None:
-        """Evaluate the model's class hypothesis, give it one feedback round, and store it.
+        """Score the model's one-shot class hypothesis and store it (no feedback round).
 
         The hypothesis is grounded alongside the class's kept predicates (and their library
-        dependencies), exactly as ``build_bk`` will assemble them, and a molecule is a positive
-        prediction when it derives the ``chebi_<id>`` head. Because this runs after every
-        predicate is final, a hypothesis lifted above the threshold by an upstream predicate fix
-        needs no repair — it is scored against the final predicates and only re-prompted (once)
-        if it still does not parse or scores too low. The train-F1 and clause are saved to the
-        library's ``hypotheses.json`` for ``--seed_hypothesis`` / ``--heuristic_guidance``.
+        dependencies), exactly as ``build_bk`` will assemble them. ``prune_hypothesis`` drops any
+        reference to a predicate that is not available, so the clause stays usable as a Popper
+        seed. The train-F1 and clause are saved to the library's ``hypotheses.json`` for
+        ``--seed_hypothesis`` / ``--heuristic_guidance``.
         """
         raw_hypothesis = (getattr(parsed, "hypothesis", "") or "").strip()
         if not raw_hypothesis:
             return None
 
         programs = load_class_rules(chebi_id, library_dir=self.library_dir)
-        dependencies = resolve_rule_dependencies(programs, self.library_dir)
+        # Seeded chembl_fg_*/efg_* predicates have no clause body to depend on; resolve only ASP.
+        asp_programs = [p for p in programs if not is_fg_seed_name(p.name)]
+        dependencies = resolve_rule_dependencies(asp_programs, self.library_dir)
         available = {p.name for p in programs + dependencies}
 
-        hypothesis = raw_hypothesis
-        kept_repair = False
-        hyp_record = None
-        if ctx["val_ids"]:
-            kind, feedback, before_metrics = self._score_hypothesis(chebi_id, hypothesis, programs, dependencies, ctx)
-            if kind != "ok":
-                hyp_record = {"name": "hypothesis", "kind": kind, "feedback": feedback,
-                              "before": hypothesis, "after": None, "outcome": "kept",
-                              "before_metrics": before_metrics}
-                ctx["repairs"].append(hyp_record)
-                new_hypothesis = self._repair_hypothesis_call(
-                    chebi_id, info, ctx, hypothesis, feedback, available
-                )
-                if not new_hypothesis:
-                    hyp_record["outcome"] = "call failed"
-                else:
-                    new_hypothesis = new_hypothesis.strip()
-                    hyp_record["after"] = new_hypothesis
-                    _, _, after_metrics = self._score_hypothesis(
-                        chebi_id, new_hypothesis, programs, dependencies, ctx)
-                    hyp_record["after_metrics"] = after_metrics
-                    # Keep the repair only when it does not regress: it must ground, and if the
-                    # original also ground it must not lower train-F1. A repair that grounds worse
-                    # — or no longer grounds — is discarded and the original hypothesis stands, so
-                    # a feedback round can never lower the class's train-F1.
-                    if self._repair_improves(before_metrics, after_metrics):
-                        hypothesis = new_hypothesis
-                        kept_repair = True
-                    else:
-                        hyp_record["outcome"] = "reverted (no improvement)"
-
-        # Safety net: drop any lingering reference to an excluded/unavailable aux predicate so
-        # the clause stays usable as a Popper seed even if the repair left one in.
-        pruned = prune_hypothesis(hypothesis, available)
-        final_hypothesis = pruned or hypothesis
+        pruned = prune_hypothesis(raw_hypothesis, available)
+        final_hypothesis = pruned or raw_hypothesis
 
         entry = {"hypothesis": final_hypothesis, "train_f1": None, "tp": None, "fp": None,
                  "tn": None, "fn": None, "groundable": False}
         if final_hypothesis != raw_hypothesis:
             entry["pruned_from"] = raw_hypothesis
-        if kept_repair:
-            entry["repaired"] = True
         if ctx["val_ids"]:
-            _, _, metrics = self._score_hypothesis(chebi_id, final_hypothesis, programs, dependencies, ctx)
+            metrics = self._score_hypothesis(chebi_id, final_hypothesis, programs, dependencies, ctx)
             if metrics is not None:
                 entry.update(metrics)
                 print(f"    hypothesis train-F1 {metrics['train_f1']:.3f} "
@@ -825,41 +573,6 @@ Answer with a single JSON object:
 
         save_class_hypothesis(chebi_id, entry, library_dir=self.library_dir)
         return entry
-
-    def _repair_hypothesis_call(self, chebi_id, info, ctx, hypothesis, feedback, available):
-        """Ask the model to rewrite the class hypothesis; return the new clause or ``None``."""
-        prompt = self.build_hypothesis_repair_prompt(chebi_id, info, ctx, hypothesis, feedback, available)
-        try:
-            parsed, _raw, attempts = generate_one(prompt, self.system_prompt, self.model, HypothesisRepair)
-        except Exception as e:
-            ctx["extra_attempts"].extend(getattr(e, "_chebilp_attempts", []))
-            print(f"    hypothesis repair failed: {e}")
-            return None
-        ctx["extra_attempts"].extend(attempts)
-        return parsed.hypothesis
-
-    def build_hypothesis_repair_prompt(self, chebi_id, info, ctx, hypothesis, feedback, available) -> str:
-        definition_str = f"Definition: {info['definition']}\n" if info["definition"] else ""
-        aux_available = sorted(n for n in available if n.startswith("aux_"))
-        avail_str = ("Auxiliary predicates you may use (plus the background predicates):\n  "
-                     + ", ".join(aux_available) + "\n") if aux_available else ""
-        return f"""\
-Target class: {info['name']} (CHEBI:{chebi_id})
-{definition_str}
-You previously wrote this class hypothesis, but it needs fixing.
-
-  {hypothesis}
-
-Problem:
-{feedback}
-{avail_str}{self._excluded_note(ctx)}
-Rewrite the hypothesis: one rule `chebi_{chebi_id}(A) :- ...` defining the class as a plain
-conjunction of the available predicates (no aggregates, negation or arithmetic).
-
-Answer with a single JSON object:
-- "reasoning": think briefly about what to change.
-- "hypothesis": the rewritten rule.
-"""
 
 
 def main():
@@ -884,12 +597,20 @@ def main():
     parser.add_argument("--no_computed_facts", dest="computed_facts", action="store_false",
                         help="Do not offer the computed facts (Tier D predicates unavailable).")
     parser.add_argument("--prompt_samples", type=int, default=6,
-                        help="Number of pos and neg example SMILES shown in the prompt (and in feedback).")
-    parser.add_argument("--hypothesis_min_f1", type=float, default=0.7,
-                        help="Train-F1 below which the class hypothesis gets one feedback round.")
+                        help="Number of pos and neg example SMILES shown in the prompt.")
+    parser.add_argument("--seed_predicates", choices=["none", *FG_SEED_SOURCES], default="none",
+                        help="Before generating, seed the library with a functional-group set the "
+                             "model can reuse: 'chembl_fgs' (RDKit ChEMBL alerts) or 'efg' (Extended "
+                             "Functional Groups). Default 'none'. Idempotent — existing seed files are "
+                             "kept, so it is safe to resume a run with the same flag.")
     args = parser.parse_args()
 
     load_dotenv()
+
+    if args.seed_predicates != "none":
+        written = seed_fg_library(args.predicate_dir, args.seed_predicates)
+        print(f"Seeded {written} new '{args.seed_predicates}' functional-group predicate(s) "
+              f"into {args.predicate_dir}")
 
     import pickle as _pickle
 
@@ -906,7 +627,7 @@ def main():
     RuleGenerator(
         args.predicate_dir, args.model, args.n_predicates, args.top_k,
         molecules=molecules, problem_dir=args.problem_dir, computed_facts=args.computed_facts,
-        prompt_samples=args.prompt_samples, hypothesis_min_f1=args.hypothesis_min_f1,
+        prompt_samples=args.prompt_samples,
     ).run(chebi_graph, chebi_ids)
 
 

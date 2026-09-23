@@ -598,6 +598,18 @@ def _referenced_predicates(prog) -> set[str]:
     return {name for _, body in _clauses(prog.source) for name in _PRED_RE.findall(body)}
 
 
+def referenced_fact_predicates(progs, prefix: str) -> set[str]:
+    """Body predicate names across ``progs`` starting with ``prefix``.
+
+    Used to find which injected-fact predicates (e.g. ``chembl_fg_*``) a set of programs
+    references, so exactly those facts are supplied at grounding and no others.
+    """
+    names: set[str] = set()
+    for prog in progs:
+        names |= {n for n in _referenced_predicates(prog) if n.startswith(prefix)}
+    return names
+
+
 _DEFINITION_INDEX_CACHE: dict[str, dict[str, list[str]]] = {}
 
 

@@ -113,7 +113,9 @@ def sanitize_predicate_name(raw_name: str) -> str:
     name = name.strip("_")
     if not name:
         name = "predicate"
-    if not name.startswith("aux_"):
+    # ``chembl_fg_`` / ``efg_`` predicates are seeded functional groups, not LLM-invented aux
+    # rules; keep their prefix so grounding recognises them and emits their facts directly.
+    if not name.startswith(("aux_", "chembl_fg_", "efg_")):
         name = "aux_" + name
     return name
 
