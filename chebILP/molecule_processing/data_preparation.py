@@ -190,7 +190,7 @@ class ChEBIDataset:
         if not os.path.exists(splits_path):
             raise FileNotFoundError(f"Splits file not found: {splits_path}. "
                                     f"Run `python -m chebILP prepare_dataset` to create it.")
-        splits_df = pd.read_csv(splits_path)
+        splits_df = pd.read_csv(splits_path, dtype={"id": str})
         if "id" not in splits_df.columns or "split" not in splits_df.columns:
             raise ValueError(f"Splits CSV must contain 'id' and 'split' columns: {splits_path}")
         if not all(s in splits_df["split"].unique() for s in ["train", "validation", "test"]):

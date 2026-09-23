@@ -263,16 +263,16 @@ class ILPProblemBuilder:
         sibling_neg_ids = set(sibling_neg_ids)
 
         samples_by_split = dict()
-        pos_train_samples = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "train"])]
+        pos_train_samples = df_pos[df_pos.index.astype(str).isin(self.splits.loc[self.splits["split"] == "train", "id"])]
         samples_by_split[("pos", "train")] = pos_train_samples.sample(min(max_pos_samples, len(pos_train_samples)), random_state=42) # if there are more positives than max_pos_samples, sample randomly
-        neg_train_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "train"])]
+        neg_train_samples = df_neg[df_neg.index.astype(str).isin(self.splits.loc[self.splits["split"] == "train", "id"])]
         samples_by_split[("neg", "train")] = self.build_negative_mix(neg_train_samples, sibling_neg_ids, max_neg_samples)
         
-        samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "validation"]) & df_pos.index.astype(str).isin(pos_ids)]
-        neg_val_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "validation"])]
+        samples_by_split[("pos", "validation")] = df_pos[df_pos.index.astype(str).isin(self.splits.loc[self.splits["split"] == "validation", "id"]) & df_pos.index.astype(str).isin(pos_ids)]
+        neg_val_samples = df_neg[df_neg.index.astype(str).isin(self.splits.loc[self.splits["split"] == "validation", "id"])]
         samples_by_split[("neg", "validation")] = self.build_negative_mix(neg_val_samples, sibling_neg_ids, max_neg_samples)
-        samples_by_split[("pos", "test")] = df_pos[df_pos.index.astype(str).isin(self.splits[self.splits["split"] == "test"]) & df_pos.index.astype(str).isin(pos_ids)]
-        neg_test_samples = df_neg[df_neg.index.astype(str).isin(self.splits[self.splits["split"] == "test"])]
+        samples_by_split[("pos", "test")] = df_pos[df_pos.index.astype(str).isin(self.splits.loc[self.splits["split"] == "test", "id"]) & df_pos.index.astype(str).isin(pos_ids)]
+        neg_test_samples = df_neg[df_neg.index.astype(str).isin(self.splits.loc[self.splits["split"] == "test", "id"])]
         samples_by_split[("neg", "test")] = self.build_negative_mix(neg_test_samples, sibling_neg_ids, max_neg_samples)
         
         for (posneg, split), df in samples_by_split.items():
