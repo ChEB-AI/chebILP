@@ -11,7 +11,7 @@ An Inductive Logic Programming (ILP) framework for classifying chemical compound
 [SWI-Prolog](https://www.swi-prolog.org/Download.html) must be installed and on `PATH` (required by Popper).
 Popper must be installed as well. You can either install the [latest version of Popper](https://github.com/logic-and-learning-lab/Popper) with
 ```
-pip install https://github.com/logic-and-learning-lab/Popper
+pip install git+https://github.com/logic-and-learning-lab/Popper
 ```
 or a forked, slightly outdated version with
 ```
