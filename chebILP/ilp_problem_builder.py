@@ -9,8 +9,8 @@ from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
 from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
 from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules, resolve_rule_dependencies, referenced_fact_predicates
 from chebILP.molecule_processing.fg_matching import (
-    get_chembl_fgs, get_chebi_fgs, get_efg_fgs,
-    FG_SEED_SOURCES, FG_SEED_PREFIXES, is_fg_seed_name, fg_fact_lines,
+    get_chembl_fgs, get_chebi_fgs, get_efg_fgs, get_efg_atom_fgs, EFG_ATOM_CACHE,
+    FG_SEED_SOURCES, FG_SEED_PREFIXES, is_fg_seed_name, fg_fact_lines, fg_atom_fact_lines,
 )
 from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
@@ -126,23 +126,25 @@ class ILPProblemBuilder:
         if cache is None:
             cache = self._fg_matches_cache = {}
         if source_key not in cache:
-            _prefix, matcher, _vocab, cache_name = FG_SEED_SOURCES[source_key]
-            cache[source_key] = matcher(
+            src = FG_SEED_SOURCES[source_key]
+            cache[source_key] = src.matcher(
                 self.dataset.molecules,
-                cache_path=os.path.join(self.dataset.processed_dir, cache_name),
+                cache_path=os.path.join(self.dataset.processed_dir, src.cache),
             )
         return cache[source_key]
 
     def _fg_seed_fact_lines(self, names, ids) -> list[str]:
-        """Presence facts for the given seeded FG predicate ``names``, over molecule ``ids``.
+        """Facts for the given seeded FG predicate ``names``, over molecule ``ids``.
 
-        Groups the names by seed source (prefix) so each source's matcher runs once.
+        Groups the names by seed source (prefix) so each source's matcher runs once. An
+        atom-level source emits atom-anchored facts, a molecule-level one emits presence facts.
         """
         lines: list[str] = []
-        for source_key, (prefix, *_rest) in FG_SEED_SOURCES.items():
-            want = {n for n in names if n.startswith(prefix)}
+        for source_key, src in FG_SEED_SOURCES.items():
+            want = {n for n in names if n.startswith(src.prefix)}
             if want:
-                lines += fg_fact_lines(self._get_fg_matches(source_key), ids, needed=want)
+                emit = fg_atom_fact_lines if src.atom_level else fg_fact_lines
+                lines += emit(self._get_fg_matches(source_key), ids, needed=want)
         return lines
 
     def build_bk(self, target_ids):
@@ -237,6 +239,17 @@ class ILPProblemBuilder:
                     prolog_lines_fgs, body_predicates_fgs = build_background_fg_data(self._fg_data, selected_rows, source=self.predicate_set)
                     prolog_lines += prolog_lines_fgs
                     body_predicates.update(body_predicates_fgs)
+                elif self.predicate_set == "efg_atoms":
+                    # Atom-anchored EFGs: efga_<name>(A1,..,Ak) attachment-atom facts on top of the
+                    # atom-level BK, joined to the molecule via the has_atom facts emitted above.
+                    if not hasattr(self, "_fg_data"):
+                        self._fg_data = get_efg_atom_fgs(
+                            self.dataset.molecules,
+                            cache_path=os.path.join(self.dataset.processed_dir, EFG_ATOM_CACHE),
+                        )
+                    prolog_lines_fgs, body_predicates_fgs = build_background_fg_atom_data(self._fg_data, selected_rows)
+                    prolog_lines += prolog_lines_fgs
+                    body_predicates.update(body_predicates_fgs)
                 prolog_lines_by_split[split] = prolog_lines
 
                 # Computed facts (molecular weight, ring size) feed rule evaluation
@@ -304,14 +317,16 @@ class ILPProblemBuilder:
                                 prolog_lines_by_split[split].append(line)
 
             # Seeded chembl_fg_*/efg_* predicates a class chose: emit their RDKit match as a
-            # molecule-level presence fact per split (an arity-1 feature), exactly like the
+            # molecule-level presence fact per split (an arity-1 feature; an atom-anchored efga_*
+            # carries its attachment atoms instead), exactly like the
             # chembl_fgs/efg predicate sets but scoped to the predicates this class selected.
             if self.predicate_set == "llm_generated_rules" and fg_seed_programs:
                 selected_names = {p.name for p in fg_seed_programs}
                 for split in ["train", "validation", "test"]:
                     for line in self._fg_seed_fact_lines(selected_names, selected_ids_by_split[split]):
                         prolog_lines_by_split[split].append(line)
-                        body_predicates.add((line.split("(")[0], 1))
+                        head, args = line.split("(", 1)
+                        body_predicates.add((head, args.count(",") + 1))
 
             for split in ["train", "validation", "test"]:
                 prolog_lines = prolog_lines_by_split[split]
@@ -587,6 +602,10 @@ def build_full_background(
         fg_lines, _ = build_background_fg_data(fg_data, rows, source=predicate_set)
         prolog_lines += fg_lines
 
+    if predicate_set == "efg_atoms":
+        fg_lines, _ = build_background_fg_atom_data(get_efg_atom_fgs(rows), rows)
+        prolog_lines += fg_lines
+
     if predicate_set in ("chebi_fg_rules", "chebi_fg_learned_rules"):
         rule_lines, _ = build_background_chebi_fg_rules(
             CHEBI_FG_RULES_PATH if predicate_set == "chebi_fg_rules" else CHEBI_FG_LEARNED_RULES_PATH
@@ -610,16 +629,17 @@ def build_full_background(
         referenced_fg = referenced_fact_predicates(asp_programs + rule_dependencies, FG_SEED_PREFIXES)
         # Match each involved seed source once, then filter per use (feature vs grounding-only).
         matches_by_source = {}
-        for key, (prefix, matcher, _v, _c) in FG_SEED_SOURCES.items():
-            if any(n.startswith(prefix) for n in selected_fg | referenced_fg):
-                matches_by_source[key] = (prefix, matcher(rows))
+        for key, src in FG_SEED_SOURCES.items():
+            if any(n.startswith(src.prefix) for n in selected_fg | referenced_fg):
+                matches_by_source[key] = (src, src.matcher(rows))
 
         def _fg_lines(want):
             out = []
-            for _key, (prefix, m) in matches_by_source.items():
-                sub = {n for n in want if n.startswith(prefix)}
+            for _key, (src, m) in matches_by_source.items():
+                sub = {n for n in want if n.startswith(src.prefix)}
                 if sub:
-                    out += fg_fact_lines(m, mol_ids, needed=sub)
+                    emit = fg_atom_fact_lines if src.atom_level else fg_fact_lines
+                    out += emit(m, mol_ids, needed=sub)
             return out
 
         prolog_lines += _fg_lines(selected_fg)  # selected FG predicates -> features in the BK
@@ -691,6 +711,24 @@ def build_background_fg_data(fg_data: dict[int, list[str]], rows, source: Litera
             lines_by_predicate[fg].append(f"{fg}({row.Index}).")
     total_lines = [line for lines in lines_by_predicate.values() for line in lines]
     return total_lines, [(pred, 1) for pred in lines_by_predicate.keys()]
+
+
+def build_background_fg_atom_data(atom_matches: dict[int, list[tuple[str, int]]], rows):
+    """Atom-anchored EFG facts ``efga_<name>(A1,..,Ak).`` for the molecules in ``rows``.
+
+    ``atom_matches`` maps a molecule id to ``(predicate, (attachment_atom_idx, ...))`` occurrences
+    (see :func:`get_efg_atom_fgs`). The arguments are atoms, so they join to the molecule through
+    the ``has_atom`` facts of the atom-level BK. Returns ``(lines, [(pred, arity), ...])``.
+    """
+    lines_by_predicate: dict[str, list[str]] = {}
+    arity: dict[str, int] = {}
+    for row in rows.itertuples():
+        for name, atom_idxs in atom_matches.get(row.Index, []):
+            args = ",".join(get_atom_id(i, row.Index) for i in atom_idxs)
+            lines_by_predicate.setdefault(name, []).append(f"{name}({args}).")
+            arity[name] = len(atom_idxs)
+    total_lines = [line for lines in lines_by_predicate.values() for line in lines]
+    return total_lines, list(arity.items())
 
 
 if __name__ == "__main__":

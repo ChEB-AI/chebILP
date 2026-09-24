@@ -19,6 +19,8 @@ import logging
 import math
 import re
 
+from chebILP.molecule_processing.fg_matching import is_fg_seed_name
+
 logger = logging.getLogger(__name__)
 
 _STOPWORDS = {
@@ -29,9 +31,26 @@ _STOPWORDS = {
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
+def _singularize(token: str) -> str:
+    """Crude plural -> singular folding (``ethers`` -> ``ether``, ``amides`` -> ``amide``).
+
+    Seeded functional-group names are plural ("Ethers", "Carboxylic acids") while ChEBI class
+    names and definitions are mostly singular, so without this BM25 never matches them. Only
+    consistency matters (queries and documents go through the same function), not linguistic
+    correctness, so ``species`` -> ``specy`` is harmless.
+    """
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("s") and not token.endswith(("ss", "us", "is")):
+        return token[:-1]
+    return token
+
+
 def tokenize(text: str) -> list[str]:
-    """Lowercase, split on non-alphanumerics, drop very short tokens and stopwords."""
-    return [t for t in _TOKEN_RE.findall(text.lower()) if len(t) > 1 and t not in _STOPWORDS]
+    """Lowercase, split on non-alphanumerics, drop very short tokens and stopwords, singularise."""
+    return [
+        _singularize(t) for t in _TOKEN_RE.findall(text.lower()) if len(t) > 1 and t not in _STOPWORDS
+    ]
 
 
 class _IncrementalBM25:
@@ -207,8 +226,28 @@ class HybridPredicateRetriever:
         positions[order] = np.arange(1, len(scores) + 1)
         return positions
 
+    def _split_top(self, order, top_k: int) -> list:
+        """Pick ``top_k`` indices from ``order`` (best first), half seeded FG predicates, half rest.
+
+        Seeded functional groups (``efga_*``, ``efg_*``, ...) are hundreds of near-identical
+        short entries; ranked together with the aux rules they either crowd them out or get
+        buried. Each group gets ``top_k // 2`` spots (the odd spot goes to the aux rules); a group
+        with too few entries leaves its spots to the other. The result keeps fused-score order.
+        """
+        is_seed = [is_fg_seed_name(e.get("stem", e["name"])) for e in self.entries]
+        seeds = [i for i in order if is_seed[i]]
+        rest = [i for i in order if not is_seed[i]]
+        n_seed = min(len(seeds), top_k // 2)
+        n_rest = min(len(rest), top_k - n_seed)
+        n_seed = min(len(seeds), top_k - n_rest)
+        chosen = set(seeds[:n_seed]) | set(rest[:n_rest])
+        return [i for i in order if i in chosen]
+
     def retrieve(self, query_text: str, top_k: int = 25) -> list[dict]:
         """Return the top-k library entries for ``query_text``, best first.
+
+        Seeded functional-group predicates and the other (aux) entries each get half of the
+        ``top_k`` spots; see :meth:`_split_top`.
 
         Each returned dict is a copy of the library entry plus ``rrf`` and the
         per-channel ranks ``bm25_rank`` / ``dense_rank`` (``None`` if dense is off).
@@ -233,7 +272,7 @@ class HybridPredicateRetriever:
         for positions in rank_arrays:
             fused += 1.0 / (self.rrf_k + positions)
 
-        top_idx = np.argsort(fused)[::-1][:top_k]
+        top_idx = self._split_top(np.argsort(fused)[::-1], top_k)
         results = []
         for i in top_idx:
             e = dict(self.entries[i])

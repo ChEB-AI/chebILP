@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime
 import networkx as nx
 
-AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "efg", "chebi_fg_rules", "chebi_fg_learned_rules", "llm_generated_fgs", "llm_generated_rules", "farm_fgs", "farm_fgs_atoms", "fowl"]
+AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "efg", "efg_atoms", "chebi_fg_rules", "chebi_fg_learned_rules", "llm_generated_fgs", "llm_generated_rules", "farm_fgs", "farm_fgs_atoms", "fowl"]
 
 
 def split_prolog_literals(body):

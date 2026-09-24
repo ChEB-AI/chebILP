@@ -29,6 +29,7 @@ from chebILP.predicate_generation.auxiliary_generation import (
     generate_one,
     one_line,
 )
+from chebILP.predicate_generation.auxiliary_predicates import sanitize_predicate_name
 from chebILP.predicate_generation.auxiliary_rules import (
     DEFAULT_AUX_RULE_LIBRARY_DIR,
     ERROR_UNBOUNDED_RECURSION,
@@ -50,6 +51,8 @@ from chebILP.molecule_processing.fg_matching import (
     FG_SEED_PREFIXES,
     FG_SEED_SOURCES,
     fg_fact_lines,
+    fg_atom_fact_lines,
+    fg_seed_usage,
     is_fg_seed_name,
     seed_fg_library,
 )
@@ -184,6 +187,28 @@ Rules for the hypothesis:
 
 # Header comments the model may repeat inside "program"; the pipeline synthesizes them.
 _HEADER_RE = re.compile(r"^\s*%\s*(PREDICATE_NAME|DESCRIPTION)\s*:", re.IGNORECASE)
+
+
+def _new_rule_renames(items) -> dict[str, str]:
+    """``{name: aux_name}`` for each model-written predicate whose name carries a seed prefix.
+
+    A seed prefix (``chembl_fg_``, ``efg_``, ``efga_``) marks a header-only group whose facts come
+    from an RDKit matcher, so a *clause* under such a name is treated as a seed downstream: its
+    body is never grounded and, with no matcher of that name, it gets no facts at all. Only
+    ``seed_fg_library`` may write those names; a program the model writes is forced to ``aux_``.
+    """
+    renames = {}
+    for item in items:
+        name = sanitize_predicate_name(item.name)
+        if is_fg_seed_name(name):
+            renames[name] = "aux_" + name
+    return renames
+
+
+def _apply_renames(text: str, renames: dict[str, str]) -> str:
+    for old, new in renames.items():
+        text = re.sub(rf"\b{re.escape(old)}\b", new, text)
+    return text
 
 # Validate-and-reject grounds positives and negatives, which takes
 # well under a second; anything near this ceiling is pathological rather than merely slow.
@@ -339,6 +364,9 @@ class RuleGenerator(AuxiliaryGenerator):
             mol_lines += [f"  - {s}" for s in ctx["neg_smiles"]]
         mol_str = ("\n".join(mol_lines) + "\n") if mol_lines else ""
 
+        seed_usage = fg_seed_usage(c["name"] for c in candidates)
+        seed_str = f"Functional-group candidates are called as follows:\n{seed_usage}\n" if seed_usage else ""
+
         computed_str = (
             f"\nExtra facts available in this mode:\n{_COMPUTED_PREDICATES}\n" if self.computed_facts else ""
         )
@@ -350,7 +378,7 @@ Background predicates ALREADY available:
 {_EXISTING_PREDICATES}
 {computed_str}
 {mol_str}
-{format_candidates(candidates)}
+{format_candidates(candidates)}{seed_str}
 Choose up to {self.n_predicates} auxiliary predicates that would help distinguish
 "{info['name']}" from other molecules. REUSE the candidates above wherever they
 fit; only write NEW rules for properties they do not already cover. 
@@ -363,7 +391,9 @@ fit; only write NEW rules for properties they do not already cover.
 """
 
     def to_source(self, item) -> str:
-        return self._source_text(item.name, item.description, item.program)
+        renames = _new_rule_renames([item])
+        name = renames.get(sanitize_predicate_name(item.name), item.name)
+        return self._source_text(name, item.description, _apply_renames(item.program, renames))
 
     def _source_text(self, name, description, program) -> str:
         """The library's on-disk program text for a predicate, header synthesized from name/desc."""
@@ -489,13 +519,14 @@ fit; only write NEW rules for properties they do not already cover.
             return ctx["val_facts"]
         matches = ctx.setdefault("_fg_matches", {})
         lines: list[str] = []
-        for key, (prefix, matcher, _vocab, _cache) in FG_SEED_SOURCES.items():
-            want = {n for n in needed if n.startswith(prefix)}
+        for key, src in FG_SEED_SOURCES.items():
+            want = {n for n in needed if n.startswith(src.prefix)}
             if not want:
                 continue
             if key not in matches:
-                matches[key] = matcher(ctx["val_rows"])
-            lines += fg_fact_lines(matches[key], ctx["val_ids"], needed=want)
+                matches[key] = src.matcher(ctx["val_rows"])
+            emit = fg_atom_fact_lines if src.atom_level else fg_fact_lines
+            lines += emit(matches[key], ctx["val_ids"], needed=want)
         return ctx["val_facts"] + lines
 
     def rejection_code(self, label, ctx) -> str | None:
@@ -548,6 +579,8 @@ fit; only write NEW rules for properties they do not already cover.
         raw_hypothesis = (getattr(parsed, "hypothesis", "") or "").strip()
         if not raw_hypothesis:
             return None
+        # Follow the aux_ renames to_source gave seed-prefixed new predicates.
+        raw_hypothesis = _apply_renames(raw_hypothesis, _new_rule_renames(parsed.new))
 
         programs = load_class_rules(chebi_id, library_dir=self.library_dir)
         # Seeded chembl_fg_*/efg_* predicates have no clause body to depend on; resolve only ASP.

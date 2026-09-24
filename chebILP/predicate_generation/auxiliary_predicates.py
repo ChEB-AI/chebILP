@@ -43,6 +43,8 @@ from typing import Callable, Literal
 
 from rdkit import Chem
 
+from chebILP.molecule_processing.fg_matching import FG_SEED_PREFIXES
+
 logger = logging.getLogger(__name__)
 
 AuxKind = Literal["atom_unary", "atom_binary", "molecule"]
@@ -113,9 +115,10 @@ def sanitize_predicate_name(raw_name: str) -> str:
     name = name.strip("_")
     if not name:
         name = "predicate"
-    # ``chembl_fg_`` / ``efg_`` predicates are seeded functional groups, not LLM-invented aux
-    # rules; keep their prefix so grounding recognises them and emits their facts directly.
-    if not name.startswith(("aux_", "chembl_fg_", "efg_")):
+    # Seeded functional-group predicates (``chembl_fg_``, ``efg_``, ``efga_``, ...) are not
+    # LLM-invented aux rules; keep their prefix so grounding recognises them and emits their
+    # facts directly. Names the LLM writes are forced to ``aux_`` upstream (``_new_rule_renames``).
+    if not name.startswith(("aux_",) + FG_SEED_PREFIXES):
         name = "aux_" + name
     return name
 
