@@ -7,7 +7,7 @@ and evaluated with [Clingo](https://potassco.org/clingo/). Optionally, an LLM in
 ## Installation
 
 Requirements:
-- Python ≥ 3.10
+- Python ≥ 3.11
 - [SWI-Prolog](https://www.swi-prolog.org/Download.html) on `PATH` (used by Popper and Aleph)
 - Popper: `pip install git+https://github.com/logic-and-learning-lab/Popper`, or the fork
   `pip install git+https://github.com/sfluegel05/Popper`, which adds the `--mdl_weight_*` options of `learn`
