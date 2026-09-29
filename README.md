@@ -1,12 +1,12 @@
 # chebILP
 
-An Inductive Logic Programming (ILP) framework for classifying chemical compounds into [ChEBI](https://www.ebi.ac.uk/chebi/) classes. Rules are learned with [Popper](https://github.com/logic-and-learning-lab/Popper) and evaluated with [Clingo](https://potassco.org/clingo/) (Answer Set Programming).
+An Inductive Logic Programming (ILP) framework for classifying chemical compounds into [ChEBI](https://www.ebi.ac.uk/chebi/) classes. Rules are learned with [Popper](https://github.com/logic-and-learning-lab/Popper) or [Aleph](https://www.cs.ox.ac.uk/activities/programinduction/Aleph/aleph.html) and evaluated with [Clingo](https://potassco.org/clingo/) (Answer Set Programming).
 
 ---
 
 ## Installation
 
-### Prerequesites
+### Prerequisites
 
 [SWI-Prolog](https://www.swi-prolog.org/Download.html) must be installed and on `PATH` (required by Popper).
 Popper must be installed as well. You can either install the [latest version of Popper](https://github.com/logic-and-learning-lab/Popper) with
