@@ -3,7 +3,7 @@ name = "chebilp"
 version = "1.2.0"
 description = "An Inductive Logic Programming framework for classifying chemical compounds into ChEBI classes."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
     "chebi-utils>=0.2.1",
     "clingo>=5.8.0",
@@ -22,9 +22,12 @@ explain = [
 llm = [
     "anthropic>=0.104.1",
     "claude-agent-sdk>=0.2.87",
-    "langsmith>=0.8.5",
+    "openai>=2.0",
+    "pydantic>=2.0",
     "python-dotenv>=1.2.2",
-    "rank-bm25>=0.2.2",
+]
+# Dense retrieval channel for LLM predicate reuse; pulls in torch. Without it, retrieval is BM25-only.
+dense = [
     "sentence-transformers>=5.6.0",
 ]
 

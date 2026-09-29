@@ -118,6 +118,7 @@ def _handle_learn(args):
             heuristic_guidance=args.heuristic_guidance,
             aux_library_dir=args.predicate_dir,
             tool=args.tool,
+            nuwls=args.nuwls,
         )
 
 
@@ -424,7 +425,7 @@ def _handle_prepare_dataset(args):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="ILP classification CLI for ChEBI classes using Popper.",
+        description="ILP classification CLI for ChEBI classes using Popper or Aleph.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -496,18 +497,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
     sp_learn.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")
     sp_learn.add_argument("--max_clauses", type=int, default=2, help="Maximum number of clauses in the learned program. Inert: Popper forces max_rules=1 unless recursion or predicate invention is enabled, and the noisy MDL combiner caps nothing.")
-    sp_learn.add_argument("--mdl_weight_fn", type=int, default=1, help="Weight β for false negatives in MDL cost (default: 1).")
-    sp_learn.add_argument("--mdl_weight_fp", type=int, default=1, help="Weight γ for false positives in MDL cost (default: 1).")
-    sp_learn.add_argument("--mdl_weight_size", type=int, default=1, help="Weight α for program size in MDL cost (default: 1).")
+    sp_learn.add_argument("--nuwls", action=argparse.BooleanOptionalAction, default=True,
+                          help="Use Popper's NuWLS anytime MaxSAT solver (default: on). Needs the NuWLS-c binary on PATH; "
+                               "see the Popper README.")
+    _mdl_note = " Not actively maintained: upstream Popper silently ignores it."
+    sp_learn.add_argument("--mdl_weight_fn", type=int, default=1, help="Weight β for false negatives in MDL cost (default: 1)." + _mdl_note)
+    sp_learn.add_argument("--mdl_weight_fp", type=int, default=1, help="Weight γ for false positives in MDL cost (default: 1)." + _mdl_note)
+    sp_learn.add_argument("--mdl_weight_size", type=int, default=1, help="Weight α for program size in MDL cost (default: 1)." + _mdl_note)
     sp_learn.add_argument("--predicate_dir", type=str, default=None,
                           help="Auxiliary-rule library directory (llm_generated_rules), needed for "
                                "--seed_hypothesis / --heuristic_guidance to read the class's saved hypothesis.")
     sp_learn.add_argument("--seed_hypothesis", action="store_true",
-                          help="Seed Popper's search with the LLM's saved class hypothesis, when it grounds "
-                               "and fits the bias (llm_generated_rules only; requires --noisy, which is on).")
+                          help="Seed Aleph's search with the LLM's saved class hypothesis, when it grounds "
+                               "and fits the bias (--tool aleph and llm_generated_rules only).")
     sp_learn.add_argument("--heuristic_guidance", action="store_true",
                           help="Steer generation toward the predicates in the LLM's class hypothesis via "
-                               "prefer_body_pred directives in the bias file (llm_generated_rules only).")
+                               "prefer_body_pred directives in the bias file (llm_generated_rules only)." + _mdl_note)
     sp_learn.set_defaults(func=_handle_learn)
 
     # ── select_predicates ────────────────────────────────────────────────

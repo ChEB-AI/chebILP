@@ -185,7 +185,7 @@ class HybridPredicateRetriever:
         except ImportError:
             logger.warning(
                 "sentence-transformers not installed; using BM25-only retrieval. "
-                "Install the 'llm' extra for the dense channel."
+                "Install the 'dense' extra for the dense channel."
             )
             return
         self._dense_model = SentenceTransformer(model_name)

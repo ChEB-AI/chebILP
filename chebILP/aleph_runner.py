@@ -306,6 +306,9 @@ def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=8,
             capture_output=True, text=True, cwd=ALEPH_DIR, timeout=hard_timeout,
         )
         out = (result.stdout or "") + "\n" + (result.stderr or "")
+    except FileNotFoundError:
+        raise RuntimeError("SWI-Prolog ('swipl') was not found on PATH; Aleph needs it. "
+                           "Install it from https://www.swi-prolog.org/Download.html.") from None
     except subprocess.TimeoutExpired as e:
         out = ((e.stdout or "") if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")) \
             + "\n" + ((e.stderr or "") if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else ""))

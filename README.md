@@ -7,16 +7,18 @@ and evaluated with [Clingo](https://potassco.org/clingo/). Optionally, an LLM in
 ## Installation
 
 Requirements:
-- Python ≥ 3.11
+- Python ≥ 3.14 (required by current Popper)
 - [SWI-Prolog](https://www.swi-prolog.org/Download.html) on `PATH` (used by Popper and Aleph)
-- Popper: `pip install git+https://github.com/logic-and-learning-lab/Popper`, or the fork
-  `pip install git+https://github.com/sfluegel05/Popper`, which adds the `--mdl_weight_*` options of `learn`
+- Popper: `pip install git+https://github.com/logic-and-learning-lab/Popper`
+- NuWLS: `learn` runs Popper with the NuWLS anytime solver by default, which needs the `NuWLS-c` binary on `PATH`.
+  Install it as described in the [Popper README](https://github.com/logic-and-learning-lab/Popper), or pass `--no-nuwls`.
 
 Then install chebILP from the repository root:
 
 ```bash
 pip install -e .            # core
 pip install -e ".[llm]"     # + LLM predicate invention
+pip install -e ".[dense]"   # + dense retrieval for predicate reuse (sentence-transformers, pulls in torch; BM25-only without it)
 pip install -e ".[explain]" # + the explain command (xclingo, Pillow)
 ```
 
@@ -70,7 +72,9 @@ python -m chebILP.predicate_generation.generate_auxiliary_rules \
 ```
 
 - `--model`: a bare Claude id runs through the local `claude` CLI and bills the logged-in Claude subscription.
+  `ANTHROPIC_API_KEY` is removed from the environment for these calls, so a key in `.env` is ignored here.
   A `provider/name` id (e.g. `openai/gpt-4o`) uses an OpenAI-compatible endpoint set by `OPENAI_API_BASE` and `OPENAI_API_KEY`.
+  (By contrast, `select_predicates --selection_mode claude` calls the Anthropic API directly and bills `ANTHROPIC_API_KEY`.)
 - `--seed_predicates {none,chembl_fgs,efg}` pre-fills the library with functional groups the LLM can reuse.
 - Each class costs one LLM call. The run can be resumed; classes already in the library are skipped.
 
@@ -89,8 +93,11 @@ python -m chebILP learn --labels_file $LABELS --predicate_set atoms --timeout 12
 ```
 
 Results go to `data/results/run_<timestamp>/` (`results.json` with one learned program per class, `config.yml`, `run.log`).
-With `llm_generated_rules`, `--seed_hypothesis` starts Popper's search from the LLM's class hypothesis and
-`--heuristic_guidance` steers it toward the predicates that hypothesis uses (both need `--predicate_dir`).
+With `llm_generated_rules` and `--tool aleph`, `--seed_hypothesis` starts Aleph's search from the LLM's class hypothesis
+(needs `--predicate_dir`; it is ignored for Popper).
+
+`--mdl_weight_fn/fp/size` and `--heuristic_guidance` are not actively maintained: they relied on a Popper fork, and
+upstream Popper silently ignores them.
 
 Evaluate a run on the validation or test split:
 

@@ -2,6 +2,7 @@ import os
 import re
 import itertools
 import string
+import shutil
 import subprocess
 import sys
 import json
@@ -84,7 +85,7 @@ def build_seed_hypothesis(target_id, programs, body_preds):
 
 
 def seed_from_hypothesis(clause, target_id, body_preds):
-    """Validate an LLM class hypothesis for use as Popper's ``best_hypothesis``.
+    """Validate an LLM class hypothesis for use as Aleph's seed clause.
 
     Returns ``(seed_str, n_vars, n_body)`` when the clause is a plain Datalog rule whose head is
     ``chebi_<target>(A)`` and whose every body predicate is declared as a ``body_pred`` in the
@@ -182,7 +183,9 @@ print(json.dumps(result))
         output = json.loads(stdout_lines[-1])
     except json.decoder.JSONDecodeError:
         output = {"prog_str": None, "score": None}
-        print(f"    Failed to parse JSON output. See logs for details.")
+        stderr_lines = result.stderr.strip().splitlines()
+        reason = f": {stderr_lines[-1]}" if stderr_lines else ""
+        print(f"    Popper produced no result{reason}. See run.log for details.")
 
     # Time-to-best hypothesis: Popper's anytime search prints "<seconds>s New best hypothesis:"
     # to stderr on each improvement; the last one's timestamp is the time to the final program.
@@ -228,13 +231,13 @@ def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["c
             f.write(bias_content)
 
 
-def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, tool:Literal["popper", "aleph"]="popper"):
+def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, tool:Literal["popper", "aleph"]="popper", nuwls=True):
     if problem_dir is None:
         problem_dir = os.path.join("data", "ilp_problems")
     # Build settings parameters for Popper
     settings_parameters = {
         "noisy": True,
-        "nuwls": True,
+        "nuwls": nuwls,
         "timeout": timeout,
     }
     if mdl_weight_fn != 1 or mdl_weight_fp != 1 or mdl_weight_size != 1:
@@ -262,8 +265,15 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
 
     build_bias(problem_dir, predicate_set, classes_list, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses, heuristic_guidance=heuristic_guidance, aux_library_dir=aux_library_dir, heuristic_level=heuristic_level)
 
+    if seed_hypothesis and tool != "aleph":
+        print("Warning: --seed_hypothesis only works with --tool aleph; ignoring it for Popper.")
+        seed_hypothesis = False
     if seed_hypothesis and predicate_set != RULE_PREDICATE_SET:
         print(f"Warning: --seed_hypothesis only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'.")
+    if tool == "popper" and nuwls and shutil.which("NuWLS-c") is None:
+        print("Warning: --nuwls is on but no NuWLS-c binary is on PATH, so Popper's anytime MaxSAT solve does nothing. "
+              "Install it as described in the Popper README (https://github.com/logic-and-learning-lab/Popper), "
+              "or pass --no-nuwls.")
     if heuristic_guidance and predicate_set != RULE_PREDICATE_SET:
         print(f"Warning: --heuristic_guidance only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'.")
     if tool == "aleph" and selection_mode is not None:
@@ -281,10 +291,8 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
             print(f"Missing files for ChEBI:{chebi_id} - skipping. exs_path: {exs_path}, bk_path: {bk_path}, bias_path: {bias_path}")
             continue
 
-        # Seed the search with the LLM's class hypothesis.
-        # Per-class, so it goes into a copy of the shared settings rather than the shared dict.
-        class_settings = settings_parameters
-        seed_clause = None  # captured for the Aleph runner too, not just Popper's best_hypothesis
+        # Seed Aleph's search with the LLM's class hypothesis.
+        seed_clause = None
         if seed_hypothesis and predicate_set == RULE_PREDICATE_SET:
             from chebILP.predicate_generation.auxiliary_rules import load_class_hypothesis
             with open(bias_path, "r") as f:
@@ -306,7 +314,6 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
                 else:
                     print(f"    Seeding search with: {seed}")
                     seed_clause = seed
-                    class_settings = dict(settings_parameters, best_hypothesis=seed)
             else:
                 print(f"    No usable LLM hypothesis for ChEBI:{chebi_id} "
                       f"(missing, did not ground, or does not fit the bias); running unseeded.")
@@ -321,7 +328,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
                 continue
             train_result = run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout=timeout, max_body=max_body, seed_clause=seed_clause, log_dir=results_dir)
         else:
-            train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, class_settings, log_dir=results_dir)
+            train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, settings_parameters, log_dir=results_dir)
         prog_str = train_result["prog_str"]  # string representation for display/storage
         score = train_result["score"]
         if score:
