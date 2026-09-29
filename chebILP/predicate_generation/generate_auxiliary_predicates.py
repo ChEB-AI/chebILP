@@ -54,7 +54,8 @@ _EXISTING_PREDICATES = """\
 - bSINGLE/bDOUBLE/bTRIPLE/bAROMATIC(Atom1, Atom2): bond type
 - bSTEREOCIS/bSTEREOTRANS(Atom1, Atom2): cis/trans bond stereochemistry
 - has_bond_to(Atom1, Atom2): any bond between two atoms
-- in_ring(Atom), in_ringN(Atom), ringN(A1..AN): ring membership / N-membered rings (N up to 8)
+- in_ring(Atom), in_ringN(Atom): ring membership / membership of an N-membered ring, for
+  every N that occurs. There is no N-ary ringN(A1..AN) naming a ring's atoms in order.
 - net_charge_positive/negative/neutral(Molecule), aromatic/aliphatic(Molecule): molecule-level
 - steroid_1..steroid_17(Atom): atom at a steroid-nucleus position\
 """
@@ -240,13 +241,12 @@ def main():
     parser.add_argument("--chebi_version", type=int, default=248)
     parser.add_argument("--predicate_dir", default=os.path.join("data", "llm_generated_predicates"),
                         help="Directory for storing generated predicates.")
-    parser.add_argument("--model", default="anthropic/claude-haiku-4-5",
-                        help="LLM as 'provider/name' (LiteLLM). Must support structured outputs, e.g. "
-                             "anthropic/claude-haiku-4-5, openai/gpt-4o, gemini/gemini-2.5-pro, "
-                             "ollama/llama3.1, hosted_vllm/<name> (with --api_base). The provider's API "
-                             "key is read from the environment (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...).")
-    parser.add_argument("--api_base", default=None,
-                        help="Base URL for self-hosted / OpenAI-compatible endpoints (e.g. vLLM, Ollama).")
+    parser.add_argument("--model", default="claude-haiku-4-5",
+                        help="A bare Claude id (claude-opus-5, claude-haiku-4-5) runs through the "
+                             "logged-in `claude` CLI and bills your Claude subscription (set "
+                             "CHEBILP_CLAUDE_CLI if it is not on PATH). A 'provider/name' id "
+                             "(openai/gpt-4o) runs through an OpenAI-compatible endpoint set by "
+                             "OPENAI_API_BASE and OPENAI_API_KEY.")
     parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
     parser.add_argument("--top_k", type=int, default=16,
                         help="Reuse candidates retrieved from the shared library per class.")
@@ -264,7 +264,7 @@ def main():
         chebi_ids = [line.strip() for line in f if line.strip()]
 
     PredicateGenerator(
-        args.predicate_dir, args.model, args.n_predicates, args.top_k, api_base=args.api_base,
+        args.predicate_dir, args.model, args.n_predicates, args.top_k,
     ).run(chebi_graph, chebi_ids)
 
 
