@@ -457,9 +457,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build positive/negative example files (exs.pl) for the given ChEBI classes.",
     )
     _add_common_args(sp_samples)
-    sp_samples.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive samples per class.")
+    sp_samples.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive training samples per class.")
     sp_samples.add_argument("--min_neg_samples", type=int, default=25, help="Minimum negative samples per class.")
-    sp_samples.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
+    sp_samples.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative training samples per class.")
 
 
     sp_samples.set_defaults(func=_handle_build_samples)
@@ -490,8 +490,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--timeout", type=int, default=20, help="Timeout for ILP solver in seconds.")
     sp_learn.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use.")
     sp_learn.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
-    sp_learn.add_argument("--max_pos_samples", type=int, default=200, help="Maximum positive samples per class.")
-    sp_learn.add_argument("--max_neg_samples", type=int, default=200, help="Maximum negative samples per class.")
     sp_learn.add_argument("--selection_mode", type=str, default=None, choices=["claude", "random", "top_k"], help="Mode for selecting body predicates in bias file.")
     sp_learn.add_argument("--selection_k", type=int, default=10, help="Number of predicates selection with selection_mode (required if selection_mode is set).")
     sp_learn.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")

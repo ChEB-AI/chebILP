@@ -391,21 +391,6 @@ class ILPProblemBuilder:
             return pos_ids, set()
         return pos_ids, set.intersection(*parent_spaces) - pos_ids
 
-    def build_negatives(self, neg_pool: pd.DataFrame, max_samples: int, random_state: int = 42, prefer_smallest: bool = False) -> pd.DataFrame:
-        """At most ``max_samples`` of ``neg_pool``, which holds direct siblings only.
-
-        Every negative is a near-miss, so the objective is separating the target from its
-        superclass rather than global classification -- the learned rule is only ever asked
-        about molecules a classifier for the parent classes has already admitted.
-
-        With ``prefer_smallest``, an over-full pool keeps the smallest molecules rather than
-        a random draw, which shrinks the derived bk.pl. Only the training split sets it;
-        validation and test stay random so their scores remain size-unbiased.
-        """
-        if len(neg_pool) <= max_samples:
-            return neg_pool
-        return self._take_smallest(neg_pool, max_samples) if prefer_smallest else neg_pool.sample(max_samples, random_state=random_state)
-
     def gather_samples_for_chebi_cls(self, target_id: str, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
         # Positives are the molecules at or below the target; negatives are only its direct
         # siblings -- the molecules shared by all of its direct parents. Nothing outside the
@@ -429,9 +414,12 @@ class ILPProblemBuilder:
             neg_split = df_neg[df_neg.index.astype(str).isin(split_ids[split])]
             # Over the cap, training keeps the smallest molecules: they carry the class just
             # as well while keeping bk.pl small enough to ground cheaply. Validation and test
-            # keep every positive, so their scores cover the whole held-out class.
-            samples_by_split[("pos", split)] = self._take_smallest(pos_split, max_pos_samples) if split == "train" else pos_split
-            samples_by_split[("neg", split)] = self.build_negatives(neg_split, max_neg_samples, prefer_smallest=(split == "train"))
+            # are uncapped, so their scores cover the whole held-out sibling problem.
+            if split == "train":
+                pos_split = self._take_smallest(pos_split, max_pos_samples)
+                neg_split = self._take_smallest(neg_split, max_neg_samples)
+            samples_by_split[("pos", split)] = pos_split
+            samples_by_split[("neg", split)] = neg_split
 
         for (posneg, split), df in samples_by_split.items():
             exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split=split)
