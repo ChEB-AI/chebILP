@@ -6,8 +6,9 @@ import tqdm
 from chebILP.molecule_processing.data_preparation import ChEBIDataset
 from chebILP.molecule_processing.mol_to_fol import mol_to_fol_fgs
 from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
-from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, DEFAULT_AUX_TIMEOUT
-from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules, resolve_rule_dependencies, referenced_fact_predicates
+from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, load_class_map, DEFAULT_AUX_TIMEOUT
+from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules, load_library_rules, load_created_rules, dependent_rules, resolve_rule_dependencies, referenced_fact_predicates
+from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
 from chebILP.molecule_processing.fg_matching import (
     get_chembl_fgs, get_chebi_fgs, get_efg_fgs, get_efg_atom_fgs, EFG_ATOM_CACHE,
     FG_SEED_SOURCES, FG_SEED_PREFIXES, is_fg_seed_name, fg_fact_lines, fg_atom_fact_lines,
@@ -15,7 +16,7 @@ from chebILP.molecule_processing.fg_matching import (
 from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
-from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path, get_aleph_stem
+from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path, get_aleph_stem, get_retrieval_record_path, RULE_PREDICATE_SETS, RETRIEVED_RULE_PREDICATE_SETS
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
 
 
@@ -74,7 +75,7 @@ def build_aleph_background(head_name, body_predicates, train_bk_lines, head_arit
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True, write_aleph: bool = True):
+    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True, write_aleph: bool = True, retrieval_k: int = 16):
         self.predicate_set = predicate_set
         self.problem_dir = os.path.join(base_dir, "ilp_problems")
         os.makedirs(self.problem_dir, exist_ok=True)
@@ -86,6 +87,9 @@ class ILPProblemBuilder:
         # available to llm_generated_rules during rule evaluation, but never
         # written to bk.pl (only the derived aux_* extensions are).
         self.computed_facts = computed_facts
+        # Number of library programs the llm_retrieved_rules* sets pick per class.
+        self.retrieval_k = retrieval_k
+        self._rule_retriever = None
 
         # --- Load pre-built ChEBI data -------------------------------------
         self.dataset = ChEBIDataset(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
@@ -147,6 +151,53 @@ class ILPProblemBuilder:
                 lines += emit(self._get_fg_matches(source_key), ids, needed=want)
         return lines
 
+    def _retrieve_class_rules(self, target_id) -> list:
+        """The library programs retrieval picks for ``target_id`` (llm_retrieved_rules* sets).
+
+        Ranks the whole library against the class's name and definition -- the query the
+        generator uses -- instead of reading the class's own selection from class_map.json.
+        The holdout variant excludes the programs generated for this class, and every program
+        that builds on one, since grounding would pull those back in as dependencies.
+        The pick is recorded next to the train bk.pl.
+        """
+        import json
+
+        if self._rule_retriever is None:
+            self._library_rules = {
+                os.path.splitext(os.path.basename(p.source_file))[0]: p
+                for p in load_library_rules(self.aux_library_dir)
+            }
+            self._rule_retriever = HybridPredicateRetriever([
+                {"name": p.name, "description": p.description, "kind": "rule", "stem": stem}
+                for stem, p in self._library_rules.items()
+            ])
+            self._created_rules = load_created_rules(self.aux_library_dir)
+            self._class_map = load_class_map(self.aux_library_dir)
+
+        excluded = set()
+        if self.predicate_set == "llm_retrieved_rules_holdout":
+            own = self._created_rules.get(str(target_id))
+            if own is None:
+                # Without a generation log, provenance is unknown: exclude all the class selected.
+                own = set(self._class_map.get(str(target_id), []))
+                tqdm.tqdm.write(f"  No generation log for ChEBI:{target_id}; excluding its whole "
+                                f"class_map.json selection ({len(own)} program(s)).")
+            excluded = dependent_rules(self._library_rules, own)
+
+        node = self.dataset.chebi_graph.nodes.get(target_id, {})
+        query = f"{node.get('name', f'CHEBI:{target_id}')} {node.get('definition') or ''}"
+        hits = self._rule_retriever.retrieve(query, top_k=self.retrieval_k, exclude=excluded)
+
+        record_path = get_retrieval_record_path(target_id, self.predicate_set, base_dir=self.problem_dir, predicate_dir=self.aux_library_dir)
+        with open(record_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "query": query,
+                "k": self.retrieval_k,
+                "excluded": sorted(excluded),
+                "retrieved": [{k: h[k] for k in ("stem", "rrf", "bm25_rank", "dense_rank")} for h in hits],
+            }, f, indent=2)
+        return [self._library_rules[h["stem"]] for h in hits]
+
     def build_bk(self, target_ids):
         """
         Build ILP background knowledge.
@@ -179,8 +230,11 @@ class ILPProblemBuilder:
             # evaluated (below) against the atom facts plus optional computed facts.
             # Only the derived aux_* extensions are written to bk.pl.
             rule_programs, dependency_programs, fg_seed_programs = None, [], []
-            if self.predicate_set == "llm_generated_rules":
-                selected_programs = load_class_rules(target_id, library_dir=self.aux_library_dir)
+            if self.predicate_set in RULE_PREDICATE_SETS:
+                if self.predicate_set in RETRIEVED_RULE_PREDICATE_SETS:
+                    selected_programs = self._retrieve_class_rules(target_id)
+                else:
+                    selected_programs = load_class_rules(target_id, library_dir=self.aux_library_dir)
                 # A seeded chembl_fg_*/efg_* predicate is not an ASP rule: its extension is the
                 # RDKit functional-group match, emitted directly below rather than ground by clingo.
                 fg_seed_programs = [p for p in selected_programs if is_fg_seed_name(p.name)]
@@ -254,7 +308,7 @@ class ILPProblemBuilder:
 
                 # Computed facts (molecular weight, ring size) feed rule evaluation
                 # only; they are intentionally kept out of prolog_lines (bk.pl).
-                if self.predicate_set == "llm_generated_rules" and self.computed_facts:
+                if self.predicate_set in RULE_PREDICATE_SETS and self.computed_facts:
                     computed_lines_by_split[split] = build_computed_facts(selected_rows)
 
             # for evaluating rules, merge alls splits, separate results afterwards
@@ -276,7 +330,7 @@ class ILPProblemBuilder:
             # llm_generated_rules: ground each class rule against the atom facts plus
             # computed facts (all splits merged), then write only the derived aux_*
             # extensions back into each split. The computed facts are never written.
-            if self.predicate_set == "llm_generated_rules" and rule_programs:
+            if self.predicate_set in RULE_PREDICATE_SETS and rule_programs:
                 all_selected_ids = [id for split in ["train", "validation", "test"] for id in selected_ids_by_split[split]]
                 eval_facts = [line for split in ["train", "validation", "test"] for line in prolog_lines_by_split[split]]
                 if self.computed_facts:
@@ -320,7 +374,7 @@ class ILPProblemBuilder:
             # molecule-level presence fact per split (an arity-1 feature; an atom-anchored efga_*
             # carries its attachment atoms instead), exactly like the
             # chembl_fgs/efg predicate sets but scoped to the predicates this class selected.
-            if self.predicate_set == "llm_generated_rules" and fg_seed_programs:
+            if self.predicate_set in RULE_PREDICATE_SETS and fg_seed_programs:
                 selected_names = {p.name for p in fg_seed_programs}
                 for split in ["train", "validation", "test"]:
                     for line in self._fg_seed_fact_lines(selected_names, selected_ids_by_split[split]):
@@ -604,7 +658,7 @@ def build_full_background(
     # does (ground each rule over atom + computed facts) and append them as facts, so a
     # learned program's aux_* body literals resolve. Computed facts stay local to the
     # grounding and are not added to the returned BK.
-    if predicate_set == "llm_generated_rules" and rule_programs:
+    if predicate_set in RULE_PREDICATE_SETS and rule_programs:
         mol_ids = [str(i) for i in rows.index]
         # Seeded chembl_fg_*/efg_* predicates are RDKit matches, not ASP rules: emit their facts
         # directly and keep them out of the clingo grounding below.

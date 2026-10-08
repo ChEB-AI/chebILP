@@ -107,9 +107,9 @@ Answer with a single JSON object:
 """
 
 
-def generate_one(prompt: str, system: str, model: str, selection_model):
+def generate_one(prompt: str, system: str, model: str, selection_model, effort: str | None = None):
     """Ask the model for one class's selection. Returns ``(parsed, raw_json_text, attempts)``."""
-    return structured_completion(model, system, prompt, selection_model)
+    return structured_completion(model, system, prompt, selection_model, effort=effort)
 
 
 class AuxiliaryGenerator(ABC):
@@ -122,9 +122,10 @@ class AuxiliaryGenerator(ABC):
     noun = "predicate"  # log/console wording
     selection_model: type[Selection] = Selection
 
-    def __init__(self, library_dir, model, n_predicates, top_k):
+    def __init__(self, library_dir, model, n_predicates, top_k, effort=None):
         self.library_dir = library_dir
         self.model = model
+        self.effort = effort
         self.n_predicates = n_predicates
         self.top_k = top_k
         self.retriever = None
@@ -224,7 +225,7 @@ class AuxiliaryGenerator(ABC):
         parsed, raw, attempts = None, None, []
         try:
             parsed, raw, attempts = generate_one(
-                prompt, self.system_prompt, self.model, self.selection_model
+                prompt, self.system_prompt, self.model, self.selection_model, self.effort
             )
         except Exception as e:
             attempts = getattr(e, "_chebilp_attempts", [])
@@ -343,9 +344,16 @@ class AuxiliaryGenerator(ABC):
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"# Auxiliary-{self.noun} generation log — CHEBI:{chebi_id} ({info['name']})\n\n")
             f.write(f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n- Model: {self.model}\n")
+            f.write(f"- Effort: {self.effort or 'default'}\n")
             if attempts:
                 cost_str = f"${total_cost:.4f}" if total_cost is not None else "unknown"
                 f.write(f"- Cost: {cost_str} across {len(attempts)} call(s), {len(failed)} reasked\n")
+                usages = [a["tokens"] for a in attempts if a.get("tokens")]
+                if usages:
+                    tok = {k: sum(u.get(k) or 0 for u in usages) for k in usages[0]}
+                    f.write(f"- Tokens: {tok['output']} output ({tok['thinking']} thinking), "
+                            f"{tok['input']} input, {tok['cache_write']} cache write, "
+                            f"{tok['cache_read']} cache read\n")
             f.write("\n")
             if selection is not None:
                 f.write(self._format_selection(selection))

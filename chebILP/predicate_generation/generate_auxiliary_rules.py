@@ -303,8 +303,8 @@ class RuleGenerator(AuxiliaryGenerator):
     selection_model = RuleSelection
 
     def __init__(self, library_dir, model, n_predicates, top_k, *, molecules,
-                 problem_dir, computed_facts, prompt_samples):
-        super().__init__(library_dir, model, n_predicates, top_k)
+                 problem_dir, computed_facts, prompt_samples, effort=None):
+        super().__init__(library_dir, model, n_predicates, top_k, effort)
         self.molecules = molecules
         self.problem_dir = problem_dir
         self.computed_facts = computed_facts
@@ -625,6 +625,10 @@ def main():
                              "OPENAI_API_BASE and OPENAI_API_KEY.")
     parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
     parser.add_argument("--top_k", type=int, default=16, help="Reuse candidates retrieved per class.")
+    parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], default=None,
+                        help="Effort level for the `claude` CLI backend. Default: the CLI's per-model "
+                             "default (medium for Opus 5.5, high for Sonnet 5.5 and Haiku 5.5). "
+                             "Ignored for 'provider/name' models.")
     parser.add_argument("--computed_facts", dest="computed_facts", action="store_true", default=True,
                         help="Offer mol_weight/ring_size facts to the model (default: on).")
     parser.add_argument("--no_computed_facts", dest="computed_facts", action="store_false",
@@ -660,7 +664,7 @@ def main():
     RuleGenerator(
         args.predicate_dir, args.model, args.n_predicates, args.top_k,
         molecules=molecules, problem_dir=args.problem_dir, computed_facts=args.computed_facts,
-        prompt_samples=args.prompt_samples,
+        prompt_samples=args.prompt_samples, effort=args.effort,
     ).run(chebi_graph, chebi_ids)
 
 

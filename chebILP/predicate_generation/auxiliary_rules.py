@@ -898,3 +898,61 @@ def load_class_rules(chebi_id, library_dir: str | None = None) -> list[RuleProgr
         seen.add(prog.name)
         programs.append(prog)
     return programs
+
+
+_LOG_NEW_SECTION_RE = re.compile(r"^- New \w+ added:\s*$")
+_LOG_ITEM_RE = re.compile(r"^\s+- `([^`]+)`")
+
+
+def load_created_rules(library_dir: str) -> dict[str, set[str]]:
+    """``{chebi_id: {stem, ...}}``: the programs each class's generation added to the library.
+
+    ``class_map.json`` mixes these with the programs a class reused, so provenance is read
+    from the "New rules added" section of each class's generation log. A class without a log
+    is absent from the result.
+    """
+    logs_dir = os.path.join(library_dir, "generation_logs")
+    if not os.path.isdir(logs_dir):
+        return {}
+    created: dict[str, set[str]] = {}
+    for fname in os.listdir(logs_dir):
+        m = re.fullmatch(r"chebi_(\w+)\.md", fname)
+        if m is None:
+            continue
+        stems: set[str] = set()
+        in_section = False
+        with open(os.path.join(logs_dir, fname), encoding="utf-8") as f:
+            for line in f:
+                if _LOG_NEW_SECTION_RE.match(line):
+                    in_section = True
+                elif in_section:
+                    item = _LOG_ITEM_RE.match(line)
+                    if item is None:
+                        break
+                    stems.add(item.group(1))
+        created[m.group(1)] = stems
+    return created
+
+
+def dependent_rules(programs: dict[str, RuleProgram], stems) -> set[str]:
+    """``stems`` plus every program in ``programs`` that builds on one of them, transitively.
+
+    ``programs`` maps library stem to program. Only ``aux_*`` predicates link programs, as in
+    :func:`resolve_rule_dependencies`; a helper predicate is private to the program defining it.
+    """
+    defines = {s: {n for n in _defined_predicates([p]) if n.startswith("aux_")} for s, p in programs.items()}
+    uses = {
+        s: {n for n in _referenced_predicates(p) if n.startswith("aux_")} - defines[s]
+        for s, p in programs.items()
+    }
+    tainted = set(stems)
+    tainted_preds = set().union(*(defines.get(s, set()) for s in tainted))
+    changed = True
+    while changed:
+        changed = False
+        for s in programs:
+            if s not in tainted and uses[s] & tainted_preds:
+                tainted.add(s)
+                tainted_preds |= defines[s]
+                changed = True
+    return tainted

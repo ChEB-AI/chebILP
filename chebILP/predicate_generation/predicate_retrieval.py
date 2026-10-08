@@ -229,9 +229,7 @@ class HybridPredicateRetriever:
     def _split_top(self, order, top_k: int) -> list:
         """Pick ``top_k`` indices from ``order`` (best first), half seeded FG predicates, half rest.
 
-        Seeded functional groups (``efga_*``, ``efg_*``, ...) are hundreds of near-identical
-        short entries; ranked together with the aux rules they either crowd them out or get
-        buried. Each group gets ``top_k // 2`` spots (the odd spot goes to the aux rules); a group
+        Each group gets ``top_k // 2`` spots (the odd spot goes to the aux rules); a group
         with too few entries leaves its spots to the other. The result keeps fused-score order.
         """
         is_seed = [is_fg_seed_name(e.get("stem", e["name"])) for e in self.entries]
@@ -243,11 +241,12 @@ class HybridPredicateRetriever:
         chosen = set(seeds[:n_seed]) | set(rest[:n_rest])
         return [i for i in order if i in chosen]
 
-    def retrieve(self, query_text: str, top_k: int = 25) -> list[dict]:
+    def retrieve(self, query_text: str, top_k: int = 25, exclude: set[str] | None = None) -> list[dict]:
         """Return the top-k library entries for ``query_text``, best first.
 
         Seeded functional-group predicates and the other (aux) entries each get half of the
-        ``top_k`` spots; see :meth:`_split_top`.
+        ``top_k`` spots; see :meth:`_split_top`. Entries whose ``stem`` is in ``exclude`` are
+        never returned; the next-best entries take their spots.
 
         Each returned dict is a copy of the library entry plus ``rrf`` and the
         per-channel ranks ``bm25_rank`` / ``dense_rank`` (``None`` if dense is off).
@@ -272,7 +271,10 @@ class HybridPredicateRetriever:
         for positions in rank_arrays:
             fused += 1.0 / (self.rrf_k + positions)
 
-        top_idx = self._split_top(np.argsort(fused)[::-1], top_k)
+        order = np.argsort(fused)[::-1]
+        if exclude:
+            order = [i for i in order if self.entries[i].get("stem", self.entries[i]["name"]) not in exclude]
+        top_idx = self._split_top(order, top_k)
         results = []
         for i in top_idx:
             e = dict(self.entries[i])

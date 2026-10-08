@@ -250,6 +250,10 @@ def main():
     parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
     parser.add_argument("--top_k", type=int, default=16,
                         help="Reuse candidates retrieved from the shared library per class.")
+    parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], default=None,
+                        help="Effort level for the `claude` CLI backend. Default: the CLI's per-model "
+                             "default (medium for Opus 5.5, high for Sonnet 5.5 and Haiku 5.5). "
+                             "Ignored for 'provider/name' models.")
     args = parser.parse_args()
 
     load_dotenv()
@@ -264,7 +268,7 @@ def main():
         chebi_ids = [line.strip() for line in f if line.strip()]
 
     PredicateGenerator(
-        args.predicate_dir, args.model, args.n_predicates, args.top_k,
+        args.predicate_dir, args.model, args.n_predicates, args.top_k, effort=args.effort,
     ).run(chebi_graph, chebi_ids)
 
 

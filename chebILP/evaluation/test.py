@@ -3,7 +3,7 @@
 import json
 import os
 import time
-from chebILP.ilp_path_manager import get_bk_path, get_exs_path
+from chebILP.ilp_path_manager import get_bk_path, get_exs_path, RULE_PREDICATE_SETS, RETRIEVED_RULE_PREDICATE_SETS
 from typing import Literal, Optional
 
 import numpy as np
@@ -47,7 +47,7 @@ def _aux_predicate_specs(programs, aux_library_dir):
     return list(specs.items())
 
 
-def _collect_rule_programs(programs, rule_library_dir):
+def _collect_rule_programs(programs, rule_library_dir, retrieved=False):
     """Rule programs (llm_generated_rules) needed to evaluate the learned programs.
 
     Returns ``(rule_programs, dependency_programs)``: the programs the classes chose, and
@@ -63,13 +63,33 @@ def _collect_rule_programs(programs, rule_library_dir):
 
     A class's *whole* rule set is loaded, not just the heads its learned program uses: a head
     the program never mentions may still be the helper another head depends on.
+
+    ``retrieved`` (``llm_retrieved_rules*``): class_map.json is not what the BK was built from,
+    so the library programs are the ones the learned programs name; their dependencies are
+    resolved as usual.
     """
     import re
-    from chebILP.predicate_generation.auxiliary_rules import load_class_rules, resolve_rule_dependencies
+    from chebILP.molecule_processing.fg_matching import FG_SEED_PREFIXES
+    from chebILP.predicate_generation.auxiliary_rules import (
+        DEFAULT_AUX_RULE_LIBRARY_DIR, aux_rule_path, load_class_rules, parse_rule_program,
+        resolve_rule_dependencies,
+    )
 
     chosen = {}
+    if retrieved:
+        library_dir = rule_library_dir or DEFAULT_AUX_RULE_LIBRARY_DIR
+        name_re = re.compile(r"\b(?:" + "|".join(("aux_",) + FG_SEED_PREFIXES) + r")\w+")
+        for prog in programs.values():
+            for name in name_re.findall(prog):
+                path = aux_rule_path(name, library_dir)
+                if name in chosen or not os.path.exists(path):
+                    continue
+                with open(path, "r", encoding="utf-8") as f:
+                    rp = parse_rule_program(f.read(), source_file=path)
+                if rp is not None:
+                    chosen[rp.name] = rp
     for cls_id, prog in programs.items():
-        if not re.search(r"\baux_\w+", prog):
+        if retrieved or not re.search(r"\baux_\w+", prog):
             continue
         for rp in load_class_rules(cls_id, library_dir=rule_library_dir):
             chosen.setdefault(rp.name, rp)
@@ -284,8 +304,9 @@ def build_ilp_preds_tensor(
     # build on) and recompute their extensions in the background. RuleProgram objects are
     # picklable, so they ride in worker_state directly.
     rule_programs = rule_dependencies = None
-    if predicate_set == "llm_generated_rules":
-        rule_programs, rule_dependencies = _collect_rule_programs(valid_programs, aux_library_dir)
+    if predicate_set in RULE_PREDICATE_SETS:
+        rule_programs, rule_dependencies = _collect_rule_programs(
+            valid_programs, aux_library_dir, retrieved=predicate_set in RETRIEVED_RULE_PREDICATE_SETS)
         print(f"{len(rule_programs)} distinct auxiliary rule(s) referenced by programs"
               + (f" (+{len(rule_dependencies)} dependencies)" if rule_dependencies else ""))
 
@@ -457,12 +478,13 @@ def predict_smiles(
     # llm_generated_rules: gather the rule programs the target classes use (and the library
     # programs they build on) so the background recomputes their extensions.
     rule_programs = rule_dependencies = None
-    if predicate_set == "llm_generated_rules":
+    if predicate_set in RULE_PREDICATE_SETS:
         programs_by_class = {
             t[len("chebi_"):]: "\n".join(r for r in rules if f"chebi_{t[len('chebi_'):]}" in r)
             for t in target_predicates if t.startswith("chebi_")
         }
-        rule_programs, rule_dependencies = _collect_rule_programs(programs_by_class, aux_library_dir)
+        rule_programs, rule_dependencies = _collect_rule_programs(
+            programs_by_class, aux_library_dir, retrieved=predicate_set in RETRIEVED_RULE_PREDICATE_SETS)
 
     # fowl predicates are class-specific: gather the SMARTS patterns for the target
     # classes so the background emits the fowl_<cls_id> facts the rules reference.

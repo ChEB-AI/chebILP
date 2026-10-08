@@ -31,6 +31,7 @@ def _make_ilp_builder(args):
         aux_library_dir = args.get("predicate_dir")
         computed_facts = args.get("computed_facts", False)
         write_aleph = not args.get("no_aleph", False)
+        retrieval_k = args.get("retrieval_k", 16)
     else:
         fg_mode = args.fg_mode
         chebi_version = args.chebi_version
@@ -42,6 +43,7 @@ def _make_ilp_builder(args):
         aux_library_dir = getattr(args, "predicate_dir", None)
         computed_facts = getattr(args, "computed_facts", False)
         write_aleph = not getattr(args, "no_aleph", False)
+        retrieval_k = getattr(args, "retrieval_k", 16)
 
     if fg_mode:
         return FGILPProblemBuilder(
@@ -61,6 +63,7 @@ def _make_ilp_builder(args):
         aux_library_dir=aux_library_dir,
         computed_facts=computed_facts,
         write_aleph=write_aleph,
+        retrieval_k=retrieval_k,
     )
 
 
@@ -477,8 +480,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp_bk.add_argument("--aux_timeout", type=float, default=1.0, help="Timeout (seconds) for each auxiliary predicate's extension call (default: 1.0).")
     sp_bk.add_argument("--predicate_dir", type=str, default=None,
                        help="Shared auxiliary-predicate library directory (llm_generated_fgs: "
-                            "data/llm_generated_predicates; llm_generated_rules: data/llm_generated_rules). "
+                            "data/llm_generated_predicates; llm_generated_rules, llm_retrieved_rules*: "
+                            "data/llm_generated_rules). "
                             "The BK is written to <predicate_set>_<library name>/, so libraries can coexist.")
+    sp_bk.add_argument("--retrieval_k", type=int, default=16,
+                       help="For llm_retrieved_rules / llm_retrieved_rules_holdout: number of library "
+                            "programs retrieval picks per class (default: 16). Not part of the BK folder "
+                            "name, so a rebuild with another k overwrites the previous BK.")
     sp_bk.add_argument("--computed_facts", action="store_true",
                        help="For llm_generated_rules: compute mol_weight/ring_size facts to evaluate "
                             "the rules against (kept out of bk.pl; only aux_* extensions are saved).")
