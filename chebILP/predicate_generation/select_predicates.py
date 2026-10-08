@@ -205,6 +205,7 @@ def select_predicates_for_class(
     predicate_set: AVAILABLE_PREDICATE_SETS = "atoms",
     selection_mode: Literal["claude", "random", "top_k"] = "claude",
     top_k: int = 10,
+    predicate_dir: str | None = None,
 ) -> str:
     """
     Select predicates for a single ChEBI class using Claude.
@@ -219,7 +220,7 @@ def select_predicates_for_class(
     Returns:
         Path to the output bias file.
     """
-    bias_path_before = get_bias_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set)
+    bias_path_before = get_bias_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, predicate_dir=predicate_dir)
     if not os.path.exists(bias_path_before):
         raise FileNotFoundError(f"Bias file not found: {bias_path_before}. Try to build the ILP problem for this class first to generate the bias file with all predicates.")
     
@@ -238,7 +239,7 @@ def select_predicates_for_class(
         import random
         selected_predicates = random.sample(predicates, min(top_k, len(predicates)))
     elif selection_mode == "top_k":
-        bk_path = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set)
+        bk_path = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, predicate_dir=predicate_dir)
         selected_predicates =select_most_common_predicates(bk_path, predicates, top_k)
     elif selection_mode == "claude":
         # Ask Claude for predicate selection
@@ -253,7 +254,7 @@ def select_predicates_for_class(
     print(f"{selection_mode} selected {len(selected_predicates)} predicates out of {len(predicates)}")
     
     # Write output bias file
-    output_path = get_bias_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=top_k)
+    output_path = get_bias_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=top_k, predicate_dir=predicate_dir)
     write_bias_file(
         output_path=output_path,
         chebi_id=chebi_id,
@@ -262,8 +263,8 @@ def select_predicates_for_class(
     )
 
     # filter bk.pl file to only include selected predicates
-    bk_path_before = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set)
-    bk_path_after = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=top_k)
+    bk_path_before = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, predicate_dir=predicate_dir)
+    bk_path_after = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=top_k, predicate_dir=predicate_dir)
     with open(bk_path_before, "r") as f_in, open(bk_path_after, "w+") as f_out:
         for line in f_in:
             line = line.strip()
@@ -281,6 +282,7 @@ def select_predicates_for_classes(
     predicate_set: AVAILABLE_PREDICATE_SETS = "atoms",
     selection_mode: Literal["claude", "random", "top_k"] = "claude",
     selection_k: int = 10,
+    predicate_dir: str | None = None,
 ) -> dict[int, str]:
     """
     Select predicates for multiple ChEBI classes.
@@ -316,7 +318,8 @@ def select_predicates_for_classes(
                 problem_dir=problem_dir,
                 predicate_set=predicate_set,
                 selection_mode=selection_mode,
-                top_k=selection_k
+                top_k=selection_k,
+                predicate_dir=predicate_dir,
             )
             results[chebi_id] = output_path
         except Exception as e:

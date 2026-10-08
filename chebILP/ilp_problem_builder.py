@@ -330,13 +330,13 @@ class ILPProblemBuilder:
 
             for split in ["train", "validation", "test"]:
                 prolog_lines = prolog_lines_by_split[split]
-                bk_path = get_bk_path(target_id, base_dir=self.problem_dir, predicate_set=self.predicate_set, split=split)
+                bk_path = get_bk_path(target_id, base_dir=self.problem_dir, predicate_set=self.predicate_set, split=split, predicate_dir=self.aux_library_dir)
 
                 with open(bk_path, "w+") as f:
                     f.write("\n".join(prolog_lines) + "\n")
 
             # create bias file template based on bk predicates
-            plain_bias_path = get_bias_path(target_id, split="train", base_dir=self.problem_dir, predicate_set=self.predicate_set) # bias file path for settings-specific bias file (created in build_bias)
+            plain_bias_path = get_bias_path(target_id, split="train", base_dir=self.problem_dir, predicate_set=self.predicate_set, predicate_dir=self.aux_library_dir) # bias file path for settings-specific bias file (created in build_bias)
             bias_lines = [
                 f"%% CHEBI:{target_id} (bias file without settings)",
                 f"",
@@ -352,7 +352,7 @@ class ILPProblemBuilder:
                 f.write("\n".join(bias_lines) + "\n")
 
             if self.write_aleph:
-                aleph_b = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir) + ".b"
+                aleph_b = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir, predicate_dir=self.aux_library_dir) + ".b"
                 with open(aleph_b, "w+") as f:
                     f.write(build_aleph_background(f"chebi_{target_id}", body_predicates, prolog_lines_by_split["train"]))
 
@@ -428,7 +428,7 @@ class ILPProblemBuilder:
                     f.write(f"{posneg}(chebi_{target_id}({sample})).\n")
 
         if self.write_aleph:
-            aleph_stem = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir)
+            aleph_stem = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir, predicate_dir=self.aux_library_dir)
             for posneg, ext in [("pos", ".f"), ("neg", ".n")]:
                 with open(aleph_stem + ext, "w+") as f:
                     for sample in samples_by_split[(posneg, "train")].index:

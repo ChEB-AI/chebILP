@@ -123,6 +123,28 @@ def build_hypothesis_heuristic_lines(clause, body_preds, level=DEFAULT_HEURISTIC
     ]
 
 
+def build_body_cost_lines(body_preds, aux_cost=1, seed_cost=1, base_cost=1):
+    """``body_cost`` directives pricing each body predicate in Popper's MDL size term.
+
+    Three tiers: LLM-generated ``aux_*`` predicates, seeded functional groups (``efg_``,
+    ``efga_``, ``chembl_fg_``) and everything else (atom-level primitives). Popper's default
+    cost is 1, so only predicates with a different cost get a line.
+    """
+    from chebILP.molecule_processing.fg_matching import is_fg_seed_name
+
+    lines = []
+    for name in sorted({pred for pred, _ in body_preds}):
+        if name.startswith("aux_"):
+            cost = aux_cost
+        elif is_fg_seed_name(name):
+            cost = seed_cost
+        else:
+            cost = base_cost
+        if cost != 1:
+            lines.append(f"body_cost({name},{cost}).")
+    return lines
+
+
 def log_subprocess_output(log_dir, phase, result):
     """Write subprocess stdout/stderr to the run log with timestamp."""
     if not log_dir:
@@ -195,16 +217,16 @@ print(json.dumps(result))
     return output
 
 
-def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL):
+def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, aux_pred_cost=1, seed_pred_cost=1, base_pred_cost=1):
     # use bias template generated in build_bk and create settings-specific bias files
     for target_id in tqdm.tqdm(target_ids, desc="Building bias files for ChEBI classes"):
-        plain_bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k) # template bias file created in build_bk
+        plain_bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, predicate_dir=aux_library_dir) # template bias file created in build_bk
         if selection_mode is None:
             assert os.path.exists(plain_bias_path), f"Bias template file {plain_bias_path} does not exist. Please run build_bk first to create the bias template before running build_bias."
         else:
             assert os.path.exists(plain_bias_path), f"Bias template file {plain_bias_path} does not exist. Please run predicate selection with selection_mode={selection_mode} and top_k={selection_k} first."
 
-        bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses)
+        bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses, predicate_dir=aux_library_dir)
         # use bias.pl to generate settings-specific bias file
         with open(plain_bias_path, "r") as f:
             bias_content = f.read()
@@ -227,11 +249,16 @@ def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["c
             if hint_lines:
                 bias_content = bias_content.rstrip("\n") + "\n\n%% heuristic guidance toward LLM-chosen predicates\n" + "\n".join(hint_lines) + "\n"
 
+        cost_lines = build_body_cost_lines(_parse_body_preds(bias_content), aux_cost=aux_pred_cost,
+                                           seed_cost=seed_pred_cost, base_cost=base_pred_cost)
+        if cost_lines:
+            bias_content = bias_content.rstrip("\n") + "\n\n%% per-predicate costs in the MDL size term\n" + "\n".join(cost_lines) + "\n"
+
         with open(bias_path, "w+") as f:
             f.write(bias_content)
 
 
-def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, tool:Literal["popper", "aleph"]="popper", nuwls=True):
+def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, max_clauses=2, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, tool:Literal["popper", "aleph"]="popper", nuwls=True, aux_pred_cost=1, seed_pred_cost=1, base_pred_cost=1):
     if problem_dir is None:
         problem_dir = os.path.join("data", "ilp_problems")
     # Build settings parameters for Popper
@@ -259,11 +286,16 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         f.write(f"heuristic_guidance: {heuristic_guidance}\n")
         if seed_hypothesis or heuristic_guidance:
             f.write(f"aux_library_dir: {aux_library_dir}\n")
+        f.write(f"pred_costs: {{aux: {aux_pred_cost}, seed: {seed_pred_cost}, base: {base_pred_cost}}}\n")
         f.write("popper_settings:\n")
         for key, value in settings_parameters.items():
             f.write(f"\t{key}: {value}\n")
 
-    build_bias(problem_dir, predicate_set, classes_list, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses, heuristic_guidance=heuristic_guidance, aux_library_dir=aux_library_dir, heuristic_level=heuristic_level)
+    if tool == "aleph" and (aux_pred_cost, seed_pred_cost, base_pred_cost) != (1, 1, 1):
+        print("Warning: predicate costs only apply to Popper; ignoring them for --tool aleph.")
+        aux_pred_cost = seed_pred_cost = base_pred_cost = 1
+    build_bias(problem_dir, predicate_set, classes_list, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses, heuristic_guidance=heuristic_guidance, aux_library_dir=aux_library_dir, heuristic_level=heuristic_level,
+               aux_pred_cost=aux_pred_cost, seed_pred_cost=seed_pred_cost, base_pred_cost=base_pred_cost)
 
     if seed_hypothesis and tool != "aleph":
         print("Warning: --seed_hypothesis only works with --tool aleph; ignoring it for Popper.")
@@ -285,8 +317,8 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         # Run training in subprocess (isolated Prolog session)
         print(f"Training ChEBI:{chebi_id}")
         exs_path = get_exs_path(chebi_id, split="train", base_dir=problem_dir)
-        bk_path = get_bk_path(chebi_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k)
-        bias_path = get_bias_path(chebi_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses)
+        bk_path = get_bk_path(chebi_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, predicate_dir=aux_library_dir)
+        bias_path = get_bias_path(chebi_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, max_clauses=max_clauses, predicate_dir=aux_library_dir)
         if not os.path.exists(exs_path) or not os.path.exists(bk_path) or not os.path.exists(bias_path):
             print(f"Missing files for ChEBI:{chebi_id} - skipping. exs_path: {exs_path}, bk_path: {bk_path}, bias_path: {bias_path}")
             continue
@@ -320,7 +352,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
 
         if tool == "aleph":
             from chebILP.aleph_runner import run_ilp_training_aleph
-            aleph_stem = get_aleph_stem(chebi_id, predicate_set=predicate_set, base_dir=problem_dir)
+            aleph_stem = get_aleph_stem(chebi_id, predicate_set=predicate_set, base_dir=problem_dir, predicate_dir=aux_library_dir)
             missing = [aleph_stem + ext for ext in (".b", ".f", ".n") if not os.path.exists(aleph_stem + ext)]
             if missing:
                 print(f"Missing Aleph file(s) for ChEBI:{chebi_id}: {', '.join(missing)}; "
@@ -349,7 +381,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
                 conf_matrix = run_ilp_validation_clingo(
                     chebi_id, prog_str,
                     exs_file=get_exs_path(chebi_id, split="validation", base_dir=problem_dir),
-                    bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split="validation", base_dir=problem_dir),
+                    bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split="validation", base_dir=problem_dir, predicate_dir=aux_library_dir),
                 )
                 f1 = (2*conf_matrix["TP"] / (2*conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"])) if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0 else 0.0
                 print(f"    Validation F1: {f1:.2f} (TP: {conf_matrix['TP']}, FP: {conf_matrix['FP']}, TN: {conf_matrix['TN']}, FN: {conf_matrix['FN']})")

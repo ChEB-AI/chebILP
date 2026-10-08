@@ -119,6 +119,9 @@ def _handle_learn(args):
             aux_library_dir=args.predicate_dir,
             tool=args.tool,
             nuwls=args.nuwls,
+            aux_pred_cost=args.aux_pred_cost,
+            seed_pred_cost=args.seed_pred_cost,
+            base_pred_cost=args.base_pred_cost,
         )
 
 
@@ -136,6 +139,7 @@ def _handle_select_predicates(args):
         predicate_set=args.predicate_set,
         selection_mode=args.selection_mode,
         selection_k=args.selection_k,
+        predicate_dir=args.predicate_dir,
     )
     successful = sum(1 for v in results.values() if v is not None)
     print(f"\nCompleted: {successful}/{len(chebi_ids)} classes processed successfully")
@@ -353,7 +357,7 @@ def _handle_test(args):
     print(f"Config for test run saved to {os.path.join(results_dir, 'config.yml')}")
 
     with tee_output(log_path):
-        test_chebi_classes(args.run_to_evaluate, config["problem_dir"], config["predicate_set"], results_dir, selection_mode=config["selection_mode"], selection_k=config["selection_k"], test_on=args.test_on, verbose=args.verbose)
+        test_chebi_classes(args.run_to_evaluate, config["problem_dir"], config["predicate_set"], results_dir, selection_mode=config["selection_mode"], selection_k=config["selection_k"], test_on=args.test_on, verbose=args.verbose, predicate_dir=config.get("predicate_dir"))
 
 
 def _handle_predict(args):
@@ -473,7 +477,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp_bk.add_argument("--aux_timeout", type=float, default=1.0, help="Timeout (seconds) for each auxiliary predicate's extension call (default: 1.0).")
     sp_bk.add_argument("--predicate_dir", type=str, default=None,
                        help="Shared auxiliary-predicate library directory (llm_generated_fgs: "
-                            "data/llm_generated_predicates; llm_generated_rules: data/llm_generated_rules).")
+                            "data/llm_generated_predicates; llm_generated_rules: data/llm_generated_rules). "
+                            "The BK is written to <predicate_set>_<library name>/, so libraries can coexist.")
     sp_bk.add_argument("--computed_facts", action="store_true",
                        help="For llm_generated_rules: compute mol_weight/ring_size facts to evaluate "
                             "the rules against (kept out of bk.pl; only aux_* extensions are saved).")
@@ -502,9 +507,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--mdl_weight_fn", type=int, default=1, help="Weight β for false negatives in MDL cost (default: 1)." + _mdl_note)
     sp_learn.add_argument("--mdl_weight_fp", type=int, default=1, help="Weight γ for false positives in MDL cost (default: 1)." + _mdl_note)
     sp_learn.add_argument("--mdl_weight_size", type=int, default=1, help="Weight α for program size in MDL cost (default: 1)." + _mdl_note)
+    _cost_note = " Replaces the cost of 1 per literal in Popper's MDL size term; needs the feature/predicate-costs Popper branch."
+    sp_learn.add_argument("--aux_pred_cost", type=int, default=1,
+                          help="Cost of an LLM-generated aux_* body literal (default: 1)." + _cost_note)
+    sp_learn.add_argument("--seed_pred_cost", type=int, default=1,
+                          help="Cost of a seeded functional-group body literal (efg_, efga_, chembl_fg_; default: 1)." + _cost_note)
+    sp_learn.add_argument("--base_pred_cost", type=int, default=1,
+                          help="Cost of any other body literal, i.e. the atom-level primitives (default: 1)." + _cost_note)
     sp_learn.add_argument("--predicate_dir", type=str, default=None,
-                          help="Auxiliary-rule library directory (llm_generated_rules), needed for "
-                               "--seed_hypothesis / --heuristic_guidance to read the class's saved hypothesis.")
+                          help="Auxiliary-rule library directory (LLM predicate sets). Selects the BK folder "
+                               "build_bk wrote for that library, and is read by --seed_hypothesis / --heuristic_guidance.")
     sp_learn.add_argument("--seed_hypothesis", action="store_true",
                           help="Seed Aleph's search with the LLM's saved class hypothesis, when it grounds "
                                "and fits the bias (--tool aleph and llm_generated_rules only).")
@@ -524,6 +536,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp_select.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use.")
     sp_select.add_argument("--selection_mode", type=str, default="claude", choices=["claude", "random", "top_k"], help="How to select predicates.")
     sp_select.add_argument("--selection_k", type=int, default=10, help="Number of predicates to select.")
+    sp_select.add_argument("--predicate_dir", type=str, default=None,
+                           help="Auxiliary-rule library the BK was built from (LLM predicate sets); selects its BK folder.")
     sp_select.set_defaults(func=_handle_select_predicates)
 
     # ── test ─────────────────────────────────────────────────────────────

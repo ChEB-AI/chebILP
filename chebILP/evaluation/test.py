@@ -513,7 +513,7 @@ def predict_smiles(
     return results
 
 
-def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, results_dir, selection_mode: Optional[str], selection_k: Optional[int], test_on: Literal["validation", "test"] = "test", verbose: bool = False, **kwargs):
+def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, results_dir, selection_mode: Optional[str], selection_k: Optional[int], test_on: Literal["validation", "test"] = "test", verbose: bool = False, predicate_dir: Optional[str] = None, **kwargs):
 
     with open(os.path.join(results_dir, "config.yml"), "a+") as f:
         f.write(f"problem_dir: {problem_dir}\n")
@@ -542,7 +542,7 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
                 chebi_id, prog_str,
                 exs_file=get_exs_path(chebi_id, split=test_on, base_dir=problem_dir),
                 bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split=test_on, base_dir=problem_dir,
-                                    selection_mode=selection_mode, selection_k=selection_k),
+                                    selection_mode=selection_mode, selection_k=selection_k, predicate_dir=predicate_dir),
                 return_details=True,
             )
             if verbose:
