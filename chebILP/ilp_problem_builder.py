@@ -4,6 +4,7 @@ import networkx as nx
 
 import tqdm
 from chebILP.molecule_processing.data_preparation import ChEBIDataset
+from chebILP.molecule_processing.mol_to_abrc import build_background_abrc, mol_to_abrc_core
 from chebILP.molecule_processing.mol_to_fol import mol_to_fol_fgs
 from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
 from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, load_class_map, DEFAULT_AUX_TIMEOUT
@@ -214,21 +215,15 @@ class ILPProblemBuilder:
         
         pbar = tqdm.tqdm(target_ids, desc="Building background knowledge")
         for target_id in pbar:
-            # The per-class status goes into the bar itself; printing it would redraw the bar
-            # on every iteration. Only warnings and failures are written as their own lines.
             pbar.set_description(f"Building background knowledge for ChEBI:{target_id}")
-            pbar.set_postfix_str("")
 
             # LLM-generated auxiliary predicates are specific to the target class,
             # so they are loaded once per target and merged into the atom-level BK.
             aux_predicates = None
             if self.predicate_set == "llm_generated_fgs":
                 aux_predicates = load_auxiliary_predicates(target_id, library_dir=self.aux_library_dir)
-                pbar.set_postfix_str(f"{len(aux_predicates)} aux predicate(s)")
 
-            # llm_generated_rules: the class's auxiliary predicates are ASP rules,
-            # evaluated (below) against the atom facts plus optional computed facts.
-            # Only the derived aux_* extensions are written to bk.pl.
+            # llm_generated_rules: evaluate aux_* rules against BK (atom-level, extended)
             rule_programs, dependency_programs, fg_seed_programs = None, [], []
             if self.predicate_set in RULE_PREDICATE_SETS:
                 if self.predicate_set in RETRIEVED_RULE_PREDICATE_SETS:
@@ -239,13 +234,8 @@ class ILPProblemBuilder:
                 # RDKit functional-group match, emitted directly below rather than ground by clingo.
                 fg_seed_programs = [p for p in selected_programs if is_fg_seed_name(p.name)]
                 rule_programs = [p for p in selected_programs if not is_fg_seed_name(p.name)]
-                # class_map.json records only the predicates the class chose, not the ones
-                # they build on, so the dependencies have to be pulled in from the library
-                # or the rules ground against an empty body and derive nothing.
+                # get transitive dependencies of selected rules
                 dependency_programs = resolve_rule_dependencies(rule_programs, self.aux_library_dir)
-                pbar.set_postfix_str(f"{len(rule_programs)} rule(s)"
-                                     + (f" +{len(dependency_programs)} dep(s)" if dependency_programs else "")
-                                     + (f" +{len(fg_seed_programs)} fg_seed" if fg_seed_programs else ""))
 
             # The fowl set adds a single class-specific predicate, fowl_<target_id>,
             # derived from a SMARTS pattern, on top of the atom predicates. Not every
@@ -255,10 +245,7 @@ class ILPProblemBuilder:
                 if not hasattr(self, "_fowl_smarts"):
                     self._fowl_smarts = load_fowl_smarts()
                 smarts = self._fowl_smarts.get(target_id)
-                if smarts is None:
-                    pbar.set_postfix_str("no fowl SMARTS, plain atom predicates")
-                else:
-                    pbar.set_postfix_str(f"fowl SMARTS {smarts}")
+                if smarts is not None:
                     fowl_smarts = {target_id: smarts}
 
             selected_ids_by_split = dict()
@@ -275,7 +262,10 @@ class ILPProblemBuilder:
 
                 # standard bk is always added
                 prolog_lines = []
-                prolog_lines_atoms, body_predicates_atoms = build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set, fowl_smarts=fowl_smarts)
+                if self.predicate_set == "abrc":
+                    prolog_lines_atoms, body_predicates_atoms = build_background_abrc(selected_rows)
+                else:
+                    prolog_lines_atoms, body_predicates_atoms = build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set, fowl_smarts=fowl_smarts)
                 prolog_lines += prolog_lines_atoms
                 body_predicates.update(body_predicates_atoms)
                 if self.predicate_set in ["chembl_fgs", "chebi_fgs", "efg"]:
@@ -340,10 +330,7 @@ class ILPProblemBuilder:
                 referenced_fg = referenced_fact_predicates(rule_programs + dependency_programs, FG_SEED_PREFIXES)
                 if referenced_fg:
                     eval_facts += self._fg_seed_fact_lines(referenced_fg, all_selected_ids)
-                # The class's rules are grounded as one program, so a rule may use a predicate
-                # another of its rules defines. The head may be of any arity; each derived
-                # atom is written to the split of the molecule it belongs to. Dependencies
-                # take part in the grounding but never reach bk.pl.
+                # The class's rules are grounded as one program
                 try:
                     extensions = derive_rule_extensions(
                         rule_programs + dependency_programs, eval_facts, all_selected_ids

@@ -455,24 +455,11 @@ def derive_rule_extensions(progs, facts: list[str], mol_ids, timeout: float | No
     """Ground ``progs`` together and group each one's derived atoms by molecule.
 
     All programs go into a single clingo instance, so one may build on predicates another
-    defines. Names are consequently shared across ``progs``: two programs that define the same
-    predicate differently would contribute to a single extension. The library rules that out
-    by construction — one name, one program — so programs from several classes may be passed
-    together.
-
-    A head may have any arity: a molecule predicate ``aux_x(M)``, an atom one ``aux_x(A)``, a
-    pair ``aux_x(A1,A2)``, or any mix. A derived atom belongs to a molecule when one of its
-    arguments *is* that molecule or one of its atoms — resolved through the ``has_atom`` facts
-    rather than the spelling of the atom id. Arguments that are neither (plain numbers, say)
-    attach the atom to nothing on their own.
+    defines. 
 
     The facts are split per molecule and ground in batches of ``batch_size`` rather than all
-    at once. For a well-formed program this changes nothing — every variable is joined to its
-    molecule, so no clause could span two of them anyway — but it bounds what a clause with
-    *unjoined* variables costs: such a clause grounds as a cross product over every atom in
-    the instance, which at class scale (650+ molecules) reaches 10^8 ground atoms and exhausts
-    memory. See :data:`~chebILP.evaluation.clingo_eval.GROUNDING_BATCH_SIZE`.
-
+    at once. 
+    
     ``timeout`` is the wall-clock ceiling for the whole call.
 
     Returns ``{program_name: {mol_id: [arg_tuple, ...]}}``, with one entry per program.

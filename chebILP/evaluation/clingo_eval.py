@@ -283,6 +283,7 @@ def ground_extensions_isolated(
     proc.join()
     if status == "ok":
         return payload
+    print(f"grounding failed: {rules}, {fact_groups}, {target_labels}")
     raise RuntimeError(payload)
 
 
