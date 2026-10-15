@@ -76,9 +76,9 @@ def build_aleph_background(head_name, body_predicates, train_bk_lines, head_arit
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True, write_aleph: bool = True, retrieval_k: int = 16):
+    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True, write_aleph: bool = True, retrieval_k: int = 16, problem_dir: str | None = None):
         self.predicate_set = predicate_set
-        self.problem_dir = os.path.join(base_dir, "ilp_problems")
+        self.problem_dir = problem_dir or os.path.join(base_dir, "ilp_problems")
         os.makedirs(self.problem_dir, exist_ok=True)
         self.write_aleph = write_aleph and predicate_set not in ("chebi_fg_rules", "chebi_fg_learned_rules")
         # Per-call wall-clock budget for LLM-generated auxiliary predicates.

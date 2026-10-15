@@ -32,6 +32,7 @@ def _make_ilp_builder(args):
         computed_facts = args.get("computed_facts", False)
         write_aleph = not args.get("no_aleph", False)
         retrieval_k = args.get("retrieval_k", 16)
+        problem_dir = args.get("problem_dir", os.path.join("data", "ilp_problems"))
     else:
         fg_mode = args.fg_mode
         chebi_version = args.chebi_version
@@ -44,6 +45,7 @@ def _make_ilp_builder(args):
         computed_facts = getattr(args, "computed_facts", False)
         write_aleph = not getattr(args, "no_aleph", False)
         retrieval_k = getattr(args, "retrieval_k", 16)
+        problem_dir = getattr(args, "problem_dir", os.path.join("data", "ilp_problems"))
 
     if fg_mode:
         return FGILPProblemBuilder(
@@ -64,6 +66,7 @@ def _make_ilp_builder(args):
         computed_facts=computed_facts,
         write_aleph=write_aleph,
         retrieval_k=retrieval_k,
+        problem_dir=problem_dir
     )
 
 
@@ -409,6 +412,8 @@ def _add_common_args(parser: argparse.ArgumentParser):
                         help="Include 2-star classes as well as 3-star (default: 3-star only).")
     parser.add_argument("--base_dir", type=str, default="data",
                         help="Root directory for the dataset (default: data).")
+    parser.add_argument("--problem_dir", default=os.path.join("data", "ilp_problems"),
+                        help="ILP problem tree holding each class's examples / BK.")    
     parser.add_argument("--min_pos_samples", type=int, default=25,
                         help="Minimum descendant molecules per label class; selects the dataset subset (default: 25).")
     parser.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
