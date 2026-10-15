@@ -60,7 +60,9 @@ def _drop_api_key_auth() -> None:
         os.environ.pop(var, None)
 
 
-async def _run_query(model: str, system: str, prompt: str, schema: type[BaseModel]) -> ResultMessage | None:
+async def _run_query(
+    model: str, system: str, prompt: str, schema: type[BaseModel], effort: str | None = None
+) -> ResultMessage | None:
     """Drive one CLI query to completion and return its final ``ResultMessage``."""
     _drop_api_key_auth()
     options = ClaudeAgentOptions(
@@ -69,6 +71,9 @@ async def _run_query(model: str, system: str, prompt: str, schema: type[BaseMode
         tools=[],
         setting_sources=[],         
         output_format={"type": "json_schema", "schema": schema.model_json_schema()},
+        effort=effort,
+        # Skips the per-session title request the CLI otherwise sends to a Haiku model.
+        env={"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"},
         **({"cli_path": _CLI_PATH} if _CLI_PATH else {}),
     )
     result: ResultMessage | None = None
@@ -76,6 +81,56 @@ async def _run_query(model: str, system: str, prompt: str, schema: type[BaseMode
         if isinstance(message, ResultMessage):
             result = message
     return result
+
+
+# List prices in $/MTok: (input, output, cache read). Cache writes are priced from input.
+# The CLI's own ``total_cost_usd`` bills Sonnet 5.5 and Haiku 5.5 at Opus 5.5 rates.
+_PRICES = {
+    "claude-fable-5-1": (10.0, 50.0, 0.25),
+    "claude-fable-5": (10.0, 50.0, 1.0),
+    "claude-opus-5-5": (4.0, 20.0, 0.20),
+    "claude-opus-5": (5.0, 25.0, 0.50),
+    "claude-opus-4-8": (5.0, 25.0, 0.50),
+    "claude-opus-4-7": (5.0, 25.0, 0.50),
+    "claude-opus-4-6": (5.0, 25.0, 0.50),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-4-6": (3.0, 15.0, 0.30),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
+    "claude-haiku-4-5": (1.0, 5.0, 0.10),
+}
+
+
+def _price_key(model: str) -> str | None:
+    """Longest ``_PRICES`` key that prefixes ``model`` (tolerates date suffixes and ``[1m]``)."""
+    hits = [k for k in _PRICES if model.startswith(k)]
+    return max(hits, key=len) if hits else None
+
+
+def _usage_summary(model: str, result: ResultMessage) -> tuple[dict | None, float | None]:
+    """Tokens of ``model`` in one CLI query, and the list-price cost of every model it used.
+
+    The CLI also makes a small side call on another model (e.g. a Haiku session title); it is
+    priced but not counted in the tokens. Cost is ``None`` if any model used is unpriced.
+    """
+    model_usage = result.model_usage or {}
+    split = (result.usage or {}).get("cache_creation") or {}
+    w1h, w5m = split.get("ephemeral_1h_input_tokens") or 0, split.get("ephemeral_5m_input_tokens") or 0
+    write_mult = (2.0 * w1h + 1.25 * w5m) / (w1h + w5m) if (w1h + w5m) else 1.25
+    tokens, cost = None, (0.0 if model_usage else None)
+    for name, mu in model_usage.items():
+        t_in, t_out = mu.get("inputTokens", 0), mu.get("outputTokens", 0)
+        t_w, t_r = mu.get("cacheCreationInputTokens", 0), mu.get("cacheReadInputTokens", 0)
+        key = _price_key(mu.get("canonicalModel") or name)
+        if key is not None and key == _price_key(model):
+            tokens = {"input": t_in, "output": t_out, "thinking": mu.get("thinkingTokens", 0),
+                      "cache_write": t_w, "cache_read": t_r}
+        if key is None or cost is None:
+            cost = None
+            continue
+        p_in, p_out, p_read = _PRICES[key]
+        cost += (t_in * p_in + t_out * p_out + t_w * p_in * write_mult + t_r * p_read) / 1e6
+    return tokens, cost
 
 
 # A wedged ``claude`` CLI subprocess (auth prompt, network stall, ...) otherwise blocks
@@ -90,21 +145,23 @@ def structured_completion(
     schema: type[BaseModel],
     *,
     max_retries: int = 5,
+    effort: str | None = None,
 ):
     """Ask ``model`` for one structured answer. Returns ``(parsed, raw_json_text, attempts)``.
 
     ``raw`` is the answer re-serialized as JSON, kept for the exchange log. ``attempts`` is
-    one record per query made (each ``{"error", "raw", "cost"}``), in order — the final entry
+    one record per query made (each ``{"error", "raw", "cost", "tokens"}``), in order — the final entry
     is the successful call (``error`` is ``None``); earlier entries are retried failures. On
     total failure the collected attempts are attached to the raised exception as
     ``_chebilp_attempts`` so the caller can still log them.
 
     A ``provider/name`` model id (``openai/gpt-4o``) routes to an OpenAI-compatible endpoint;
-    a bare id (``claude-opus-5``) routes to the local ``claude`` CLI.
+    a bare id (``claude-opus-5``) routes to the local ``claude`` CLI. ``effort`` applies to
+    the CLI only; ``None`` leaves the CLI's per-model default.
     """
     if "/" in model:
         return _openai_structured_completion(model, system, prompt, schema, max_retries=max_retries)
-    return _cli_structured_completion(model, system, prompt, schema, max_retries=max_retries)
+    return _cli_structured_completion(model, system, prompt, schema, max_retries=max_retries, effort=effort)
 
 
 def _cli_structured_completion(
@@ -114,6 +171,7 @@ def _cli_structured_completion(
     schema: type[BaseModel],
     *,
     max_retries: int,
+    effort: str | None = None,
 ):
     """Structured answer over the local ``claude`` CLI (Claude Agent SDK).
 
@@ -129,7 +187,7 @@ def _cli_structured_completion(
         try:
             started = time.monotonic()
             print(f"  requesting {cli_model} via CLI (attempt {attempt + 1}/{max_retries}, timeout {_CLI_TIMEOUT:.0f}s)...")
-            result = asyncio.run(asyncio.wait_for(_run_query(cli_model, system, prompt, schema), timeout=_CLI_TIMEOUT))
+            result = asyncio.run(asyncio.wait_for(_run_query(cli_model, system, prompt, schema, effort), timeout=_CLI_TIMEOUT))
             print(f"  response in {time.monotonic() - started:.0f}s")
         except asyncio.TimeoutError:
             last_exc = TimeoutError(f"CLI query timed out after {_CLI_TIMEOUT:.0f}s")
@@ -151,9 +209,9 @@ def _cli_structured_completion(
             time.sleep(wait)
             continue
 
-        cost = result.total_cost_usd
+        tokens, cost = _usage_summary(cli_model, result)
         if result.stop_reason == "refusal":
-            attempts.append({"error": "refusal", "raw": result.result, "cost": cost})
+            attempts.append({"error": "refusal", "raw": result.result, "cost": cost, "tokens": tokens})
             exc = ModelRefusal(f"{cli_model} declined this request (safety classifier)")
             exc._chebilp_attempts = attempts
             raise exc
@@ -162,13 +220,13 @@ def _cli_structured_completion(
         if result.subtype == "success" and structured:
             raw = json.dumps(structured, ensure_ascii=False, indent=2)
             parsed = schema.model_validate(structured)
-            attempts.append({"error": None, "raw": raw, "cost": cost})
+            attempts.append({"error": None, "raw": raw, "cost": cost, "tokens": tokens})
             return parsed, raw, attempts
 
         # No structured output despite the SDK's own retries — terminal, don't re-ask.
         raw = json.dumps(structured, ensure_ascii=False) if structured else result.result
         detail = f"subtype={result.subtype}, errors={result.errors}"
-        attempts.append({"error": detail, "raw": raw, "cost": cost})
+        attempts.append({"error": detail, "raw": raw, "cost": cost, "tokens": tokens})
         last_exc = RuntimeError(f"no valid structured output ({detail})")
         break
 

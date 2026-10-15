@@ -39,18 +39,38 @@ def get_aux_generation_log_path(chebi_id, base_dir):
     os.makedirs(logs_dir, exist_ok=True)
     return os.path.join(logs_dir, f"chebi_{chebi_id}.md")
 
-def get_bk_path(chebi_id, split: Split, predicate_set, base_dir=None, selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None):
+# Sets whose BK is ground from an ASP rule library: the class's own selection from class_map.json,
+# or a retrieval over the whole library (the holdout variant may not pick the class's own programs).
+RETRIEVED_RULE_PREDICATE_SETS = ("llm_retrieved_rules", "llm_retrieved_rules_holdout")
+RULE_PREDICATE_SETS = ("llm_generated_rules",) + RETRIEVED_RULE_PREDICATE_SETS
+LIBRARY_PREDICATE_SETS = ("llm_generated_fgs",) + RULE_PREDICATE_SETS
+
+
+def get_predicate_set_dirname(predicate_set, predicate_dir=None):
+    """BK folder name; LLM-library sets carry the library name so several libraries can coexist."""
+    if predicate_set in LIBRARY_PREDICATE_SETS and predicate_dir and predicate_dir != "None":
+        return f"{predicate_set}_{os.path.basename(os.path.normpath(predicate_dir))}"
+    return predicate_set
+
+
+def get_bk_path(chebi_id, split: Split, predicate_set, base_dir=None, selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, predicate_dir=None):
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
-    bk_dir = os.path.join(problem_dir, predicate_set)
+    bk_dir = os.path.join(problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir))
     os.makedirs(bk_dir, exist_ok=True)
     if selection_mode is not None and selection_k is not None:
         bk_dir = os.path.join(bk_dir, f"selection_{selection_mode}_k={selection_k}")
         os.makedirs(bk_dir, exist_ok=True)
     return os.path.join(bk_dir, "bk.pl")
 
-def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, max_vars=None, max_body=None, max_clauses=None):
+
+def get_retrieval_record_path(chebi_id, predicate_set, base_dir=None, predicate_dir=None):
+    """JSON record of the library programs retrieval picked for a class (train BK folder)."""
+    bk_path = get_bk_path(chebi_id, "train", predicate_set, base_dir=base_dir, predicate_dir=predicate_dir)
+    return os.path.join(os.path.dirname(bk_path), "retrieved_predicates.json")
+
+def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, max_vars=None, max_body=None, max_clauses=None, predicate_dir=None):
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
-    bk_dir = os.path.join(problem_dir, predicate_set)
+    bk_dir = os.path.join(problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir))
     os.makedirs(bk_dir, exist_ok=True)
     if selection_mode is not None and selection_k is not None:
         bk_dir = os.path.join(bk_dir, f"selection_{selection_mode}_k={selection_k}")
@@ -65,13 +85,13 @@ def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", 
     return os.path.join(bk_dir, bias_file)
 
 
-def get_aleph_stem(chebi_id, predicate_set, base_dir=None, selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None):
+def get_aleph_stem(chebi_id, predicate_set, base_dir=None, selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, predicate_dir=None):
     """Aleph file stem for a class (train split only): callers append ``.b``/``.f``/``.n``.
 
     The stem basename is the bare ChEBI id, so files are e.g.
     ``.../train/atoms/13248.b``."""
     problem_dir = get_problem_dir(chebi_id, "train", base_dir)
-    bk_dir = os.path.join(problem_dir, predicate_set)
+    bk_dir = os.path.join(problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir))
     os.makedirs(bk_dir, exist_ok=True)
     if selection_mode is not None and selection_k is not None:
         bk_dir = os.path.join(bk_dir, f"selection_{selection_mode}_k={selection_k}")
