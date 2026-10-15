@@ -7,6 +7,7 @@ import os
 from chebILP.evaluation.clingo_eval import ground_extensions
 from chebILP.predicate_generation.auxiliary_rules import DEFAULT_GROUNDING_TIMEOUT
 from rdkit import Chem, RDLogger
+from rdkit.Chem import Descriptors, rdCIPLabeler
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -77,7 +78,7 @@ def mol_to_abrc_facts(mol_id, mol):
     except Exception:  # ring info not initialised (unsanitisable molecule)
         Chem.GetSymmSSSR(mol)
     try:
-        Chem.rdCIPLabeler.AssignCIPLabels(mol)
+        rdCIPLabeler.AssignCIPLabels(mol)
     except Exception:
         pass
 
@@ -164,7 +165,7 @@ def mol_to_abrc_facts(mol_id, mol):
     facts.append(f"heavy_atoms({M},{heavy}).")
     facts.append(f"num_rings({M},{ri.NumRings()}).")
     try:
-        mw = round(Chem.Descriptors.MolWt(mol))
+        mw = round(Descriptors.MolWt(mol))
     except Exception:
         mw = 0
     facts.append(f"mol_weight({M},{mw}).")
@@ -230,8 +231,6 @@ def build_background_abrc(rows) -> tuple[list[str], set[(str, int)]]:
     return lines, [(pred, predicates[pred]) for pred in predicates.keys()]
 
 if __name__ == "__main__":
-    from rdkit import Chem
-
     smiles = "CC1=CC(=O)C2=C(C1=O)C=CC=C2"
     mol = Chem.MolFromSmiles(smiles)
     facts, body_predicates = mol_to_abrc_core("test", mol)

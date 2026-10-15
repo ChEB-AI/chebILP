@@ -284,6 +284,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         f.write(f"max_clauses: {max_clauses}\n")
         f.write(f"seed_hypothesis: {seed_hypothesis}\n")
         f.write(f"heuristic_guidance: {heuristic_guidance}\n")
+        f.write(f"predicate_dir: {aux_library_dir}\n")
         if seed_hypothesis or heuristic_guidance:
             f.write(f"aux_library_dir: {aux_library_dir}\n")
         f.write(f"pred_costs: {{aux: {aux_pred_cost}, seed: {seed_pred_cost}, base: {base_pred_cost}}}\n")
