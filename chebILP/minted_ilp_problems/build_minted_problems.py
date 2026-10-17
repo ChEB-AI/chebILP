@@ -7,6 +7,8 @@ import argparse
 import os
 
 from chebILP.minted_ilp_problems.iggp import DialMinter, SwitchesMinter
+from chebILP.minted_ilp_problems.zendo import (Ascend4Minter, ChainMinter, MonoChainMinter, RedChainMinter,
+                                               RedTiltedTopMinter, TiltedChainMinter)
 
 MINTERS = {
     "iggp_mint1a": (DialMinter, {"n_positions": 6, "spin_steps": 3}),
@@ -17,6 +19,12 @@ MINTERS = {
     "iggp_mint2b": (SwitchesMinter, {"n_switches": 3, "hit_all": False, "sync": True}),
     "iggp_mint2c": (SwitchesMinter, {"n_switches": 3, "hit_all": True, "sync": True}),
     "iggp_mint2d": (SwitchesMinter, {"n_switches": 5, "hit_all": True, "sync": True}),
+    "zendo_mint1": (TiltedChainMinter, {}),
+    "zendo_mint2": (RedChainMinter, {}),
+    "zendo_mint3": (ChainMinter, {}),
+    "zendo_mint4": (Ascend4Minter, {}),
+    "zendo_mint5": (RedTiltedTopMinter, {}),
+    "zendo_mint6": (MonoChainMinter, {}),
 }
 
 
