@@ -561,7 +561,7 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
         from chebILP.evaluation.clingo_eval import run_ilp_validation_clingo
         try:
             conf_matrix, details = run_ilp_validation_clingo(
-                chebi_id, prog_str,
+                f"chebi_{chebi_id}", prog_str,
                 exs_file=get_exs_path(chebi_id, split=test_on, base_dir=problem_dir),
                 bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split=test_on, base_dir=problem_dir,
                                     selection_mode=selection_mode, selection_k=selection_k, predicate_dir=predicate_dir),

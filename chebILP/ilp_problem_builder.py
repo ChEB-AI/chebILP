@@ -19,6 +19,7 @@ import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
 from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path, get_aleph_stem, get_retrieval_record_path, RULE_PREDICATE_SETS, RETRIEVED_RULE_PREDICATE_SETS
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
+from chebILP.ilp_problem import ILPProblem, build_aleph_background  # noqa: F401 (re-exported for scripts)
 
 
 CHEBI_FG_RULES_PATH = os.path.join("data", "chebi_fg_rules_from_smiles.pl")
@@ -48,30 +49,14 @@ def load_fowl_smarts(path=FOWL_SMARTS_PATH) -> dict[str, str]:
             mapping[chebi_id.strip()] = smarts.strip()
     return mapping
 
-def _aleph_mode_str(name, arity, is_head):
-    """Aleph mode declaration for a predicate:
-    head args are all ``+any`` (input); a body pred's first arg is ``+any`` and the rest
-    ``-any`` (output), giving the natural input/output chaining."""
-    if is_head or arity == 1:
-        args = ["+any"] * arity
-    else:
-        args = ["+any"] + ["-any"] * (arity - 1)
-    kind = "modeh" if is_head else "modeb"
-    return f":- {kind}(*, {name}({', '.join(args)}))."
-
-
-def build_aleph_background(head_name, body_predicates, train_bk_lines, head_arity=1):
-    """Assemble the structural Aleph ``.b`` for a class from its Popper-format inputs.
-
-    Deliberately carries no ``:- set(...)`` or ``:- dynamic``
-    directives -- those are injected at learn time (chebILP.aleph_runner)."""
-    body = sorted(body_predicates)
-    lines = [":- use_module(library(lists)).", "", _aleph_mode_str(head_name, head_arity, True)]
-    lines += [_aleph_mode_str(name, arity, False) for name, arity in body]
-    lines.append("")
-    lines += [f":- determination({head_name}/{head_arity}, {name}/{arity})." for name, arity in body]
-    lines += ["", "%% ===== background knowledge ====="]
-    return "\n".join(lines) + "\n" + "\n".join(train_bk_lines) + "\n"
+def _facts_by_predicate(lines) -> dict[str, list[tuple | str]]:
+    """Ground fact lines (``p(a,b).``) grouped by predicate, as ``ILPProblem.bk_facts``."""
+    facts = {}
+    for line in lines:
+        pred, args = line.rstrip(".").rstrip(")").split("(", 1)
+        args = tuple(args.split(","))
+        facts.setdefault(pred, []).append(args if len(args) > 1 else args[0])
+    return facts
 
 
 class ILPProblemBuilder:
@@ -249,6 +234,7 @@ class ILPProblemBuilder:
                     fowl_smarts = {target_id: smarts}
 
             selected_ids_by_split = dict()
+            pos_ids_by_split = dict()
             prolog_lines_by_split = dict()
             computed_lines_by_split = dict()
             body_predicates = set()
@@ -256,9 +242,11 @@ class ILPProblemBuilder:
                 exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split=split)
                 with open(exs_path, "r") as f:
                     # for each line get id between inner parentheses (e.g. pos(chebi_123(456)). -> 456) and select corresponding rows from samples_df
-                    selected_ids = [line.strip().split("(")[-1].split(")")[0] for line in f.readlines() if line.strip() and not line.startswith("%")]
+                    ex_lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("%")]
+                selected_ids = [line.split("(")[-1].split(")")[0] for line in ex_lines]
                 selected_rows = self.dataset.molecules[[id in selected_ids for id in self.dataset.molecules.index]]
                 selected_ids_by_split[split] = selected_ids
+                pos_ids_by_split[split] = {id for id, line in zip(selected_ids, ex_lines) if line.startswith("pos(")}
 
                 # standard bk is always added
                 prolog_lines = []
@@ -369,33 +357,20 @@ class ILPProblemBuilder:
                         head, args = line.split("(", 1)
                         body_predicates.add((head, args.count(",") + 1))
 
+            # bias.pl is a template whose settings build_bias fills in
             for split in ["train", "validation", "test"]:
-                prolog_lines = prolog_lines_by_split[split]
+                ids = selected_ids_by_split[split]
+                problem = ILPProblem(
+                    (f"chebi_{target_id}", 1),
+                    [i for i in ids if i in pos_ids_by_split[split]],
+                    [i for i in ids if i not in pos_ids_by_split[split]],
+                    _facts_by_predicate(prolog_lines_by_split[split]),
+                )
                 bk_path = get_bk_path(target_id, base_dir=self.problem_dir, predicate_set=self.predicate_set, split=split, predicate_dir=self.aux_library_dir)
-
-                with open(bk_path, "w+") as f:
-                    f.write("\n".join(prolog_lines) + "\n")
-
-            # create bias file template based on bk predicates
-            plain_bias_path = get_bias_path(target_id, split="train", base_dir=self.problem_dir, predicate_set=self.predicate_set, predicate_dir=self.aux_library_dir) # bias file path for settings-specific bias file (created in build_bias)
-            bias_lines = [
-                f"%% CHEBI:{target_id} (bias file without settings)",
-                f"",
-                f"%% max_vars(TODO).",
-                f"%% max_body(TODO).",
-                f"%% max_clauses(TODO).",
-                f"",
-                f"head_pred(chebi_{target_id}, 1)."] + [
-                f"body_pred({pred},{arity})." for pred, arity in body_predicates
-            ]
-            # bias without settings (as template)
-            with open(plain_bias_path, "w+") as f:
-                f.write("\n".join(bias_lines) + "\n")
-
-            if self.write_aleph:
-                aleph_b = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir, predicate_dir=self.aux_library_dir) + ".b"
-                with open(aleph_b, "w+") as f:
-                    f.write(build_aleph_background(f"chebi_{target_id}", body_predicates, prolog_lines_by_split["train"]))
+                problem.write_popper(os.path.dirname(bk_path), exs_folder=os.path.dirname(get_exs_path(target_id, split, base_dir=self.problem_dir)))
+                if split == "train" and self.write_aleph:
+                    aleph_stem = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir, predicate_dir=self.aux_library_dir)
+                    problem.write_aleph(os.path.dirname(aleph_stem), stem=os.path.basename(aleph_stem))
 
         if failed_rule_classes:
             print(f"\n{len(failed_rule_classes)} class(es) built without their auxiliary rule "
@@ -467,13 +442,6 @@ class ILPProblemBuilder:
             with open(exs_path, "w+" if posneg == "pos" else "a") as f:
                 for sample in df.index:
                     f.write(f"{posneg}(chebi_{target_id}({sample})).\n")
-
-        if self.write_aleph:
-            aleph_stem = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir, predicate_dir=self.aux_library_dir)
-            for posneg, ext in [("pos", ".f"), ("neg", ".n")]:
-                with open(aleph_stem + ext, "w+") as f:
-                    for sample in samples_by_split[(posneg, "train")].index:
-                        f.write(f"chebi_{target_id}({sample}).\n")
 
         # sum up all positive and negative samples across splits
         return sum(len(v) for k, v in samples_by_split.items() if k[0] == "pos"), sum(len(v) for k, v in samples_by_split.items() if k[0] == "neg")

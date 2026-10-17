@@ -18,7 +18,7 @@ from chebi_utils import build_chebi_graph, download_chebi_obo
 
 def load_bias_predicates(bias_path: str) -> list[tuple[str, int]]:
     """
-    Load body predicates and max_vars / max_body / max_clauses from a bias.pl file.
+    Load body predicates and max_vars / max_body from a bias.pl file.
     
     Args:
         bias_path: Path to the bias.pl file.
@@ -185,7 +185,6 @@ def write_bias_file(
         f"",
         f"%% max_vars(TODO).",
         f"%% max_body(TODO).",
-        f"%% max_clauses(TODO).",
         f"",
         f"head_pred({head_predicate}, 1).",
     ]
