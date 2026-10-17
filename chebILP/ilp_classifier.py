@@ -14,6 +14,7 @@ from typing import Literal, Optional
 
 from chebILP.ilp_path_manager import get_bias_path, get_bk_path, get_exs_path, get_aleph_stem
 from chebILP.utils import AVAILABLE_PREDICATE_SETS
+from popper.util import MAX_BODY, MAX_VARS
 
 # The subsystem whose auxiliary predicates are ASP rules whose heads can be analysed for
 # seeding and heuristic guidance. Both features only apply here.
@@ -217,7 +218,7 @@ print(json.dumps(result))
     return output
 
 
-def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, aux_pred_cost=1, seed_pred_cost=1, base_pred_cost=1):
+def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=MAX_VARS, max_body=MAX_BODY, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, aux_pred_cost=1, seed_pred_cost=1, base_pred_cost=1):
     # use bias template generated in build_bk and create settings-specific bias files
     for target_id in tqdm.tqdm(target_ids, desc="Building bias files for ChEBI classes"):
         plain_bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, predicate_dir=aux_library_dir) # template bias file created in build_bk
@@ -257,7 +258,7 @@ def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["c
             f.write(bias_content)
 
 
-def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=6, max_body=8, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, tool:Literal["popper", "aleph"]="popper", nuwls=True, aux_pred_cost=1, seed_pred_cost=1, base_pred_cost=1):
+def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=MAX_VARS, max_body=MAX_BODY, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, tool:Literal["popper", "aleph"]="popper", nuwls=True, aux_pred_cost=1, seed_pred_cost=1, base_pred_cost=1):
     if problem_dir is None:
         problem_dir = os.path.join("data", "ilp_problems")
     # Build settings parameters for Popper

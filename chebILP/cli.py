@@ -4,6 +4,7 @@ import time
 import argparse
 
 from chebILP.utils import tee_output, AVAILABLE_PREDICATE_SETS
+from popper.util import MAX_BODY, MAX_VARS
 
 from chebILP.ilp_classifier import learn_chebi_classes
 
@@ -509,8 +510,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument("--fg_mode", action="store_true", help="Learn functional groups instead of ChEBI classes.")
     sp_learn.add_argument("--selection_mode", type=str, default=None, choices=["claude", "random", "top_k"], help="Mode for selecting body predicates in bias file.")
     sp_learn.add_argument("--selection_k", type=int, default=10, help="Number of predicates selection with selection_mode (required if selection_mode is set).")
-    sp_learn.add_argument("--max_vars", type=int, default=6, help="Maximum number of variables in learned rules.")
-    sp_learn.add_argument("--max_body", type=int, default=8, help="Maximum number of body literals in learned rules.")
+    sp_learn.add_argument("--max_vars", type=int, default=MAX_VARS, help="Maximum number of variables in learned rules.")
+    sp_learn.add_argument("--max_body", type=int, default=MAX_BODY, help="Maximum number of body literals in learned rules.")
     sp_learn.add_argument("--nuwls", action=argparse.BooleanOptionalAction, default=True,
                           help="Use Popper's NuWLS anytime MaxSAT solver (default: on). Needs the NuWLS-c binary on PATH; "
                                "see the Popper README.")
