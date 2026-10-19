@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from chebILP.predicate_generation.auxiliary_predicates import load_class_map, set_class_predicates
 from chebILP.ilp_path_manager import get_aux_generation_log_path
-from chebILP.predicate_generation.llm_client import structured_completion
+from chebILP.predicate_generation.llm_client import LLMCallFailed, structured_completion
 from chebILP.utils import sort_labels_by_hierarchy
 
 
@@ -328,6 +328,11 @@ class AuxiliaryGenerator(ABC):
                 n = self.generate_for_class(chebi_id, info)
                 total += n
                 print(f"  -> {n} auxiliary {self.noun}(s) recorded")
+            except LLMCallFailed as e:
+                # Every class needs an answer; rerunning the same command resumes at this class.
+                print(f"  -> LLM call failed: {e}")
+                print(f"Aborting run at CHEBI:{chebi_id}. Rerun the same command to resume.")
+                raise
             except Exception as e:
                 print(f"  -> Failed: {e}")
         print(f"Done. Recorded {total} auxiliary {self.noun} selection(s) across {len(chebi_ids)} class(es).")
