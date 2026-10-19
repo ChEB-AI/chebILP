@@ -7,6 +7,7 @@ import argparse
 import os
 
 from chebILP.minted_ilp_problems.iggp import DialMinter, SwitchesMinter
+from chebILP.minted_ilp_problems.trains import TrainsMinter
 from chebILP.minted_ilp_problems.zendo import (Ascend4Minter, ChainMinter, MonoChainMinter, RedChainMinter,
                                                RedTiltedTopMinter, TiltedChainMinter)
 
@@ -25,6 +26,10 @@ MINTERS = {
     "zendo_mint4": (Ascend4Minter, {}),
     "zendo_mint5": (RedTiltedTopMinter, {}),
     "zendo_mint6": (MonoChainMinter, {}),
+    "trains_mint1": (TrainsMinter, {"level": 1}),
+    "trains_mint2": (TrainsMinter, {"level": 2}),
+    "trains_mint3": (TrainsMinter, {"level": 3}),
+    "trains_mint4": (TrainsMinter, {"level": 4}),
 }
 
 
@@ -32,9 +37,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=20260907)
     ap.add_argument("--out_root", default=None)
+    ap.add_argument("--problem_type", default=None)
     args = ap.parse_args()
 
     for name, (minter_cls, minter_kwargs) in MINTERS.items():
+        if args.problem_type is not None and args.problem_type != minter_cls.problem_type:
+            continue
         minter = minter_cls(args.out_root, **minter_kwargs)
         problem = minter.mint(args.seed)
         out_dir = os.path.join(minter.out_root, name)
