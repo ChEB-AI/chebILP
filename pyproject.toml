@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 explain = [
-    "xclingo>=2.0b14",
+    "xclingo>=2.0b19",
     "Pillow>=12.1.1",
 ]
 llm = [
