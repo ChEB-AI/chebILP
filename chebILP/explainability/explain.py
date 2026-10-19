@@ -20,72 +20,72 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
         if pred_name.lower() in _ELEMENT_NAMES:
             name = _ELEMENT_NAMES[pred_name.lower()]
             article = _get_a_an(name)
-            return f'%!trace {{"% is {article} {name} atom", {A}}} {call}.'
+            return f'%!trace {{{call}, "% is {article} {name} atom", {A}}}.'
         if pred_name == "charge0":
-            return f'%!trace {{"% has no formal charge", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has no formal charge", {A}}}.'
         if pred_name == "charge_p":
-            return f'%!trace {{"% has a positive formal charge", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has a positive formal charge", {A}}}.'
         if pred_name == "charge_n":
-            return f'%!trace {{"% has a negative formal charge", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has a negative formal charge", {A}}}.'
         m = re.fullmatch(r"charge_m(\d+)", pred_name)
         if m:
-            return f'%!trace {{"% has formal charge -{m.group(1)}", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has formal charge -{m.group(1)}", {A}}}.'
         m = re.fullmatch(r"charge(\d+)", pred_name)
         if m:
-            return f'%!trace {{"% has formal charge +{m.group(1)}", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has formal charge +{m.group(1)}", {A}}}.'
         m = re.fullmatch(r"has_(\d+)_hs", pred_name)
         if m:
             n = int(m.group(1))
             noun = "hydrogen atom" if n == 1 else "hydrogen atoms"
             count = "no" if n == 0 else _num_word(n)
-            return f'%!trace {{"% has {count} {noun}", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has {count} {noun}", {A}}}.'
         m = re.fullmatch(r"has_at_least_(\d+)_hs", pred_name)
         if m:
             n = int(m.group(1))
             noun = "hydrogen atom" if n == 1 else "hydrogen atoms"
-            return f'%!trace {{"% has at least {_num_word(n)} {noun}", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has at least {_num_word(n)} {noun}", {A}}}.'
         if pred_name.startswith("cip_code_"):
             code = pred_name.replace("cip_code_", "").upper()
-            return f'%!trace {{"% has CIP code {code}", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has CIP code {code}", {A}}}.'
         if pred_name.startswith("steroid_"):
             num = pred_name.replace("steroid_", "")
-            return f'%!trace {{"% is at steroid position {num}", {A}}} {call}.'
+            return f'%!trace {{{call}, "% is at steroid position {num}", {A}}}.'
         if pred_name == "in_ring":
-            return f'%!trace {{"% is in a ring", {A}}} {call}.'
+            return f'%!trace {{{call}, "% is in a ring", {A}}}.'
         m = re.fullmatch(r"in_ring(\d+)", pred_name)
         if m:
-            return f'%!trace {{"% is in a {m.group(1)}-membered ring", {A}}} {call}.'
+            return f'%!trace {{{call}, "% is in a {m.group(1)}-membered ring", {A}}}.'
         if pred_name == "aromatic":
-            return f'%!trace {{"% is aromatic", {A}}} {call}.'
+            return f'%!trace {{{call}, "% is aromatic", {A}}}.'
         if pred_name == "aliphatic":
-            return f'%!trace {{"% is aliphatic", {A}}} {call}.'
+            return f'%!trace {{{call}, "% is aliphatic", {A}}}.'
         if pred_name == "net_charge_positive":
-            return f'%!trace {{"% has a positive net charge", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has a positive net charge", {A}}}.'
         if pred_name == "net_charge_negative":
-            return f'%!trace {{"% has a negative net charge", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has a negative net charge", {A}}}.'
         if pred_name == "net_charge_neutral":
-            return f'%!trace {{"% has no net charge", {A}}} {call}.'
+            return f'%!trace {{{call}, "% has no net charge", {A}}}.'
         if pred_name.startswith("aux_"):
-            return f'%!trace {{"% satisfies the property \'{_format_aux_name(pred_name)}\'", {A}}} {call}.'
-        return f'%!trace {{"% satisfies {pred_name}", {A}}} {call}.'
+            return f'%!trace {{{call}, "% satisfies the property \'{_format_aux_name(pred_name)}\'", {A}}}.'
+        return f'%!trace {{{call}, "% satisfies {pred_name}", {A}}}.'
 
     if arity == 2:
         A1, A2 = "A1", "A2"
         call = f"{pred_name}({A1},{A2})"
         if pred_name == "has_atom":
-            return f'%!trace {{"% has atom %", {A1}, {A2}}} {call}.'
+            return f'%!trace {{{call}, "% has atom %", {A1}, {A2}}}.'
         if pred_name == "has_bond_to":
-            return f'%!trace {{"% has a bond to %", {A1}, {A2}}} {call}.'
+            return f'%!trace {{{call}, "% has a bond to %", {A1}, {A2}}}.'
         m = re.fullmatch(r"bSTEREO([A-Z]+)", pred_name)
         if m:
-            return f'%!trace {{"% has a stereo bond to % ({m.group(1)} configuration)", {A1}, {A2}}} {call}.'
+            return f'%!trace {{{call}, "% has a stereo bond to % ({m.group(1)} configuration)", {A1}, {A2}}}.'
         if re.fullmatch(r"b[A-Z]+", pred_name):
             bond_type = pred_name[1:].lower()
             article = _get_a_an(bond_type)
-            return f'%!trace {{"% has {article} {bond_type} bond to %", {A1}, {A2}}} {call}.'
+            return f'%!trace {{{call}, "% has {article} {bond_type} bond to %", {A1}, {A2}}}.'
         if pred_name.startswith("aux_"):
-            return f'%!trace {{"% and % form a {_format_aux_name(pred_name)}", {A1}, {A2}}} {call}.'
-        return f'%!trace {{"% is related to % via {pred_name}", {A1}, {A2}}} {call}.'
+            return f'%!trace {{{call}, "% and % form a {_format_aux_name(pred_name)}", {A1}, {A2}}}.'
+        return f'%!trace {{{call}, "% is related to % via {pred_name}", {A1}, {A2}}}.'
 
     return None
 
@@ -152,7 +152,7 @@ def _build_xclingo_program(
         ann = _trace_for_predicate(pname, arity)
         if ann:
             trace_lines.append(ann)
-    trace_lines.append(f'%!trace {{"% satisfies {head_pred}", M}} {head_pred}(M).')
+    trace_lines.append(f'%!trace {{{head_pred}(M), "% satisfies {head_pred}", M}}.')
 
     return "\n".join([
         "% Background knowledge",
@@ -164,20 +164,24 @@ def _build_xclingo_program(
         "% Trace annotations",
         *trace_lines,
         "",
-        f"%!show_trace {head_pred}(M).",
+        f"%!show_trace {{{head_pred}(M)}}.",
     ])
 
 
 def _run_xclingo(program: str) -> list:
     """Run xclingo (1 solution, 1 explanation) and return the Explanation objects found."""
-    xcontrol = XclingoControl(n_solutions="1", n_explanations="1")
+    xcontrol = XclingoControl(["1"], n_explanations="1")
     xcontrol.add("base", [], program)
-    xcontrol.ground()
+    xcontrol.ground([("base", [])])
 
     explanations = []
-    for answer_explanations in xcontrol.explain():
-        for expl in answer_explanations:
-            explanations.append(expl)
+    for model in xcontrol.solve():
+        for graph in model.explain_model():
+            # show_trace builds the graph index that explain() reads from
+            for atom in graph.show_trace:
+                expl = graph.explain(atom)
+                if expl is not None:
+                    explanations.append(expl)
     return explanations
 
 
@@ -200,9 +204,10 @@ def _process_explanations(
 
     for expl in explanations:
         for node, _ in expl.preorder_iterator():
-            if not hasattr(node, "labels"):  # ExplanationRoot has no labels
-                continue
-            for label in node.labels:
+            for label in sorted(node.labels):
+                # xclingo returns labels as quoted clingo strings
+                if len(label) >= 2 and label[0] == label[-1] == '"':
+                    label = label[1:-1].replace('\\"', '"').replace("\\\\", "\\")
                 # Collect atom indices for highlighting before any text replacement
                 for m in atom_re.finditer(label):
                     highlight_atoms.add(int(m.group(1)) - 1)
