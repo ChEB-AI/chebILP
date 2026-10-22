@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+from popper.util import MAX_BODY
 
 ALEPH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aleph")
 RUN_ALEPH_PL = os.path.join(ALEPH_DIR, "run_aleph.pl")
@@ -249,7 +250,7 @@ def parse_aleph_output(text, head_name):
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────────────────
-def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=8,
+def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=MAX_BODY,
                            seed_clause=None, log_dir=None, settings_overrides=None,
                            head_name=None, head_arity=1, run_stem_name=None):
     """Learn one class with Aleph. Mirrors run_ilp_training_subprocess's return contract.

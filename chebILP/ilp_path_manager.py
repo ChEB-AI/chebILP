@@ -68,7 +68,7 @@ def get_retrieval_record_path(chebi_id, predicate_set, base_dir=None, predicate_
     bk_path = get_bk_path(chebi_id, "train", predicate_set, base_dir=base_dir, predicate_dir=predicate_dir)
     return os.path.join(os.path.dirname(bk_path), "retrieved_predicates.json")
 
-def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, max_vars=None, max_body=None, max_clauses=None, predicate_dir=None):
+def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, max_vars=None, max_body=None, predicate_dir=None):
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
     bk_dir = os.path.join(problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir))
     os.makedirs(bk_dir, exist_ok=True)
@@ -79,8 +79,6 @@ def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", 
         bias_file += f"_max_vars={max_vars}"
     if max_body is not None:
         bias_file += f"_max_body={max_body}"
-    if max_clauses is not None:
-        bias_file += f"_max_clauses={max_clauses}"
     bias_file += ".pl"
     return os.path.join(bk_dir, bias_file)
 

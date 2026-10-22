@@ -466,10 +466,7 @@ fit; only write NEW rules for properties they do not already cover.
             ctx["extensions"] = {}
             return
         try:
-            ctx["extensions"] = derive_rule_extensions(
-                together, self._augment_with_fg_seeds(together, ctx), ctx["val_ids"],
-                timeout=_VALIDATION_GROUNDING_TIMEOUT,
-            )
+            ctx["extensions"] = self.ground(together, ctx)
             ctx["extensions_valid"] = True
         except Exception as e:
             # The set as a whole will not ground (unstratified negation across programs, say).
@@ -479,6 +476,17 @@ fit; only write NEW rules for properties they do not already cover.
                 ctx["errors"][label] = f"class rules do not ground together: {str(e).strip().splitlines()[0]}"
                 ctx["error_codes"][label] = ERROR_NO_GROUNDING
             ctx["progs"] = {}
+
+    def ground(self, progs, ctx) -> dict:
+        """Derived atoms of ``progs`` per validation molecule, grounded over the class's facts.
+
+        Every grounding of a validation set goes through here, so a pipeline whose examples are
+        not ChEBI molecules overrides this one method.
+        """
+        return derive_rule_extensions(
+            progs, self._augment_with_fg_seeds(progs, ctx), ctx["val_ids"],
+            timeout=_VALIDATION_GROUNDING_TIMEOUT,
+        )
 
     def accept(self, source, label, ctx) -> tuple[bool, str]:
         """Keep every program that parsed and grounds; drop only a surviving structural failure.
@@ -553,10 +561,7 @@ fit; only write NEW rules for properties they do not already cover.
                                source=hypothesis, source_file="<hypothesis>")
         all_progs = programs + dependencies + [hyp_prog]
         try:
-            extensions = derive_rule_extensions(
-                all_progs, self._augment_with_fg_seeds(all_progs, ctx), ctx["val_ids"],
-                timeout=_VALIDATION_GROUNDING_TIMEOUT,
-            )
+            extensions = self.ground(all_progs, ctx)
         except Exception:
             return None
         fired = set(extensions.get(head, {}))
