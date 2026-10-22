@@ -18,6 +18,7 @@ from chebILP.evaluation.clingo_eval import run_ilp_validation_clingo
 from chebILP.ilp_classifier import run_ilp_training_subprocess
 from chebILP.ilp_problem import ILPProblem
 from chebILP.minted_ilp_problems.build_minted_problems import MINTERS
+from chebILP.minted_ilp_problems.generate_minted_predicates import augment_problem
 from popper.util import MAX_BODY, MAX_VARS
 
 
@@ -41,14 +42,17 @@ def split_folds(problem: ILPProblem, k: int, fold_seed: int) -> list[tuple[ILPPr
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tool", choices=["popper", "aleph"], default="popper")
-    ap.add_argument("--seed", type=int, default=20260907, help="minting seed")
-    ap.add_argument("--k_folds", type=int, default=5)
-    ap.add_argument("--fold_seed", type=int, default=0)
-    ap.add_argument("--timeout", type=int, default=60)
-    ap.add_argument("--nuwls", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--results_dir", default=None)
-    ap.add_argument("--problem_type", default=None)
+    ap.add_argument("--tool", choices=["popper", "aleph"], default="popper", help="ILP system to use (default: popper)")
+    ap.add_argument("--seed", type=int, default=20260907, help="Seed for problem generation")
+    ap.add_argument("--k_folds", type=int, default=5, help="Number of folds for cross-validation")
+    ap.add_argument("--fold_seed", type=int, default=0, help="Seed for fold assignment")
+    ap.add_argument("--timeout", type=int, default=120, help="Per-problem timeout for ILP system (seconds, default: 120)")
+    ap.add_argument("--nuwls", action=argparse.BooleanOptionalAction, default=True, help="Use NUWLS for Popper (default: True)")
+    ap.add_argument("--results_dir", default=None, help="Directory to store results (default: data/results/minted_cv/<timestamp>)")
+    ap.add_argument("--problem_type", default=None, help="Only run problems of this type (default: all)")
+    ap.add_argument("--problems", nargs="+", default=None, help="Only run these problems (default: all)")
+    ap.add_argument("--library_root", default=None,
+                    help="Add the auxiliary rules selected in this rule-library root as background (default: none)")
     args = ap.parse_args()
 
     results_dir = args.results_dir or os.path.join("data", "results", "minted_cv", time.strftime("%Y%m%d_%H%M%S"))
@@ -61,10 +65,14 @@ def main():
     for name, (minter_cls, minter_kwargs) in MINTERS.items():
         if args.problem_type is not None and args.problem_type != minter_cls.problem_type:
             continue
-        minter = minter_cls(**minter_kwargs)
+        if args.problems is not None and name not in args.problems:
+            continue
+        minter = minter_cls(library_root=args.library_root, **minter_kwargs)
         max_vars = max(minter.max_vars(), MAX_VARS)
         max_body = max(minter.max_body(), MAX_BODY)
         problem = minter.mint(args.seed)
+        if args.library_root is not None:
+            problem = augment_problem(problem, minter.library_dir, name)
         head, arity = problem.head_predicate
         fold_results = []
         pooled = {"TP": 0, "FP": 0, "TN": 0, "FN": 0}

@@ -7,7 +7,7 @@ import argparse
 import os
 
 from chebILP.minted_ilp_problems.iggp import DialMinter, SwitchesMinter
-from chebILP.minted_ilp_problems.trains import TrainsMinter
+from chebILP.minted_ilp_problems.trains import AheadMinter, ChainedTrainsMinter, ShapeRunMinter
 from chebILP.minted_ilp_problems.zendo import (Ascend4Minter, ChainMinter, MonoChainMinter, RedChainMinter,
                                                RedTiltedTopMinter, TiltedChainMinter)
 
@@ -26,10 +26,13 @@ MINTERS = {
     "zendo_mint4": (Ascend4Minter, {}),
     "zendo_mint5": (RedTiltedTopMinter, {}),
     "zendo_mint6": (MonoChainMinter, {}),
-    "trains_mint1": (TrainsMinter, {"level": 1}),
-    "trains_mint2": (TrainsMinter, {"level": 2}),
-    "trains_mint3": (TrainsMinter, {"level": 3}),
-    "trains_mint4": (TrainsMinter, {"level": 4}),
+    "trains_mint1a": (ChainedTrainsMinter, {"level": 1}),
+    "trains_mint1b": (ChainedTrainsMinter, {"level": 2}),
+    "trains_mint1c": (ChainedTrainsMinter, {"level": 3}),
+    "trains_mint1d": (ChainedTrainsMinter, {"level": 4}),
+    "trains_mint1e": (ChainedTrainsMinter, {"level": 5}),
+    "trains_mint2": (AheadMinter, {}),
+    "trains_mint3": (ShapeRunMinter, {}),
 }
 
 

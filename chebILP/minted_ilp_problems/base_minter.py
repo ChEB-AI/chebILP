@@ -108,6 +108,16 @@ class ILPProblemMinter(ABC):
             "Write clause bodies in clingo/ASP syntax. In particular use `!=` for "
             "inequality (never Prolog's `\\=`), and `=`, `<`, `<=`, `>`, `>=` for the other comparisons; "
             "`_` is an anonymous variable. The clauses are grounded with clingo.\n\n"
+            "Contract for each new predicate:\n"
+            "- Its name is snake_case; it is stored as `aux_<name>`, and its clauses define exactly that predicate.\n"
+            "- Every variable must be bound by a positive background literal (e.g. `piece(S,A)`), in particular the "
+            "example variable of the head. A variable that occurs only in a comparison or only inside an aggregate "
+            "does not bind.\n"
+            "- `not p(X)` is valid; `not (p(X), q(X))` is not, so define a helper predicate for the conjunction. "
+            "`a ; b` is not a disjunction; write separate clauses.\n"
+            "- A recursive clause that increments a counter must carry a constant upper bound in the same clause, "
+            "otherwise it never finishes grounding.\n"
+            "- Do not define or redefine background predicates.\n\n"
             "`auxiliary_predicates`: up to 5 predicates for concept that cannot be expressed trivially "
             "with the existing background predicates. Define each only in terms of the existing background "
             "predicates (or earlier auxiliary predicates). Aim for predicates that are meaningful and contribute to the learning process.\n"
@@ -153,7 +163,7 @@ Answer with a single JSON object:
   Keep it concise.
 - "reuse": the candidate numbers you are reusing, as integers (empty list if none).
 - "new": one entry per NEW predicate, each with "name" (snake_case), "description" (one
-  short line) and "program". "program" is the clause text only — one molecule-level head plus any helper clauses.
+  short line) and "program". "program" is the clause text only — one head over the example variable plus any helper clauses.
 - "hypothesis": one rule `{target}({",".join([f"V{i}" for i in range(1, arity + 1)])}) :- ...` that defines the class as a plain
   conjunction of the background and auxiliary predicates you chose (no aggregates, negation or
   arithmetic here).
