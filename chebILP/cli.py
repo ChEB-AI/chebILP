@@ -3,7 +3,7 @@ import typing
 import time
 import argparse
 
-from chebILP.utils import tee_output, AVAILABLE_PREDICATE_SETS
+from chebILP.utils import tee_output, AVAILABLE_PREDICATE_SETS, add_class_arguments, resolve_classes
 from popper.util import MAX_BODY, MAX_VARS
 
 from chebILP.ilp_classifier import learn_chebi_classes
@@ -11,10 +11,6 @@ from chebILP.ilp_classifier import learn_chebi_classes
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-
-def _load_classes(labels_file: str) -> list[str]:
-    with open(labels_file, "r") as f:
-        return [line.strip() for line in f.readlines() if line.strip()]
 
 
 def _make_ilp_builder(args):
@@ -84,19 +80,19 @@ def _make_results_dir(fg_mode: bool) -> str:
 
 
 def _handle_build_samples(args):
-    classes = _load_classes(args.labels_file)
+    classes = resolve_classes(args)
     ilp_builder = _make_ilp_builder(args)
     ilp_builder.build_examples(classes, min_pos_samples=args.min_pos_samples, max_pos_samples=args.max_pos_samples, min_neg_samples=args.min_neg_samples, max_neg_samples=args.max_neg_samples)
 
 
 def _handle_build_bk(args):
-    classes = _load_classes(args.labels_file)
+    classes = resolve_classes(args)
     ilp_builder = _make_ilp_builder(args)
     ilp_builder.build_bk(classes)
 
 
 def _handle_learn(args):
-    classes = _load_classes(args.labels_file)
+    classes = resolve_classes(args)
     results_dir = _make_results_dir(args.fg_mode)
     log_path = os.path.join(results_dir, "run.log")
 
@@ -134,8 +130,12 @@ def _handle_learn(args):
 def _handle_select_predicates(args):
     from chebILP.predicate_generation.select_predicates import select_predicates_for_classes
 
-    with open(args.labels_file, "r") as f:
-        chebi_ids = [int(line.strip()) for line in f if line.strip()]
+    classes = resolve_classes(args)
+    non_chebi = [c for c in classes if not c.isdigit()]
+    if non_chebi:
+        raise SystemExit(f"select_predicates supports ChEBI classes only (it reads the ChEBI graph); "
+                         f"got: {', '.join(non_chebi)}")
+    chebi_ids = [int(c) for c in classes]
 
     print(f"Processing {len(chebi_ids)} ChEBI classes...")
     results = select_predicates_for_classes(
@@ -405,7 +405,7 @@ def _handle_predict(args):
 
 def _add_common_args(parser: argparse.ArgumentParser):
     """Add arguments shared by all subcommands that build an ILPProblemBuilder."""
-    parser.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
+    add_class_arguments(parser)
     parser.add_argument("--chebi_version", "-v", type=int, required=True,
                         help="ChEBI ontology version (e.g. 251); selects the prepared dataset.")
     parser.add_argument("--include_two_star", "-2", action="store_true",
@@ -502,7 +502,9 @@ def build_parser() -> argparse.ArgumentParser:
         "learn",
         help="Run ILP learning (training + validation) for the given ChEBI classes.",
     )
-    sp_learn.add_argument("--labels_file", type=str, required=True, help="Path to the labels file (one ChEBI ID per line).")
+    add_class_arguments(sp_learn)
+    sp_learn.add_argument("--problem_dir", type=str, default=None,
+                          help="Base directory of the ILP problems (default: data/ilp_problems).")
     sp_learn.add_argument("--tool", type=str, default="popper", choices=["popper", "aleph"],
                           help="ILP engine: 'popper' (default) or 'aleph'.")
     sp_learn.add_argument("--timeout", type=int, default=20, help="Timeout for ILP solver in seconds.")
@@ -542,7 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
         "select_predicates",
         help="Select predicates for ChEBI classes (via Claude, random, or top-k frequency).",
     )
-    sp_select.add_argument("--labels_file", type=str, required=True, help="Path to file with ChEBI IDs (one per line).")
+    add_class_arguments(sp_select)
     sp_select.add_argument("--chebi_version", type=int, default=248, help="ChEBI version to use.")
     sp_select.add_argument("--problem_dir", type=str, default=None, help="Base directory for ILP problems.")
     sp_select.add_argument("--predicate_set", type=str, default="atoms", choices=typing.get_args(AVAILABLE_PREDICATE_SETS), help="Which predicate set to use.")

@@ -19,6 +19,8 @@ import shutil
 import subprocess
 from popper.util import MAX_BODY
 
+from chebILP.ilp_path_manager import class_head
+
 ALEPH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aleph")
 RUN_ALEPH_PL = os.path.join(ALEPH_DIR, "run_aleph.pl")
 
@@ -259,13 +261,13 @@ def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=MA
     The runnable .b (settings + optional seed graph injected) and the copied .f/.n are written
     under ``log_dir/aleph/`` so a run is reproducible and inspectable.
 
-    The target defaults to a ChEBI class (``head_name = chebi_<chebi_id>``, unary), so the CLI
+    The target defaults to the class's ``class_head`` (``chebi_<id>`` or ``ec_*``, unary), so the CLI
     caller need not change. For another problem (e.g. a minted Zendo/IGGP task), pass the target
     ``head_name``/``head_arity`` explicitly, and ``run_stem_name`` for the run's file basename."""
     from chebILP.ilp_classifier import log_subprocess_output
 
     if head_name is None:
-        head_name = f"chebi_{chebi_id}"
+        head_name = class_head(chebi_id)
         head_arity = 1
     stem_name = run_stem_name if run_stem_name is not None else str(chebi_id)
 

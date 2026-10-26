@@ -17,7 +17,7 @@ from chebILP.aleph_runner import run_ilp_training_aleph
 from chebILP.evaluation.clingo_eval import run_ilp_validation_clingo
 from chebILP.ilp_classifier import run_ilp_training_subprocess
 from chebILP.ilp_problem import ILPProblem
-from chebILP.minted_ilp_problems.build_minted_problems import MINTERS
+from chebILP.minted_ilp_problems.build_minted_problems import MINTERS, selected
 from chebILP.minted_ilp_problems.generate_minted_predicates import augment_problem
 from popper.util import MAX_BODY, MAX_VARS
 
@@ -49,7 +49,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=120, help="Per-problem timeout for ILP system (seconds, default: 120)")
     ap.add_argument("--nuwls", action=argparse.BooleanOptionalAction, default=True, help="Use NUWLS for Popper (default: True)")
     ap.add_argument("--results_dir", default=None, help="Directory to store results (default: data/results/minted_cv/<timestamp>)")
-    ap.add_argument("--problem_type", default=None, help="Only run problems of this type (default: all)")
+    ap.add_argument("--problem_type", default=None, help="Only run problems whose type starts with this prefix (default: all)")
     ap.add_argument("--problems", nargs="+", default=None, help="Only run these problems (default: all)")
     ap.add_argument("--library_root", default=None,
                     help="Add the auxiliary rules selected in this rule-library root as background (default: none)")
@@ -63,7 +63,7 @@ def main():
 
     results = {}
     for name, (minter_cls, minter_kwargs) in MINTERS.items():
-        if args.problem_type is not None and args.problem_type != minter_cls.problem_type:
+        if not selected(args.problem_type, minter_cls):
             continue
         if args.problems is not None and name not in args.problems:
             continue

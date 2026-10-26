@@ -4,10 +4,23 @@ from typing import Literal
 Split = Literal["train", "validation", "test"]
 
 
+def class_head(class_id) -> str:
+    """Target predicate and problem folder name: ``chebi_<id>``, or the id itself for an EC class (``ec_3_1_1``)."""
+    class_id = str(class_id)
+    return class_id if class_id.startswith("ec_") else f"chebi_{class_id}"
+
+
+def class_id_from_head(head: str) -> str | None:
+    """Inverse of :func:`class_head`; ``None`` if ``head`` names no class target."""
+    if head.startswith("chebi_"):
+        return head[len("chebi_"):]
+    return head if head.startswith("ec_") else None
+
+
 def get_problem_dir(chebi_id, split: Split, base_dir=None):
     if base_dir is None:
         base_dir = os.path.join("data", "ilp_problems")
-    problem_dir = os.path.join(base_dir, f"chebi_{chebi_id}", split)
+    problem_dir = os.path.join(base_dir, class_head(chebi_id), split)
     os.makedirs(problem_dir, exist_ok=True)
     return problem_dir
 
@@ -37,7 +50,7 @@ def get_aux_generation_log_path(chebi_id, base_dir):
     """Per-class LLM exchange log, now kept inside the library."""
     logs_dir = os.path.join(base_dir, "generation_logs")
     os.makedirs(logs_dir, exist_ok=True)
-    return os.path.join(logs_dir, f"chebi_{chebi_id}.md")
+    return os.path.join(logs_dir, f"{class_head(chebi_id)}.md")
 
 # Sets whose BK is ground from an ASP rule library: the class's own selection from class_map.json,
 # or a retrieval over the whole library (the holdout variant may not pick the class's own programs).

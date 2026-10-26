@@ -8,6 +8,21 @@ import networkx as nx
 AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "efg", "efg_atoms", "chebi_fg_rules", "chebi_fg_learned_rules", "llm_generated_fgs", "llm_generated_rules", "llm_retrieved_rules", "llm_retrieved_rules_holdout", "farm_fgs", "farm_fgs_atoms", "fowl", "abrc"]
 
 
+def add_class_arguments(parser, required: bool = True) -> None:
+    """Target classes as either ``--labels_file <file>`` or ``--classes <id> ...``."""
+    group = parser.add_mutually_exclusive_group(required=required)
+    group.add_argument("--labels_file", type=str, help="File with one class id per line (ChEBI id or ec_a_b_c).")
+    group.add_argument("--classes", nargs="+", help="Class ids, e.g. 33838 or ec_3_1_1.")
+
+
+def resolve_classes(args) -> list[str]:
+    """The class ids given by :func:`add_class_arguments`'s flags."""
+    if getattr(args, "classes", None):
+        return [str(c) for c in args.classes]
+    with open(args.labels_file) as f:
+        return [line.strip() for line in f if line.strip()]
+
+
 def split_prolog_literals(body):
     """Split a Prolog rule body into literals, respecting parenthesis depth."""
     literals, current, depth = [], [], 0

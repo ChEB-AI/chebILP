@@ -12,7 +12,7 @@ import traceback
 import tqdm
 from typing import Literal, Optional
 
-from chebILP.ilp_path_manager import get_bias_path, get_bk_path, get_exs_path, get_aleph_stem
+from chebILP.ilp_path_manager import class_head, get_bias_path, get_bk_path, get_exs_path, get_aleph_stem
 from chebILP.utils import AVAILABLE_PREDICATE_SETS
 from popper.util import MAX_BODY, MAX_VARS
 
@@ -23,6 +23,9 @@ RULE_PREDICATE_SET = "llm_generated_rules"
 # heuristic's ~1000 works; when every hint shares a level the value only sets relative
 # priority, so a single constant is enough (see popper-sfluegel/search-guidance.md).
 DEFAULT_HEURISTIC_LEVEL = 10
+# Popper's timeout covers only the search; its final exact MaxSAT combine has no limit.
+# A run still going this long after the timeout is killed and counts as no solution.
+POPPER_FINAL_COMBINE_GRACE = 300
 
 _BODY_PRED_RE = re.compile(r"body_pred\(\s*([a-z_][A-Za-z0-9_]*)\s*,\s*(\d+)\s*\)")
 
@@ -82,7 +85,7 @@ def build_seed_hypothesis(target_id, programs, body_preds):
         return None
     all_vars = {v for _, args in literals for v in args}
     body = ", ".join(f"{pred}({','.join(args)})" for pred, args in literals)
-    return f"chebi_{target_id}(A) :- {body}.", len(all_vars), len(literals)
+    return f"{class_head(target_id)}(A) :- {body}.", len(all_vars), len(literals)
 
 
 def seed_from_hypothesis(clause, target_id, body_preds):
@@ -99,7 +102,7 @@ def seed_from_hypothesis(clause, target_id, body_preds):
     info = analyze_hypothesis(clause)
     if info is None or not info["datalog_ok"] or not info["body_preds"]:
         return None
-    if info["head"] != (f"chebi_{target_id}", 1):
+    if info["head"] != (class_head(target_id), 1):
         return None
     if not info["body_preds"] <= body_preds:
         return None
@@ -191,13 +194,21 @@ prog_str = format_prog(prog) if prog else None
 result = {{"prog_str": prog_str, "score": list(score) if score else None, "num_programs": popper_stats.stats.total_programs}}
 print(json.dumps(result))
 '''
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True,
-        text=True,
-        start_new_session=True,  # Start in a new session to isolate from parent process
-        cwd=os.getcwd(),
-    )
+    hard_limit = settings_parameters.get("timeout", 0) + POPPER_FINAL_COMBINE_GRACE
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            start_new_session=True,  # Start in a new session to isolate from parent process
+            cwd=os.getcwd(),
+            timeout=hard_limit,
+        )
+    except subprocess.TimeoutExpired as e:
+        stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        log_subprocess_output(log_dir, f"Training: {bias_file} (killed after {hard_limit} s)", stderr)
+        print(f"    Popper did not finish within {hard_limit} s (final combine stage); no solution.")
+        return {"prog_str": None, "score": None, "timed_out": True, "time_to_best": None}
     if log_dir:
         log_subprocess_output(log_dir, f"Training: {bias_file}", result)
     # Parse only the last line (JSON output), ignore earlier lines (warnings/progress)
@@ -379,7 +390,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
             try:
                 from chebILP.evaluation.clingo_eval import run_ilp_validation_clingo
                 conf_matrix = run_ilp_validation_clingo(
-                    f"chebi_{chebi_id}", prog_str,
+                    class_head(chebi_id), prog_str,
                     exs_file=get_exs_path(chebi_id, split="validation", base_dir=problem_dir),
                     bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split="validation", base_dir=problem_dir, predicate_dir=aux_library_dir),
                 )
@@ -397,6 +408,7 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
                 "time_taken": time.perf_counter() - start_time,
                 "time_to_best": train_result.get("time_to_best"),
                 "num_programs": train_result.get("num_programs"),
+                "timed_out": train_result.get("timed_out", False),
                 "program": prog_str,
                 "validation_score": conf_matrix,
             }

@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 from chebILP.evaluation.clingo_eval import ground_extensions_isolated
 from chebILP.ilp_problem import ILPProblem, _atom
-from chebILP.minted_ilp_problems.build_minted_problems import MINTERS
+from chebILP.minted_ilp_problems.build_minted_problems import MINTERS, selected
 from chebILP.predicate_generation.auxiliary_predicates import load_class_map
 from chebILP.predicate_generation.auxiliary_rules import (
     DEFAULT_GROUNDING_TIMEOUT,
@@ -54,6 +54,7 @@ class MintedRuleGenerator(RuleGenerator):
         self.minter = minter
         self.problem = problem
         self.seed = seed
+        self.static_predicates = minter.static_predicates(problem)
 
     @property
     def system_prompt(self) -> str:
@@ -175,7 +176,7 @@ def main():
     load_dotenv()
 
     for name, (minter_cls, minter_kwargs) in MINTERS.items():
-        if args.problem_type is not None and args.problem_type != minter_cls.problem_type:
+        if not selected(args.problem_type, minter_cls):
             continue
         if args.problems is not None and name not in args.problems:
             continue

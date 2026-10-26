@@ -16,6 +16,9 @@ class IGGPMinter(ILPProblemMinter):
 
     target: str
 
+    def static_predicates(self, ilp_problem):
+        return self.state_free_predicates(ilp_problem)
+
     def get_task_description(self):
         return f"""\
 IGGP (Inductive General Game Playing) turns a game specification into an ILP task. Each

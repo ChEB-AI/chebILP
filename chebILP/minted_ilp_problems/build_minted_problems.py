@@ -6,7 +6,9 @@ Usage (from repo root):
 import argparse
 import os
 
+from chebILP.minted_ilp_problems.gdl_minter import gdl_minter, gdl_targets, iggp_games
 from chebILP.minted_ilp_problems.iggp import DialMinter, SwitchesMinter
+from chebILP.minted_ilp_problems.tictactoe import TicTacToeMinter
 from chebILP.minted_ilp_problems.trains import AheadMinter, ChainedTrainsMinter, ShapeRunMinter
 from chebILP.minted_ilp_problems.zendo import (Ascend4Minter, ChainMinter, MonoChainMinter, RedChainMinter,
                                                RedTiltedTopMinter, TiltedChainMinter)
@@ -20,6 +22,11 @@ MINTERS = {
     "iggp_mint2b": (SwitchesMinter, {"n_switches": 3, "hit_all": False, "sync": True}),
     "iggp_mint2c": (SwitchesMinter, {"n_switches": 3, "hit_all": True, "sync": True}),
     "iggp_mint2d": (SwitchesMinter, {"n_switches": 5, "hit_all": True, "sync": True}),
+    "iggp_ttt_goal": (TicTacToeMinter, {"target": "goal"}),
+    "iggp_ttt_terminal": (TicTacToeMinter, {"target": "terminal"}),
+    "iggp_ttt_legal_mark": (TicTacToeMinter, {"target": "legal_mark"}),
+    "iggp_ttt_next_cell": (TicTacToeMinter, {"target": "next_cell"}),
+    "iggp_ttt_next_control": (TicTacToeMinter, {"target": "next_control"}),
     "zendo_mint1": (TiltedChainMinter, {}),
     "zendo_mint2": (RedChainMinter, {}),
     "zendo_mint3": (ChainMinter, {}),
@@ -35,6 +42,15 @@ MINTERS = {
     "trains_mint3": (ShapeRunMinter, {}),
 }
 
+# GDL games from the IGGP repository (data/iggp), one problem per target, named gdl_<game>_<target>.
+GDL_GAMES = iggp_games()
+MINTERS.update({f"gdl_{g}_{t}": (gdl_minter(g), {"target": t}) for g in GDL_GAMES for t in gdl_targets(g)})
+
+
+def selected(problem_type: str | None, minter_cls) -> bool:
+    """Whether ``--problem_type`` (a prefix, e.g. ``gdl`` or ``gdl_tictactoe``) selects the minter."""
+    return problem_type is None or minter_cls.problem_type.startswith(problem_type)
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -44,7 +60,7 @@ def main():
     args = ap.parse_args()
 
     for name, (minter_cls, minter_kwargs) in MINTERS.items():
-        if args.problem_type is not None and args.problem_type != minter_cls.problem_type:
+        if not selected(args.problem_type, minter_cls):
             continue
         minter = minter_cls(args.out_root, **minter_kwargs)
         problem = minter.mint(args.seed)

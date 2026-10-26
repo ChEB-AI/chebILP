@@ -57,6 +57,22 @@ class ILPProblemMinter(ABC):
             lines += [f"{_atom(pred, fact)}." for fact in sample]
         return "\n".join(lines)
 
+    def static_predicates(self, ilp_problem: ILPProblem) -> frozenset:
+        """Background predicates whose facts do not grow with the examples, exempt from the
+        rule pipeline's cross-product check. None by default."""
+        return frozenset()
+
+    @staticmethod
+    def state_free_predicates(ilp_problem: ILPProblem) -> frozenset:
+        """Predicates none of whose facts mention an example id. Only a sound
+        :meth:`static_predicates` where every per-example fact carries the example id, as in
+        the IGGP-style problems; a trains car fact, say, names the car but not the train."""
+        first = lambda s: s[0] if isinstance(s, tuple) else s
+        ids = {str(first(s)) for s in ilp_problem.pos_samples + ilp_problem.neg_samples}
+        args = lambda f: f if isinstance(f, tuple) else (f,)
+        return frozenset(pred for pred, facts in ilp_problem.bk_facts.items()
+                         if facts and not any(str(a) in ids for f in facts for a in args(f)))
+
     def max_vars(self):
         """
         Popper parameter: Max number of variables. Set this to the value needed for the current problem.

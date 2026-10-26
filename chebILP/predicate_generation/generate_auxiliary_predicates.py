@@ -41,6 +41,7 @@ from chebILP.predicate_generation.auxiliary_generation import (
 )
 from chebILP.predicate_generation.auxiliary_predicates import add_program_to_library, load_program_source
 from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
+from chebILP.utils import add_class_arguments, resolve_classes
 
 
 # Reuse the exact predicate reference the enhancement pipeline shows the model,
@@ -237,7 +238,7 @@ shortcut substructures and hard-to-express global concepts grounded in the defin
 
 def main():
     parser = argparse.ArgumentParser(description="Generate LLM auxiliary predicates for ChEBI classes.")
-    parser.add_argument("--labels_file", required=True, help="File with one ChEBI ID per line.")
+    add_class_arguments(parser)
     parser.add_argument("--chebi_version", type=int, default=248)
     parser.add_argument("--predicate_dir", default=os.path.join("data", "llm_generated_predicates"),
                         help="Directory for storing generated predicates.")
@@ -264,8 +265,7 @@ def main():
     with open(os.path.join(data_dir, "chebi_graph.pkl"), "rb") as _f:
         chebi_graph = _pickle.load(_f)
 
-    with open(args.labels_file) as f:
-        chebi_ids = [line.strip() for line in f if line.strip()]
+    chebi_ids = resolve_classes(args)
 
     PredicateGenerator(
         args.predicate_dir, args.model, args.n_predicates, args.top_k, effort=args.effort,

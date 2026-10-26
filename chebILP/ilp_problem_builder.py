@@ -17,7 +17,7 @@ from chebILP.molecule_processing.fg_matching import (
 from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
-from chebILP.ilp_path_manager import get_bk_path, get_bias_path, get_exs_path, get_aleph_stem, get_retrieval_record_path, RULE_PREDICATE_SETS, RETRIEVED_RULE_PREDICATE_SETS
+from chebILP.ilp_path_manager import class_head, get_bk_path, get_bias_path, get_exs_path, get_aleph_stem, get_retrieval_record_path, RULE_PREDICATE_SETS, RETRIEVED_RULE_PREDICATE_SETS
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
 from chebILP.ilp_problem import ILPProblem, build_aleph_background  # noqa: F401 (re-exported for scripts)
 
@@ -61,7 +61,7 @@ def _facts_by_predicate(lines) -> dict[str, list[tuple | str]]:
 
 class ILPProblemBuilder:
 
-    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True, write_aleph: bool = True, retrieval_k: int = 16, problem_dir: str | None = None):
+    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True, write_aleph: bool = True, retrieval_k: int = 16, problem_dir: str | None = None, dataset=None):
         self.predicate_set = predicate_set
         self.problem_dir = problem_dir or os.path.join(base_dir, "ilp_problems")
         os.makedirs(self.problem_dir, exist_ok=True)
@@ -78,7 +78,7 @@ class ILPProblemBuilder:
         self._rule_retriever = None
 
         # --- Load pre-built ChEBI data -------------------------------------
-        self.dataset = ChEBIDataset(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
+        self.dataset = dataset if dataset is not None else ChEBIDataset(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
         self.hierarchy_graph = nx.transitive_closure_dag(self.dataset.chebi_graph)
         self.splits = self.dataset.load_splits_from_csv()
 
@@ -253,7 +253,7 @@ class ILPProblemBuilder:
                 if self.predicate_set == "abrc":
                     prolog_lines_atoms, body_predicates_atoms = build_background_abrc(selected_rows)
                 else:
-                    prolog_lines_atoms, body_predicates_atoms = build_background_chemlog(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set, fowl_smarts=fowl_smarts)
+                    prolog_lines_atoms, body_predicates_atoms = self._atom_background(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set, fowl_smarts=fowl_smarts)
                 prolog_lines += prolog_lines_atoms
                 body_predicates.update(body_predicates_atoms)
                 if self.predicate_set in ["chembl_fgs", "chebi_fgs", "efg"]:
@@ -287,7 +287,7 @@ class ILPProblemBuilder:
                 # Computed facts (molecular weight, ring size) feed rule evaluation
                 # only; they are intentionally kept out of prolog_lines (bk.pl).
                 if self.predicate_set in RULE_PREDICATE_SETS and self.computed_facts:
-                    computed_lines_by_split[split] = build_computed_facts(selected_rows)
+                    computed_lines_by_split[split] = self._computed_facts(selected_rows)
 
             # for evaluating rules, merge alls splits, separate results afterwards
             if self.predicate_set in ["chebi_fg_rules", "chebi_fg_learned_rules"]:
@@ -361,7 +361,7 @@ class ILPProblemBuilder:
             for split in ["train", "validation", "test"]:
                 ids = selected_ids_by_split[split]
                 problem = ILPProblem(
-                    (f"chebi_{target_id}", 1),
+                    (class_head(target_id), 1),
                     [i for i in ids if i in pos_ids_by_split[split]],
                     [i for i in ids if i not in pos_ids_by_split[split]],
                     _facts_by_predicate(prolog_lines_by_split[split]),
@@ -376,6 +376,13 @@ class ILPProblemBuilder:
             print(f"\n{len(failed_rule_classes)} class(es) built without their auxiliary rule "
                   f"extensions because grounding failed: {', '.join(failed_rule_classes)}")
 
+
+    def _atom_background(self, rows, **kwargs):
+        """Atom-level BK facts and their body predicates for the example rows."""
+        return build_background_chemlog(rows, **kwargs)
+
+    def _computed_facts(self, rows) -> list[str]:
+        return build_computed_facts(rows)
 
     def _take_smallest(self, df: pd.DataFrame, max_samples: int) -> pd.DataFrame:
         """The ``max_samples`` smallest molecules of ``df``, by atom count.
@@ -441,7 +448,7 @@ class ILPProblemBuilder:
             exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split=split)
             with open(exs_path, "w+" if posneg == "pos" else "a") as f:
                 for sample in df.index:
-                    f.write(f"{posneg}(chebi_{target_id}({sample})).\n")
+                    f.write(f"{posneg}({class_head(target_id)}({sample})).\n")
 
         # sum up all positive and negative samples across splits
         return sum(len(v) for k, v in samples_by_split.items() if k[0] == "pos"), sum(len(v) for k, v in samples_by_split.items() if k[0] == "neg")

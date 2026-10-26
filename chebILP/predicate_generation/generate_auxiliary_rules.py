@@ -56,8 +56,8 @@ from chebILP.molecule_processing.fg_matching import (
     is_fg_seed_name,
     seed_fg_library,
 )
-from chebILP.ilp_path_manager import get_exs_path
-from chebILP.utils import get_atom_id
+from chebILP.ilp_path_manager import class_head, get_exs_path
+from chebILP.utils import add_class_arguments, get_atom_id, resolve_classes
 from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
 
 
@@ -301,6 +301,8 @@ class RuleGenerator(AuxiliaryGenerator):
 
     noun = "rule"
     selection_model = RuleSelection
+    # Background predicates exempt from the cross-product check (see ``cross_product_errors``).
+    static_predicates: frozenset = frozenset()
 
     def __init__(self, library_dir, model, n_predicates, top_k, *, molecules,
                  problem_dir, computed_facts, prompt_samples, effort=None):
@@ -443,7 +445,7 @@ fit; only write NEW rules for properties they do not already cover.
         # or cannot detect it (a cross product grounds "successfully", just wrongly and
         # enormously). Judged over the whole set, since a recursion cycle may close through a
         # sibling or a reused program.
-        static = static_rule_errors(context + list(ctx["progs"].values()))
+        static = static_rule_errors(context + list(ctx["progs"].values()), self.static_predicates)
         # A reused program blamed for non-terminating recursion means the NEW programs are what
         # closed the cycle — the library grounds without them — so they go as a group. A cross
         # product is local to one clause, so a reused program carrying one says nothing about
@@ -554,7 +556,7 @@ fit; only write NEW rules for properties they do not already cover.
         facts, exactly as ``build_bk`` will assemble them; a molecule is a positive prediction
         when it derives the ``chebi_<id>`` head.
         """
-        head = f"chebi_{chebi_id}"
+        head = class_head(chebi_id)
         if analyze_hypothesis(hypothesis) is None:
             return None
         hyp_prog = RuleProgram(name=head, description="LLM class hypothesis",
@@ -578,7 +580,8 @@ fit; only write NEW rules for properties they do not already cover.
         The hypothesis is grounded alongside the class's kept predicates (and their library
         dependencies), exactly as ``build_bk`` will assemble them. ``prune_hypothesis`` drops any
         reference to a predicate that is not available, so the clause stays usable as a Popper
-        seed. The train-F1 and clause are saved to the library's ``hypotheses.json`` for
+        seed; if no safe clause survives, the stored hypothesis is ``None`` and the model's clause
+        is kept under ``pruned_from``. The train-F1 and clause are saved to the library's ``hypotheses.json`` for
         ``--seed_hypothesis`` / ``--heuristic_guidance``.
         """
         raw_hypothesis = (getattr(parsed, "hypothesis", "") or "").strip()
@@ -593,14 +596,15 @@ fit; only write NEW rules for properties they do not already cover.
         dependencies = resolve_rule_dependencies(asp_programs, self.library_dir)
         available = {p.name for p in programs + dependencies}
 
-        pruned = prune_hypothesis(raw_hypothesis, available)
-        final_hypothesis = pruned or raw_hypothesis
+        final_hypothesis = prune_hypothesis(raw_hypothesis, available)
 
         entry = {"hypothesis": final_hypothesis, "train_f1": None, "tp": None, "fp": None,
                  "tn": None, "fn": None, "groundable": False}
         if final_hypothesis != raw_hypothesis:
             entry["pruned_from"] = raw_hypothesis
-        if ctx["val_ids"]:
+        if final_hypothesis is None:
+            print("    hypothesis unusable: unreadable, or it needs a predicate that was not accepted")
+        elif ctx["val_ids"]:
             metrics = self._score_hypothesis(chebi_id, final_hypothesis, programs, dependencies, ctx)
             if metrics is not None:
                 entry.update(metrics)
@@ -615,7 +619,7 @@ fit; only write NEW rules for properties they do not already cover.
 
 def main():
     parser = argparse.ArgumentParser(description="Generate LLM auxiliary predicates as ASP rules for ChEBI classes.")
-    parser.add_argument("--labels_file", required=True, help="File with one ChEBI ID per line.")
+    add_class_arguments(parser)
     parser.add_argument("--chebi_version", type=int, default=251)
     parser.add_argument("--molecules_path", required=True, help="Path to molecules.pkl (mols + SMILES).")
     parser.add_argument("--problem_dir", default=os.path.join("data", "ilp_problems"),
@@ -663,8 +667,7 @@ def main():
         chebi_graph = _pickle.load(_f)
     molecules = pd.read_pickle(args.molecules_path)
 
-    with open(args.labels_file) as f:
-        chebi_ids = [line.strip() for line in f if line.strip()]
+    chebi_ids = resolve_classes(args)
 
     RuleGenerator(
         args.predicate_dir, args.model, args.n_predicates, args.top_k,
