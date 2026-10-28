@@ -106,13 +106,18 @@ def parse_rule_program(source: str, source_file: str = "<string>") -> RuleProgra
     )
 
 
-_HAS_ATOM_RE = re.compile(r"^\s*has_atom\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$")
+# Facts linking an example to its parts: atoms of a molecule, SSEs of a protein domain.
+MEMBER_PREDICATES = ("has_atom", "has_sse")
+_MEMBER_ALT = "|".join(MEMBER_PREDICATES)
+_HAS_ATOM_RE = re.compile(rf"^\s*(?:{_MEMBER_ALT})\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$")
 _PARTICIPANT_RE = re.compile(r"^\s*has_(?:reactant|product)\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$")
 _FACT_RE = re.compile(r"^\s*[a-z_][A-Za-z0-9_]*\s*\((.*)\)\s*\.\s*$")
 
 
 def atom_to_molecule(facts: list[str]) -> dict[str, str]:
     """Map every atom id to the example owning it, read from the ``has_atom/2`` facts.
+
+    ``has_sse(D,S)`` counts the same way, so a protein domain owns its SSEs.
 
     Where examples are reactions, ``has_reactant/has_product(R,M)`` lift each atom and each
     participant molecule one level further, to its reaction.
@@ -715,7 +720,7 @@ def _head_args(head: str) -> list[str]:
     return _body_literals(m.group(1)) if m else []
 
 
-_HAS_ATOM_MOL_RE = re.compile(r"has_atom\(\s*([A-Z_][A-Za-z0-9_]*)\s*,")
+_HAS_ATOM_MOL_RE = re.compile(rf"(?:{_MEMBER_ALT})\(\s*([A-Z_][A-Za-z0-9_]*)\s*,")
 
 
 def predicate_arg_sorts(prog: RuleProgram) -> list[str]:
@@ -833,7 +838,7 @@ def prune_hypothesis(clause_source: str, available_predicates) -> str | None:
     # Drop has_atom(A, X) links whose atom variable no longer appears in any other literal.
     pruned = []
     for i, lit in enumerate(kept):
-        if _name(lit) == "has_atom":
+        if _name(lit) in MEMBER_PREDICATES:
             args = _head_args(lit.strip())
             atom_var = args[1] if len(args) == 2 else None
             if atom_var is not None and not any(

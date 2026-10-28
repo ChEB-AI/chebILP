@@ -63,6 +63,7 @@ def build_seed_hypothesis(target_id, programs, body_preds):
     from chebILP.predicate_generation.auxiliary_rules import predicate_arg_sorts
 
     mol_var = "A"
+    link = "has_sse" if ("has_sse", 2) in body_preds else "has_atom"
     fresh = _var_stream()
     literals: list[tuple[str, list[str]]] = []
     for prog in programs:
@@ -78,7 +79,7 @@ def build_seed_hypothesis(target_id, programs, body_preds):
                 args.append(v)
                 atom_vars.append(v)
         if atom_vars:
-            literals.append(("has_atom", [mol_var, atom_vars[0]]))
+            literals.append((link, [mol_var, atom_vars[0]]))
         literals.append((prog.name, args))
 
     if not literals:

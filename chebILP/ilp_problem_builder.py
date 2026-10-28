@@ -89,7 +89,7 @@ class ILPProblemBuilder:
         # Size of the molecule graph, used to prefer small molecules when a split is
         # capped. This is the same count that drives the has_atom facts in bk.pl, so it
         # includes explicit hydrogens where a molecule carries them.
-        self._atom_counts = self.dataset.molecules["mol"].map(lambda m: m.GetNumAtoms())
+        self._atom_counts = self._example_sizes()
             
             
     def build_examples(self, target_ids: list[str], min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
@@ -376,6 +376,10 @@ class ILPProblemBuilder:
             print(f"\n{len(failed_rule_classes)} class(es) built without their auxiliary rule "
                   f"extensions because grounding failed: {', '.join(failed_rule_classes)}")
 
+
+    def _example_sizes(self) -> pd.Series:
+        """Size of each example, by which a capped train split keeps the smallest."""
+        return self.dataset.molecules["mol"].map(lambda m: m.GetNumAtoms())
 
     def _atom_background(self, rows, **kwargs):
         """Atom-level BK facts and their body predicates for the example rows."""

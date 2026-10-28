@@ -4,17 +4,21 @@ from typing import Literal
 Split = Literal["train", "validation", "test"]
 
 
+# Class ids that are already valid head names: EC classes (``ec_3_1_1``), SCOPe folds (``scop_c_1``).
+PASSTHROUGH_PREFIXES = ("ec_", "scop_")
+
+
 def class_head(class_id) -> str:
-    """Target predicate and problem folder name: ``chebi_<id>``, or the id itself for an EC class (``ec_3_1_1``)."""
+    """Target predicate and problem folder name: ``chebi_<id>``, or the id itself for an EC class or SCOPe node."""
     class_id = str(class_id)
-    return class_id if class_id.startswith("ec_") else f"chebi_{class_id}"
+    return class_id if class_id.startswith(PASSTHROUGH_PREFIXES) else f"chebi_{class_id}"
 
 
 def class_id_from_head(head: str) -> str | None:
     """Inverse of :func:`class_head`; ``None`` if ``head`` names no class target."""
     if head.startswith("chebi_"):
         return head[len("chebi_"):]
-    return head if head.startswith("ec_") else None
+    return head if head.startswith(PASSTHROUGH_PREFIXES) else None
 
 
 def get_problem_dir(chebi_id, split: Split, base_dir=None):

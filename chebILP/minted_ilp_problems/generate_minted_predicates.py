@@ -154,8 +154,16 @@ def augment_problem(problem: ILPProblem, library_dir: str, name: str) -> ILPProb
                       {**problem.bk_facts, **aux})
 
 
+def already_built(name: str, library_dir: str, out_dir: str) -> bool:
+    """Whether ``name`` has a class map entry and its augmented problem files are on disk."""
+    if name not in load_class_map(library_dir) or not os.path.isdir(out_dir):
+        return False
+    files = os.listdir(out_dir)
+    return all(f in files for f in ("exs.pl", "bias.pl", "bk.pl")) and any(f.endswith(".n") for f in files)
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Generate LLM auxiliary rules for the minted problems and add them as background.")
+    ap =argparse.ArgumentParser(description="Generate LLM auxiliary rules for the minted problems and add them as background.")
     ap.add_argument("--seed", type=int, default=20260907)
     ap.add_argument("--out_root", default=os.path.join("data", "minted_problems_llm"))
     ap.add_argument("--library_root", default=None,
@@ -181,6 +189,9 @@ def main():
         if args.problems is not None and name not in args.problems:
             continue
         minter = minter_cls(args.out_root, library_root=args.library_root, **minter_kwargs)
+        if not args.print_prompt and already_built(name, minter.library_dir, os.path.join(args.out_root, name)):
+            print(f"[{name}] already generated and written, skipping.")
+            continue
         problem = minter.mint(args.seed)
         generator = MintedRuleGenerator(name, minter, problem, args.model, args.n_predicates, args.top_k,
                                         effort=args.effort, seed=args.seed)
