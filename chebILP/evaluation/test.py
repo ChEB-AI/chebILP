@@ -3,7 +3,7 @@
 import json
 import os
 import time
-from chebILP.ilp_path_manager import get_bk_path, get_exs_path, RULE_PREDICATE_SETS, RETRIEVED_RULE_PREDICATE_SETS
+from chebILP.ilp_path_manager import class_head, class_id_from_head, get_bk_path, get_exs_path, RULE_PREDICATE_SETS, RETRIEVED_RULE_PREDICATE_SETS
 from typing import Literal, Optional
 
 import numpy as np
@@ -275,12 +275,12 @@ def build_ilp_preds_tensor(
         print(f"  {missing} molecules missing from molecules_df — predicted False")
 
     # Column index per target label, and row index per molecule id.
-    col_of = {f"chebi_{cls_id}": j for j, cls_id in enumerate(ilp_class_ids)}
+    col_of = {class_head(cls_id): j for j, cls_id in enumerate(ilp_class_ids)}
     mol_idx = {mol_id: i for i, mol_id in enumerate(mol_order)}
     tensor = np.zeros((n_mols, n_classes), dtype=bool)
 
     # Parse-check every program once and keep the valid ones (class_id -> program). Each
-    # program's only derived head is its unique chebi_{id} target, so they never interfere.
+    # program's only derived head is its unique class_head target, so they never interfere.
     valid_programs: dict[str, str] = {}
     for cls_id in ilp_class_ids:
         prog = "\n".join(line for line in programs[cls_id].split("\n") if line.strip())
@@ -467,7 +467,7 @@ def predict_smiles(
         import re
         from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates
         used_aux_names = set(re.findall(r"\baux_\w+", "\n".join(rules)))
-        class_ids = [t[len("chebi_"):] for t in target_predicates if t.startswith("chebi_")]
+        class_ids = [c for c in map(class_id_from_head, target_predicates) if c is not None]
         seen: dict[str, object] = {}
         for cls_id in class_ids:
             for pred in load_auxiliary_predicates(cls_id, library_dir=aux_library_dir):
@@ -480,8 +480,8 @@ def predict_smiles(
     rule_programs = rule_dependencies = None
     if predicate_set in RULE_PREDICATE_SETS:
         programs_by_class = {
-            t[len("chebi_"):]: "\n".join(r for r in rules if f"chebi_{t[len('chebi_'):]}" in r)
-            for t in target_predicates if t.startswith("chebi_")
+            class_id_from_head(t): "\n".join(r for r in rules if t in r)
+            for t in target_predicates if class_id_from_head(t) is not None
         }
         rule_programs, rule_dependencies = _collect_rule_programs(
             programs_by_class, aux_library_dir, retrieved=predicate_set in RETRIEVED_RULE_PREDICATE_SETS)
@@ -492,7 +492,7 @@ def predict_smiles(
     if predicate_set == "fowl":
         from chebILP.ilp_problem_builder import load_fowl_smarts
         all_fowl_smarts = load_fowl_smarts()
-        class_ids = [t[len("chebi_"):] for t in target_predicates if t.startswith("chebi_")]
+        class_ids = [c for c in map(class_id_from_head, target_predicates) if c is not None]
         fowl_smarts = {cls_id: all_fowl_smarts[cls_id] for cls_id in class_ids if cls_id in all_fowl_smarts}
 
     results: list[dict] = []
@@ -561,7 +561,7 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
         from chebILP.evaluation.clingo_eval import run_ilp_validation_clingo
         try:
             conf_matrix, details = run_ilp_validation_clingo(
-                chebi_id, prog_str,
+                class_head(chebi_id), prog_str,
                 exs_file=get_exs_path(chebi_id, split=test_on, base_dir=problem_dir),
                 bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split=test_on, base_dir=problem_dir,
                                     selection_mode=selection_mode, selection_k=selection_k, predicate_dir=predicate_dir),

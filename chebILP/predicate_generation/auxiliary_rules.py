@@ -43,6 +43,7 @@ from dataclasses import dataclass
 
 from chebILP.predicate_generation.auxiliary_predicates import sanitize_predicate_name
 from chebILP.ilp_path_manager import (
+    class_id_from_head,
     get_aux_class_map_path,
     get_aux_hypotheses_path,
     get_aux_programs_dir,
@@ -105,17 +106,35 @@ def parse_rule_program(source: str, source_file: str = "<string>") -> RuleProgra
     )
 
 
-_HAS_ATOM_RE = re.compile(r"^\s*has_atom\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$")
+# Facts linking an example to its parts: atoms of a molecule, SSEs of a protein domain.
+MEMBER_PREDICATES = ("has_atom", "has_sse")
+_MEMBER_ALT = "|".join(MEMBER_PREDICATES)
+_HAS_ATOM_RE = re.compile(rf"^\s*(?:{_MEMBER_ALT})\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$")
+_PARTICIPANT_RE = re.compile(r"^\s*has_(?:reactant|product)\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$")
 _FACT_RE = re.compile(r"^\s*[a-z_][A-Za-z0-9_]*\s*\((.*)\)\s*\.\s*$")
 
 
 def atom_to_molecule(facts: list[str]) -> dict[str, str]:
-    """Map every atom id to its molecule, read from the ``has_atom/2`` facts."""
+    """Map every atom id to the example owning it, read from the ``has_atom/2`` facts.
+
+    ``has_sse(D,S)`` counts the same way, so a protein domain owns its SSEs.
+
+    Where examples are reactions, ``has_reactant/has_product(R,M)`` lift each atom and each
+    participant molecule one level further, to its reaction.
+    """
     mapping: dict[str, str] = {}
+    reaction_of: dict[str, str] = {}
     for line in facts:
         m = _HAS_ATOM_RE.match(line)
         if m:
             mapping[m.group(2)] = m.group(1)
+            continue
+        m = _PARTICIPANT_RE.match(line)
+        if m:
+            reaction_of[m.group(2)] = m.group(1)
+    if reaction_of:
+        mapping = {atom: reaction_of.get(mol, mol) for atom, mol in mapping.items()}
+        mapping.update(reaction_of)
     return mapping
 
 
@@ -354,8 +373,17 @@ ERROR_NEGATION_SCOPE = "negation_scope"
 ERROR_UNSCOPED_AGGREGATE = "unscoped_aggregate"
 
 
-def cross_product_errors(progs) -> dict[str, tuple[str, str]]:
+def _is_static_literal(literal: str, static_predicates) -> bool:
+    m = _PRED_RE.match(literal.strip())
+    return m is not None and m.group(1) in static_predicates
+
+
+def cross_product_errors(progs, static_predicates=frozenset()) -> dict[str, tuple[str, str]]:
     """Programs with an unjoined-variable clause, as ``{name: (code, message)}``.
+
+    ``static_predicates`` names background predicates whose facts do not grow with the
+    examples (``agent_white(white)``, ``index(1..3)``). A variable bound only by them ranges
+    over a fixed handful of constants, so it does not generate a cross product.
 
     Such a clause's body splits into groups of variables that no positive literal connects,
     so clingo grounds their **cartesian product** — over every atom in the instance, not just
@@ -392,7 +420,7 @@ def cross_product_errors(progs) -> dict[str, tuple[str, str]]:
             positive_vars = {
                 v
                 for lit in _body_literals(body)
-                if not _NOT_RE.match(lit) and "(" in lit
+                if not _NOT_RE.match(lit) and "(" in lit and not _is_static_literal(lit, static_predicates)
                 for v in _VAR_RE.findall(_AGG_BRACES_RE.sub(" ", lit) if "#" in lit else lit)
             }
             generating = [c for c in components.values() if c & positive_vars]
@@ -435,18 +463,19 @@ def cross_product_errors(progs) -> dict[str, tuple[str, str]]:
     return errors
 
 
-def static_rule_errors(progs) -> dict[str, tuple[str, str]]:
+def static_rule_errors(progs, static_predicates=frozenset()) -> dict[str, tuple[str, str]]:
     """All static rejections for ``progs``, as ``{program name: (code, message)}``.
 
     The single entry point for checks that must run *before* clingo sees a program, because
     the failure they describe is one grounding cannot survive (non-termination) or one it
     cannot detect (a cross product grounds "successfully", just wrongly and enormously).
+    ``static_predicates`` is passed on to :func:`cross_product_errors`.
     """
     errors = {
         name: (ERROR_UNBOUNDED_RECURSION, message)
         for name, message in unbounded_recursion_errors(progs).items()
     }
-    for name, entry in cross_product_errors(progs).items():
+    for name, entry in cross_product_errors(progs, static_predicates).items():
         errors.setdefault(name, entry)
     return errors
 
@@ -524,6 +553,7 @@ def add_rule_to_library(source: str, library_dir: str, chebi_id=None):
     stem = prog.name
 
     if not os.path.exists(_stem_path(stem)):
+        _DEFINITION_INDEX_CACHE.pop(library_dir, None)
         with open(_stem_path(stem), "w", encoding="utf-8") as f:
             f.write(content)
         return stem, prog
@@ -549,6 +579,7 @@ def add_rule_to_library(source: str, library_dir: str, chebi_id=None):
         stem = prog.name
         content = source.rstrip() + "\n"
 
+    _DEFINITION_INDEX_CACHE.pop(library_dir, None)
     with open(_stem_path(stem), "w", encoding="utf-8") as f:
         f.write(content)
     return stem, prog
@@ -689,7 +720,7 @@ def _head_args(head: str) -> list[str]:
     return _body_literals(m.group(1)) if m else []
 
 
-_HAS_ATOM_MOL_RE = re.compile(r"has_atom\(\s*([A-Z_][A-Za-z0-9_]*)\s*,")
+_HAS_ATOM_MOL_RE = re.compile(rf"(?:{_MEMBER_ALT})\(\s*([A-Z_][A-Za-z0-9_]*)\s*,")
 
 
 def predicate_arg_sorts(prog: RuleProgram) -> list[str]:
@@ -785,7 +816,9 @@ def prune_hypothesis(clause_source: str, available_predicates) -> str | None:
     ``available_predicates`` is the set of predicate names actually in play (the class's kept
     programs and their dependencies). Only ``aux_`` literals outside it are dropped; background
     literals are always kept. A ``has_atom(A, X)`` link left with an unused atom variable ``X``
-    is dropped too. Returns the pruned clause, or ``None`` if nothing survives.
+    is dropped too. Returns the pruned clause, or ``None`` if nothing survives or the dropped
+    literals were the only ones binding a variable of the head or of a remaining literal (as in
+    ``goal(S,A,V) :- aux_win(S,A), score_100(V)``, which would leave ``S`` and ``A`` unbound).
     """
     clause = next((c for c in _clauses(clause_source) if c[1]), None)
     if clause is None:
@@ -805,7 +838,7 @@ def prune_hypothesis(clause_source: str, available_predicates) -> str | None:
     # Drop has_atom(A, X) links whose atom variable no longer appears in any other literal.
     pruned = []
     for i, lit in enumerate(kept):
-        if _name(lit) == "has_atom":
+        if _name(lit) in MEMBER_PREDICATES:
             args = _head_args(lit.strip())
             atom_var = args[1] if len(args) == 2 else None
             if atom_var is not None and not any(
@@ -816,6 +849,11 @@ def prune_hypothesis(clause_source: str, available_predicates) -> str | None:
 
     if not pruned:
         return None
+    if len(kept) < len(literals):
+        bound = {v for lit in pruned if not _NOT_RE.match(lit) and _name(lit) for v in _VAR_RE.findall(lit)}
+        needed = set(_VAR_RE.findall(head)) | {v for lit in pruned for v in _VAR_RE.findall(lit)}
+        if needed - bound:
+            return None
     return f"{head.strip()} :- {', '.join(pruned)}."
 
 
@@ -903,8 +941,8 @@ def load_created_rules(library_dir: str) -> dict[str, set[str]]:
         return {}
     created: dict[str, set[str]] = {}
     for fname in os.listdir(logs_dir):
-        m = re.fullmatch(r"chebi_(\w+)\.md", fname)
-        if m is None:
+        class_id = class_id_from_head(fname[:-len(".md")]) if fname.endswith(".md") else None
+        if class_id is None:
             continue
         stems: set[str] = set()
         in_section = False
@@ -917,7 +955,7 @@ def load_created_rules(library_dir: str) -> dict[str, set[str]]:
                     if item is None:
                         break
                     stems.add(item.group(1))
-        created[m.group(1)] = stems
+        created[class_id] = stems
     return created
 
 

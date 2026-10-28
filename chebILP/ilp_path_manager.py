@@ -4,10 +4,27 @@ from typing import Literal
 Split = Literal["train", "validation", "test"]
 
 
+# Class ids that are already valid head names: EC classes (``ec_3_1_1``), SCOPe folds (``scop_c_1``).
+PASSTHROUGH_PREFIXES = ("ec_", "scop_")
+
+
+def class_head(class_id) -> str:
+    """Target predicate and problem folder name: ``chebi_<id>``, or the id itself for an EC class or SCOPe node."""
+    class_id = str(class_id)
+    return class_id if class_id.startswith(PASSTHROUGH_PREFIXES) else f"chebi_{class_id}"
+
+
+def class_id_from_head(head: str) -> str | None:
+    """Inverse of :func:`class_head`; ``None`` if ``head`` names no class target."""
+    if head.startswith("chebi_"):
+        return head[len("chebi_"):]
+    return head if head.startswith(PASSTHROUGH_PREFIXES) else None
+
+
 def get_problem_dir(chebi_id, split: Split, base_dir=None):
     if base_dir is None:
         base_dir = os.path.join("data", "ilp_problems")
-    problem_dir = os.path.join(base_dir, f"chebi_{chebi_id}", split)
+    problem_dir = os.path.join(base_dir, class_head(chebi_id), split)
     os.makedirs(problem_dir, exist_ok=True)
     return problem_dir
 
@@ -37,7 +54,7 @@ def get_aux_generation_log_path(chebi_id, base_dir):
     """Per-class LLM exchange log, now kept inside the library."""
     logs_dir = os.path.join(base_dir, "generation_logs")
     os.makedirs(logs_dir, exist_ok=True)
-    return os.path.join(logs_dir, f"chebi_{chebi_id}.md")
+    return os.path.join(logs_dir, f"{class_head(chebi_id)}.md")
 
 # Sets whose BK is ground from an ASP rule library: the class's own selection from class_map.json,
 # or a retrieval over the whole library (the holdout variant may not pick the class's own programs).
@@ -68,7 +85,7 @@ def get_retrieval_record_path(chebi_id, predicate_set, base_dir=None, predicate_
     bk_path = get_bk_path(chebi_id, "train", predicate_set, base_dir=base_dir, predicate_dir=predicate_dir)
     return os.path.join(os.path.dirname(bk_path), "retrieved_predicates.json")
 
-def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, max_vars=None, max_body=None, max_clauses=None, predicate_dir=None):
+def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, max_vars=None, max_body=None, predicate_dir=None):
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
     bk_dir = os.path.join(problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir))
     os.makedirs(bk_dir, exist_ok=True)
@@ -79,8 +96,6 @@ def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", 
         bias_file += f"_max_vars={max_vars}"
     if max_body is not None:
         bias_file += f"_max_body={max_body}"
-    if max_clauses is not None:
-        bias_file += f"_max_clauses={max_clauses}"
     bias_file += ".pl"
     return os.path.join(bk_dir, bias_file)
 

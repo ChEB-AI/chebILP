@@ -306,32 +306,23 @@ def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_l
     return positives
 
 
-def run_ilp_validation_clingo(chebi_id: str, prog_str: str, exs_file: str, bk_file: str, return_details: bool = False):
+def run_ilp_validation_clingo(head_predicate: str, prog_str: str, exs_file: str, bk_file: str, return_details: bool = False):
+    """Confusion matrix of ``prog_str`` over the ``pos(...)``/``neg(...)`` examples of ``head_predicate``
+    (any arity). An example's ``id`` in the details is its comma-joined arguments."""
     with open(exs_file, "r") as f:
-        # each line is of the form "pos(molecule_id)." or "neg(molecule_id)."
-        # extract molecule_id as an integer and ignore pos/neg for now (we'll compute confusion matrix later)
+        # each line is of the form "pos(head(a1, ..., an))." or "neg(head(a1, ..., an))."
         examples = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("%")]
-        examples_posneg = [line.strip().split("(")[0].strip() for line in examples]
-        examples_ids = [line.strip().split("(")[-1].split(")")[0].strip() for line in examples]
+        examples_posneg = [line.split("(")[0].strip() for line in examples]
+        examples_args = [tuple(a.strip() for a in line.split("(", 2)[2].rsplit(")", 2)[0].split(",")) for line in examples]
     with open(bk_file, "r") as f:
         background_facts = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("%")]
 
-    target_labels = set()
-    for line in prog_str.split("\n"):
-        if ":-" in line:
-            head = line.split(":-")[0].strip()
-            if "(" in head:
-                target_labels.add(head.split("(")[0].strip())
-
-    positives = evaluate_with_clingo(prog_str.split("\n"), background_facts, list(target_labels), examples_ids)
-    if f"chebi_{chebi_id}" not in positives:
-        positives = []
-    else:
-        positives = [ex for ex in examples_ids if ex in positives[f"chebi_{chebi_id}"]]
+    positives = set(ground_extensions(prog_str.split("\n"), background_facts, [head_predicate]).get(head_predicate, []))
     tps, fps, tns, fns = 0, 0, 0, 0
     details = []
-    for ex_id, posneg in zip(examples_ids, examples_posneg):
-        predicted_pos = ex_id in positives
+    for args, posneg in zip(examples_args, examples_posneg):
+        ex_id = ",".join(args)
+        predicted_pos = args in positives
         true_pos = posneg.startswith("pos")
         if predicted_pos:
             if true_pos:

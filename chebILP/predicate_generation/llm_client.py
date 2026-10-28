@@ -29,6 +29,8 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     CLIConnectionError,
     ProcessError,
+    RateLimitEvent,
+    RateLimitInfo,
     ResultMessage,
     query,
 )
@@ -38,7 +40,11 @@ from pydantic import BaseModel, ValidationError
 _CLI_PATH = os.environ.get("CHEBILP_CLAUDE_CLI")
 
 
-class ModelRefusal(RuntimeError):
+class LLMCallFailed(RuntimeError):
+    """No usable answer from the model, after any retries. The generators abort the run on it."""
+
+
+class ModelRefusal(LLMCallFailed):
     """The model's safety classifier declined the request (not a malformed reply).
 
     Surfaced by ``stop_reason == "refusal"`` (CLI) or ``finish_reason == "content_filter"``
@@ -60,10 +66,48 @@ def _drop_api_key_auth() -> None:
         os.environ.pop(var, None)
 
 
+# Before each CLI query, pause until the 5-hour subscription window resets once the previous
+# query reported it at least this full.
+_SESSION_LIMIT = float(os.environ.get("CHEBILP_SESSION_LIMIT", "0.9"))
+_RESET_MARGIN = 120  # seconds past the reported reset before querying again
+_rate_limit: RateLimitInfo | None = None  # from the latest CLI query
+
+
+def _backoff(attempt: int) -> float:
+    """Seconds to wait before retry ``attempt + 1``: ~7.5 min in total over 5 attempts."""
+    return min(30 * 2 ** attempt, 300)
+
+
+def _wait_for_session_window() -> None:
+    """Sleep until the 5-hour window resets if the last query found it at ``_SESSION_LIMIT`` or over."""
+    global _rate_limit
+    info = _rate_limit
+    if info is None:
+        return
+    window = (info.raw.get("unifiedWindows") or {}).get("five_hour") or {}
+    used, resets_at = window.get("utilization"), window.get("resetsAt")
+    if info.rate_limit_type == "five_hour":
+        resets_at = resets_at or info.resets_at
+        used = 1.0 if info.status == "rejected" else (used if used is not None else info.utilization)
+    if used is None or used < _SESSION_LIMIT or not resets_at:
+        return
+    wait = resets_at + _RESET_MARGIN - time.time()
+    if wait > 0:
+        resume = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(resets_at + _RESET_MARGIN))
+        print(f"  5-hour session window at {used:.0%} (limit {_SESSION_LIMIT:.0%}); pausing until {resume}", flush=True)
+        time.sleep(wait)
+    _rate_limit = None
+
+
 async def _run_query(
     model: str, system: str, prompt: str, schema: type[BaseModel], effort: str | None = None
 ) -> ResultMessage | None:
-    """Drive one CLI query to completion and return its final ``ResultMessage``."""
+    """Drive one CLI query to completion and return its final ``ResultMessage``.
+
+    Records the query's rate-limit status in ``_rate_limit`` as it arrives.
+    """
+    global _rate_limit
+    _rate_limit = None
     _drop_api_key_auth()
     options = ClaudeAgentOptions(
         model=model,
@@ -78,7 +122,9 @@ async def _run_query(
     )
     result: ResultMessage | None = None
     async for message in query(prompt=prompt, options=options):
-        if isinstance(message, ResultMessage):
+        if isinstance(message, RateLimitEvent):
+            _rate_limit = message.rate_limit_info
+        elif isinstance(message, ResultMessage):
             result = message
     return result
 
@@ -158,10 +204,19 @@ def structured_completion(
     A ``provider/name`` model id (``openai/gpt-4o``) routes to an OpenAI-compatible endpoint;
     a bare id (``claude-opus-5``) routes to the local ``claude`` CLI. ``effort`` applies to
     the CLI only; ``None`` leaves the CLI's per-model default.
+
+    Every failure is raised as :class:`LLMCallFailed` (or its subclass :class:`ModelRefusal`).
     """
-    if "/" in model:
-        return _openai_structured_completion(model, system, prompt, schema, max_retries=max_retries)
-    return _cli_structured_completion(model, system, prompt, schema, max_retries=max_retries, effort=effort)
+    try:
+        if "/" in model:
+            return _openai_structured_completion(model, system, prompt, schema, max_retries=max_retries)
+        return _cli_structured_completion(model, system, prompt, schema, max_retries=max_retries, effort=effort)
+    except LLMCallFailed:
+        raise
+    except Exception as e:
+        exc = LLMCallFailed(f"{type(e).__name__}: {e}")
+        exc._chebilp_attempts = getattr(e, "_chebilp_attempts", [])
+        raise exc from e
 
 
 def _cli_structured_completion(
@@ -176,40 +231,59 @@ def _cli_structured_completion(
     """Structured answer over the local ``claude`` CLI (Claude Agent SDK).
 
     The SDK does its own schema-mismatch re-prompting, so a run that finishes without valid
-    structured output is terminal and not retried here.
+    structured output is terminal and not retried here. Hitting the 5-hour session limit waits
+    for its reset without using up an attempt; hitting a weekly limit raises.
     """
     # The CLI takes a bare model id ("claude-opus-5"); strip any "provider/" prefix.
     cli_model = model.split("/")[-1]
     attempts: list[dict] = []
     last_exc: BaseException | None = None
 
-    for attempt in range(max_retries):
+    attempt = 0
+    while attempt < max_retries:
+        _wait_for_session_window()
+        attempt += 1
         try:
             started = time.monotonic()
-            print(f"  requesting {cli_model} via CLI (attempt {attempt + 1}/{max_retries}, timeout {_CLI_TIMEOUT:.0f}s)...")
+            print(f"  requesting {cli_model} via CLI (attempt {attempt}/{max_retries}, timeout {_CLI_TIMEOUT:.0f}s)...")
             result = asyncio.run(asyncio.wait_for(_run_query(cli_model, system, prompt, schema, effort), timeout=_CLI_TIMEOUT))
             print(f"  response in {time.monotonic() - started:.0f}s")
         except asyncio.TimeoutError:
             last_exc = TimeoutError(f"CLI query timed out after {_CLI_TIMEOUT:.0f}s")
-            wait = 2 ** attempt
-            print(f"  CLI timeout (attempt {attempt + 1}/{max_retries}), retrying in {wait}s")
-            time.sleep(wait)
+            wait = _backoff(attempt - 1)
+            print(f"  CLI timeout (attempt {attempt}/{max_retries}), retrying in {wait}s")
+            if attempt < max_retries:
+                time.sleep(wait)
             continue
         except (CLIConnectionError, ProcessError) as e:
             last_exc = e
-            wait = 2 ** attempt
-            print(f"  CLI error (attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {e}")
-            time.sleep(wait)
+            wait = _backoff(attempt - 1)
+            print(f"  CLI error (attempt {attempt}/{max_retries}), retrying in {wait}s: {e}")
+            if attempt < max_retries:
+                time.sleep(wait)
             continue
 
         if result is None:
             last_exc = RuntimeError("Agent SDK query produced no result message")
-            wait = 2 ** attempt
-            print(f"  No result (attempt {attempt + 1}/{max_retries}), retrying in {wait}s")
-            time.sleep(wait)
+            wait = _backoff(attempt - 1)
+            print(f"  No result (attempt {attempt}/{max_retries}), retrying in {wait}s")
+            if attempt < max_retries:
+                time.sleep(wait)
             continue
 
         tokens, cost = _usage_summary(cli_model, result)
+        info = _rate_limit
+        if info is not None and info.status == "rejected" and not (result.subtype == "success" and result.structured_output):
+            attempts.append({"error": f"rate limit ({info.rate_limit_type})", "raw": result.result, "cost": cost, "tokens": tokens})
+            reset_at = info.resets_at or ((info.raw.get("unifiedWindows") or {}).get(info.rate_limit_type) or {}).get("resetsAt")
+            if info.rate_limit_type == "five_hour" and reset_at and reset_at > time.time() - _RESET_MARGIN:
+                attempt -= 1  # waited out at the top of the loop
+                continue
+            resets = time.strftime("%Y-%m-%d %H:%M", time.localtime(reset_at)) if reset_at else "unknown"
+            exc = LLMCallFailed(f"{info.rate_limit_type} usage limit reached (resets {resets})")
+            exc._chebilp_attempts = attempts
+            raise exc
+
         if result.stop_reason == "refusal":
             attempts.append({"error": "refusal", "raw": result.result, "cost": cost, "tokens": tokens})
             exc = ModelRefusal(f"{cli_model} declined this request (safety classifier)")
@@ -230,11 +304,9 @@ def _cli_structured_completion(
         last_exc = RuntimeError(f"no valid structured output ({detail})")
         break
 
-    try:
-        last_exc._chebilp_attempts = attempts
-    except (AttributeError, TypeError):
-        pass  # some exception types forbid attribute assignment
-    raise last_exc
+    exc = LLMCallFailed(f"no answer from {model}: {last_exc}")
+    exc._chebilp_attempts = attempts
+    raise exc from last_exc
 
 
 def _extract_json(text: str) -> str:
@@ -310,9 +382,10 @@ def _openai_structured_completion(
             print(f"  response in {elapsed:.0f}s (finish_reason={finish}, {chars} chars)")
         except transient as e:
             last_exc = e
-            wait = 2 ** attempt
+            wait = _backoff(attempt)
             print(f"  API error (attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {e}")
-            time.sleep(wait)
+            if attempt + 1 < max_retries:
+                time.sleep(wait)
             continue
 
         choice = response.choices[0]
@@ -338,8 +411,6 @@ def _openai_structured_completion(
                 "content": f"That reply was not valid: {e}. Return only the JSON object required by the schema.",
             })
 
-    try:
-        last_exc._chebilp_attempts = attempts
-    except (AttributeError, TypeError):
-        pass
-    raise last_exc
+    exc = LLMCallFailed(f"no answer from {model}: {last_exc}")
+    exc._chebilp_attempts = attempts
+    raise exc from last_exc
