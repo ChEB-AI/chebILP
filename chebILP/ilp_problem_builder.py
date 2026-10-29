@@ -3,9 +3,9 @@ from typing import Literal
 import networkx as nx
 
 import tqdm
-from chebILP.preprocessing.molecule_processing.data_preparation import ChEBIDataset
-from chebILP.preprocessing.molecule_processing.mol_to_abrc import build_background_abrc
-from chebILP.preprocessing.molecule_processing.mol_to_fol import mol_to_fol_fgs
+from chebILP.preprocessing.chebi.chebi_dataset import ChEBIDataset
+from chebILP.preprocessing.chebi.mol_to_abrc import build_background_abrc
+from chebILP.preprocessing.chebi.mol_to_fol import mol_to_fol_fgs
 from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
 from chebILP.predicate_generation.auxiliary_predicates import (
     load_auxiliary_predicates,
@@ -23,7 +23,7 @@ from chebILP.predicate_generation.auxiliary_rules import (
     referenced_fact_predicates,
 )
 from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
-from chebILP.preprocessing.molecule_processing.fg_matching import (
+from chebILP.preprocessing.chebi.fg_matching import (
     get_chembl_fgs,
     get_chebi_fgs,
     get_efg_fgs,
@@ -35,7 +35,7 @@ from chebILP.preprocessing.molecule_processing.fg_matching import (
     fg_fact_lines,
     fg_atom_fact_lines,
 )
-from chebILP.preprocessing.molecule_processing.fowl_predicates import (
+from chebILP.preprocessing.chebi.fowl_predicates import (
     build_fowl_predicate,
     calculate_fowl_predicate,
 )
@@ -131,12 +131,13 @@ class ILPProblemBuilder:
             dataset
             if dataset is not None
             else ChEBIDataset(
-                chebi_version=chebi_version,
+                version=chebi_version,
                 three_star_only=three_star_only,
                 base_dir=base_dir,
                 min_pos_samples=min_pos_samples,
             )
         )
+        self.dataset.process_data()
         self.hierarchy_graph = nx.transitive_closure_dag(self.dataset.chebi_graph)
         self.splits = self.dataset.load_splits_from_csv()
 

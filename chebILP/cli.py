@@ -18,7 +18,7 @@ from chebILP.ilp_classifier import learn_chebi_classes
 
 
 def _make_ilp_builder(args):
-    from chebILP.preprocessing.molecule_processing.learn_fgs import FGILPProblemBuilder
+    from chebILP.preprocessing.chebi.learn_fgs import FGILPProblemBuilder
     from chebILP.ilp_problem_builder import ILPProblemBuilder
     from chebILP.predicate_generation.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
 
@@ -544,8 +544,9 @@ def _add_common_args(parser: argparse.ArgumentParser):
 def _handle_prepare_dataset(args):
     from chebILP.preprocessing.chebi.chebi_dataset import ChEBIDataset
     from chebILP.preprocessing.reaction_processing.rhea_data import RheaDataset
+    from chebILP.protein_processing.scope_data import ScopeDataset
 
-    for dataset_cls in [ChEBIDataset, RheaDataset]:
+    for dataset_cls in [ChEBIDataset, RheaDataset, ScopeDataset]:
         if dataset_cls.DATASET_NAME == args.dataset.lower():
             dataset_cls.prepare(
                 version=args.version,
@@ -569,11 +570,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Download dataset files and build artefacts (label selection, train/val/test splits).",
     )
     sp_pd.add_argument(
+        "dataset",
+        choices=["chebi", "rhea", "scope"],
+        help="Which dataset to prepare.",
+    )
+    sp_pd.add_argument(
         "--version",
         "-v",
         type=str,
         required=True,
-        help="Dataset version (e.g. 251 for ChEBI, 142 for Rhea).",
+        help="Dataset version (e.g. 251 for ChEBI, 142 for Rhea, 2.08 for SCOPe).",
     )
     sp_pd.add_argument(
         "--base_dir",

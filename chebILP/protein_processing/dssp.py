@@ -8,6 +8,8 @@ Residues are then merged into secondary-structure elements (SSEs), strands paire
 and SSE pairs with packed Cα atoms marked as contacts.
 """
 
+from collections.abc import Iterable
+
 import numpy as np
 
 THREE_TO_ONE = {
@@ -43,26 +45,25 @@ CONTACT_DISTANCE = 8.0  # Å between Cα atoms
 MIN_CONTACT_PAIRS = 3
 
 
-def read_backbone(path: str) -> tuple[list[str], np.ndarray]:
+def read_backbone(pdb_lines: Iterable[str]) -> tuple[list[str], np.ndarray]:
     """Residue names and backbone coordinates (residues × N/CA/C/O × xyz) of the first model.
 
     Residues missing a backbone atom are skipped; the first alternate location is kept.
     """
     residues: dict[tuple, dict] = {}
-    with open(path) as f:
-        for line in f:
-            if line.startswith("ENDMDL"):
-                break
-            if not line.startswith(("ATOM  ", "HETATM")) or line[16] not in " A":
-                continue
-            name = line[12:16].strip()
-            if name not in BACKBONE:
-                continue
-            key = (line[21], line[22:26], line[26])
-            res = residues.setdefault(key, {"name": line[17:20].strip()})
-            res.setdefault(
-                name, [float(line[30:38]), float(line[38:46]), float(line[46:54])]
-            )
+    for line in pdb_lines:
+        if line.startswith("ENDMDL"):
+            break
+        if not line.startswith(("ATOM  ", "HETATM")) or line[16] not in " A":
+            continue
+        name = line[12:16].strip()
+        if name not in BACKBONE:
+            continue
+        key = (line[21], line[22:26], line[26])
+        res = residues.setdefault(key, {"name": line[17:20].strip()})
+        res.setdefault(
+            name, [float(line[30:38]), float(line[38:46]), float(line[46:54])]
+        )
     complete = [r for r in residues.values() if all(a in r for a in BACKBONE)]
     names = [r["name"] for r in complete]
     coords = np.array(
@@ -188,13 +189,13 @@ def segment(ss: np.ndarray, cont: np.ndarray) -> list[tuple[str, int, int]]:
     return runs
 
 
-def domain_structure(path: str) -> dict | None:
-    """SSEs, strand pairs, sheets and contacts of the domain in ``path``; ``None`` without any SSE.
+def domain_structure(pdb_lines: Iterable[str]) -> dict | None:
+    """SSEs, strand pairs, sheets and contacts of the domain in the PDB-format ``pdb_lines``; ``None`` without any SSE.
 
     SSEs are ``{"type": "H"|"E", "start", "end", "length", "gly", "pro"}`` in sequence order;
     pairs, sheets and contacts refer to SSE indices.
     """
-    names, coords = read_backbone(path)
+    names, coords = read_backbone(pdb_lines)
     if len(names) < 5:
         return None
     ss, ladders, cont = assign_secondary_structure(coords, names)

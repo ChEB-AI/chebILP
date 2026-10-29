@@ -179,9 +179,6 @@ class RheaDataset(BaseDataset):
         self.reactions_path = os.path.join(self.data_dir, "reactions.pkl")
         self.classes_path = os.path.join(self.data_dir, "ec_classes.pkl")
 
-    def _raw(self, name: str) -> str:
-        return os.path.join(self.raw_dir, name)
-
     def download(self) -> None:
         for name, url in RAW_FILES.items():
             if not os.path.exists(self._raw(name)):

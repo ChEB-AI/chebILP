@@ -21,6 +21,9 @@ class BaseDataset(ABC):
         # cached labeled DataFrame after select_labels()
         self._labeled_df: Optional[pd.DataFrame] = None
 
+    def _raw(self, name: str) -> str:
+        return os.path.join(self.raw_dir, name)
+
     @property
     def data_dir(self) -> str:
         return os.path.join(self.base_dir, f"{self.DATASET_NAME}_v{self.version}")

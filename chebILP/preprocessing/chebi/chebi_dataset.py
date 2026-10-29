@@ -52,8 +52,8 @@ class ChEBIDataset(BaseDataset):
             version=version, base_dir=base_dir, min_pos_samples=min_pos_samples
         )
 
-        self.obo_path = os.path.join(self.raw_dir, "chebi.obo")
-        self.sdf_path = os.path.join(self.raw_dir, "chebi.sdf.gz")
+        self.obo_path = self._raw("chebi.obo")
+        self.sdf_path = self._raw("chebi.sdf.gz")
         self.graph_path = os.path.join(self.data_dir, "chebi_graph.pkl")
         self.molecules_path = os.path.join(self.processed_dir, "molecules.pkl")
 

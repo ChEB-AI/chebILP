@@ -142,7 +142,7 @@ def build_body_cost_lines(body_preds, aux_cost=1, seed_cost=1, base_cost=1):
     ``efga_``, ``chembl_fg_``) and everything else (atom-level primitives). Popper's default
     cost is 1, so only predicates with a different cost get a line.
     """
-    from chebILP.preprocessing.molecule_processing.fg_matching import is_fg_seed_name
+    from chebILP.preprocessing.chebi.fg_matching import is_fg_seed_name
 
     lines = []
     for name in sorted({pred for pred, _ in body_preds}):
