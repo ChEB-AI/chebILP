@@ -12,6 +12,7 @@ refinement graph built from the LLM's class hypothesis), then handed to the vend
 
 The clause-parsing / hypothesis-unit helpers are ported from the ``scripts/_aleph_*`` prototype.
 """
+
 import itertools
 import os
 import re
@@ -29,8 +30,12 @@ RUN_ALEPH_PL = os.path.join(ALEPH_DIR, "run_aleph.pl")
 # total wall budget the run self-terminates within, so it stops cleanly and prints its best
 # theory rather than being SIGKILLed on the subprocess timeout.
 _DEFAULT_SETTINGS = {"i": 3, "noise": 200, "minpos": 2, "nodes": 50000, "verbosity": 0}
-_SUBPROCESS_TIMEOUT_BUFFER = 30  # headroom over the internal wall budget for swipl startup + IO
-_MAX_SEED_UNITS = 6  # above this, seed with the full hypothesis only (avoid 2^n start nodes)
+_SUBPROCESS_TIMEOUT_BUFFER = (
+    30  # headroom over the internal wall budget for swipl startup + IO
+)
+_MAX_SEED_UNITS = (
+    6  # above this, seed with the full hypothesis only (avoid 2^n start nodes)
+)
 
 _BODY_PRED_RE = re.compile(r"body_pred\(\s*([a-z_][A-Za-z0-9_]*)\s*,\s*(\d+)\s*\)")
 _VAR_RE = re.compile(r"^[A-Z_][A-Za-z0-9_]*$")
@@ -60,7 +65,7 @@ def literal_pred(lit):
 
 
 def literal_args(lit):
-    inside = lit[lit.index("(") + 1: lit.rindex(")")]
+    inside = lit[lit.index("(") + 1 : lit.rindex(")")]
     return split_conj(inside)
 
 
@@ -148,15 +153,19 @@ def _refine_block(head, units, body_preds):
     if n > _MAX_SEED_UNITS:
         # Subsets grow as 2^n; for a seed with many disjoint units, fall back to the full
         # seed as the sole start node (still specialised below) rather than 2^n-1 start facts.
-        start_lines.append(f"refine(false, ({head} :- {', '.join(l for u in units for l in u)})).")
+        start_lines.append(
+            f"refine(false, ({head} :- {', '.join(lit for u in units for lit in u)}))."
+        )
     else:
         for r in range(n, 0, -1):  # largest (full seed) first
             for combo in itertools.combinations(range(n), r):
-                lits = [l for i in combo for l in units[i]]
+                lits = [lit for i in combo for lit in units[i]]
                 start_lines.append(f"refine(false, ({head} :- {', '.join(lits)})).")
 
-    seed_names = {literal_pred(l) for u in units for l in u} | {"has_atom"}
-    qual = sorted(name for (name, ar) in body_preds if ar == 1 and name not in seed_names)
+    seed_names = {literal_pred(lit) for u in units for lit in u} | {"has_atom"}
+    qual = sorted(
+        name for (name, ar) in body_preds if ar == 1 and name not in seed_names
+    )
     qual_facts = "".join(f"unary_pred({q}).\n" for q in qual)
 
     return f"""
@@ -184,12 +193,19 @@ conj_snoc(A, Lit, (A,Lit)).
 """
 
 
-def _assemble_runnable_b(structural_b, head_name, head_arity, body_preds, settings, seed_clause):
+def _assemble_runnable_b(
+    structural_b, head_name, head_arity, body_preds, settings, seed_clause
+):
     """Inject dynamic decls + settings (+ seed refine graph) into the structural .b text."""
     settings = dict(settings)
     if seed_clause:
         settings["refine"] = "user"
-    pre = "\n" + _dynamic_decls(head_name, head_arity, body_preds) + "\n" + _settings_lines(settings)
+    pre = (
+        "\n"
+        + _dynamic_decls(head_name, head_arity, body_preds)
+        + "\n"
+        + _settings_lines(settings)
+    )
     anchor = ":- use_module(library(lists)).\n"
     body = structural_b.replace(anchor, anchor + pre, 1)
     if seed_clause:
@@ -209,6 +225,7 @@ def parse_aleph_output(text, head_name):
     run_aleph.pl output. ``head_name`` is the target predicate's name (``chebi_<id>`` for a
     ChEBI class, or e.g. ``zendo`` / ``next_count`` for another problem). Returns the
     run_ilp_training dict shape."""
+
     def last_num(pat, cast=float):
         vals = re.findall(pat, text)
         return cast(vals[-1]) if vals else None
@@ -225,7 +242,10 @@ def parse_aleph_output(text, head_name):
     fi = text.find("=== FINAL THEORY ===")
     if fi != -1:
         seg = text[fi:]
-        bodies = re.findall(rf"({head_re} :-\s*\n(?:\s+.*\n)*?)(?=\n\[|\n\n|\n{re.escape(head_name)})", seg)
+        bodies = re.findall(
+            rf"({head_re} :-\s*\n(?:\s+.*\n)*?)(?=\n\[|\n\n|\n{re.escape(head_name)})",
+            seg,
+        )
         clauses = [_normalize_clause(b) for b in bodies if ":-" in b]
         if clauses:
             prog_str = "\n".join(clauses)
@@ -233,7 +253,8 @@ def parse_aleph_output(text, head_name):
         # Fallback: the last best-so-far clause, which survives even a search cut short.
         found = re.findall(
             rf"\[found clause\]\s*\n({head_re}[^\[]*?)\n\[pos cover = \d+ neg cover = \d+\]",
-            text)
+            text,
+        )
         if found:
             prog_str = _normalize_clause(found[-1])
 
@@ -247,14 +268,28 @@ def parse_aleph_output(text, head_name):
             tp, fp, fn, tn = (int(x) for x in m.groups())
             score = [tp, fn, tn, fp]
 
-    return {"prog_str": prog_str, "score": score,
-            "num_programs": num_programs, "time_to_best": time_to_best}
+    return {
+        "prog_str": prog_str,
+        "score": score,
+        "num_programs": num_programs,
+        "time_to_best": time_to_best,
+    }
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────────────────
-def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=MAX_BODY,
-                           seed_clause=None, log_dir=None, settings_overrides=None,
-                           head_name=None, head_arity=1, run_stem_name=None):
+def run_ilp_training_aleph(
+    chebi_id,
+    aleph_stem,
+    bias_path,
+    timeout,
+    max_body=MAX_BODY,
+    seed_clause=None,
+    log_dir=None,
+    settings_overrides=None,
+    head_name=None,
+    head_arity=1,
+    run_stem_name=None,
+):
     """Learn one class with Aleph. Mirrors run_ilp_training_subprocess's return contract.
 
     ``aleph_stem`` is the build-time stem (``get_aleph_stem``); ``<stem>.b/.f/.n`` must exist.
@@ -272,7 +307,9 @@ def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=MA
     stem_name = run_stem_name if run_stem_name is not None else str(chebi_id)
 
     with open(bias_path) as f:
-        body_preds = {(m.group(1), int(m.group(2))) for m in _BODY_PRED_RE.finditer(f.read())}
+        body_preds = {
+            (m.group(1), int(m.group(2))) for m in _BODY_PRED_RE.finditer(f.read())
+        }
     with open(aleph_stem + ".b") as f:
         structural_b = f.read()
 
@@ -284,8 +321,9 @@ def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=MA
     if settings_overrides:
         settings.update(settings_overrides)
 
-    runnable_b = _assemble_runnable_b(structural_b, head_name, head_arity, body_preds,
-                                      settings, seed_clause)
+    runnable_b = _assemble_runnable_b(
+        structural_b, head_name, head_arity, body_preds, settings, seed_clause
+    )
 
     run_dir = os.path.join(log_dir or ".", "aleph")
     os.makedirs(run_dir, exist_ok=True)
@@ -306,15 +344,31 @@ def run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout, max_body=MA
     try:
         result = subprocess.run(
             ["swipl", "-q", "-g", f"main('{swipl_stem}')", "-t", "halt", RUN_ALEPH_PL],
-            capture_output=True, text=True, cwd=ALEPH_DIR, timeout=hard_timeout,
+            capture_output=True,
+            text=True,
+            cwd=ALEPH_DIR,
+            timeout=hard_timeout,
         )
         out = (result.stdout or "") + "\n" + (result.stderr or "")
     except FileNotFoundError:
-        raise RuntimeError("SWI-Prolog ('swipl') was not found on PATH; Aleph needs it. "
-                           "Install it from https://www.swi-prolog.org/Download.html.") from None
+        raise RuntimeError(
+            "SWI-Prolog ('swipl') was not found on PATH; Aleph needs it. "
+            "Install it from https://www.swi-prolog.org/Download.html."
+        ) from None
     except subprocess.TimeoutExpired as e:
-        out = ((e.stdout or "") if isinstance(e.stdout, str) else (e.stdout.decode() if e.stdout else "")) \
-            + "\n" + ((e.stderr or "") if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else ""))
+        out = (
+            (
+                (e.stdout or "")
+                if isinstance(e.stdout, str)
+                else (e.stdout.decode() if e.stdout else "")
+            )
+            + "\n"
+            + (
+                (e.stderr or "")
+                if isinstance(e.stderr, str)
+                else (e.stderr.decode() if e.stderr else "")
+            )
+        )
 
     with open(run_stem + ".out", "w") as f:
         f.write(out)

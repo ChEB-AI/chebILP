@@ -11,6 +11,7 @@ States come from random playouts, as in IGGP: the player in control marks a rand
 other plays ``noop``. ``goal``, ``terminal`` and ``legal_mark`` use the distinct states visited,
 terminal ones included; the ``next_*`` problems use distinct (non-terminal state, move) pairs.
 """
+
 import random
 
 from chebILP.ilp_problem import ILPProblem
@@ -21,14 +22,21 @@ MARK_OF = {"white": "x", "black": "o"}
 POSITIONS = (1, 2, 3)
 CELLS = tuple((r, c) for r in POSITIONS for c in POSITIONS)
 SCORES = (0, 50, 100)
-LINES = ([[(r, c) for c in POSITIONS] for r in POSITIONS]
-         + [[(r, c) for r in POSITIONS] for c in POSITIONS]
-         + [[(1, 1), (2, 2), (3, 3)], [(1, 3), (2, 2), (3, 1)]])
+LINES = (
+    [[(r, c) for c in POSITIONS] for r in POSITIONS]
+    + [[(r, c) for r in POSITIONS] for c in POSITIONS]
+    + [[(1, 1), (2, 2), (3, 3)], [(1, 3), (2, 2), (3, 1)]]
+)
 
 # (max_vars, max_body) of the shortest rule over the base vocabulary: a line clause for goal and
 # terminal; next_cell's blank frame rule needs an inequality the vocabulary lacks.
-POPPER_BOUNDS = {"goal": (8, 9), "terminal": (6, 7), "legal_mark": (5, 3), "next_cell": (6, 5),
-                 "next_control": (3, 3)}
+POPPER_BOUNDS = {
+    "goal": (8, 9),
+    "terminal": (6, 7),
+    "legal_mark": (5, 3),
+    "next_cell": (6, 5),
+    "next_control": (3, 3),
+}
 ARITIES = {"goal": 3, "terminal": 1, "legal_mark": 4, "next_cell": 4, "next_control": 2}
 
 # The GDL rules over this vocabulary, helpers included.
@@ -77,7 +85,10 @@ def is_terminal(board: dict) -> bool:
 
 def score(board: dict, agent: str) -> int | None:
     """The GDL goal value; ``None`` if both players have a line, which no reachable state has."""
-    own, other = has_line(board, MARK_OF[agent]), has_line(board, MARK_OF[AGENTS[agent == "white"]])
+    own, other = (
+        has_line(board, MARK_OF[agent]),
+        has_line(board, MARK_OF[AGENTS[agent == "white"]]),
+    )
     if own and other:
         return None
     return 100 if own else 0 if other else 50
@@ -106,7 +117,13 @@ class TicTacToeMinter(ILPProblemMinter):
 
     problem_type = "iggp_tictactoe"
 
-    def __init__(self, out_root=None, target: str = "goal", n_states: int = 500, library_root=None):
+    def __init__(
+        self,
+        out_root=None,
+        target: str = "goal",
+        n_states: int = 500,
+        library_root=None,
+    ):
         super().__init__(out_root, library_root)
         assert target in ARITIES, f"unknown target {target}"
         self.target = target
@@ -140,20 +157,32 @@ class TicTacToeMinter(ILPProblemMinter):
                 out.append((board, control, move))
                 if len(out) == self.n_states:
                     return out
-        raise RuntimeError(f"only {len(out)} distinct states after {max_playouts} playouts")
+        raise RuntimeError(
+            f"only {len(out)} distinct states after {max_playouts} playouts"
+        )
 
-    def candidate_atoms(self, board: dict, control: str, move) -> list[tuple[tuple, bool]]:
+    def candidate_atoms(
+        self, board: dict, control: str, move
+    ) -> list[tuple[tuple, bool]]:
         """Every candidate target atom of one state (without the state id), and whether it holds."""
         if self.target == "goal":
             return [((a, s), score(board, a) == s) for a in AGENTS for s in SCORES]
         if self.target == "terminal":
             return [((), is_terminal(board))]
         if self.target == "legal_mark":
-            return [((a, r, c), board[(r, c)] == "b" and control == a) for a in AGENTS for r, c in CELLS]
+            return [
+                ((a, r, c), board[(r, c)] == "b" and control == a)
+                for a in AGENTS
+                for r, c in CELLS
+            ]
         if self.target == "next_cell":
             after = dict(board)
             after[move] = MARK_OF[control]
-            return [((r, c, m), after[(r, c)] == m) for r, c in CELLS for m in ("b", "o", "x")]
+            return [
+                ((r, c, m), after[(r, c)] == m)
+                for r, c in CELLS
+                for m in ("b", "o", "x")
+            ]
         if self.target == "next_control":
             return [((a,), a != control) for a in AGENTS]
         raise ValueError(self.target)
@@ -166,12 +195,18 @@ class TicTacToeMinter(ILPProblemMinter):
             "index": list(POSITIONS),
             "input": [(a, "noop") for a in AGENTS],
             "input_mark": [(a, r, c) for a in AGENTS for r, c in CELLS],
-            "agent_white": ["white"], "agent_black": ["black"],
-            "mark_x": ["x"], "mark_o": ["o"], "mark_b": ["b"],
+            "agent_white": ["white"],
+            "agent_black": ["black"],
+            "mark_x": ["x"],
+            "mark_o": ["o"],
+            "mark_b": ["b"],
             **{f"mypos_{p}": [p] for p in POSITIONS},
             **{f"score_{s}": [s] for s in SCORES},
             "action_noop": ["noop"],
-            "true_cell": [], "true_control": [], "does": [], "does_mark": [],
+            "true_cell": [],
+            "true_control": [],
+            "does": [],
+            "does_mark": [],
         }
         pos, neg = [], []
         for i, (board, control, move) in enumerate(self.sample_states(rng)):
@@ -210,9 +245,9 @@ variable per rule."""
             "goal": "goal(State, Agent, Score)   [TARGET] Agent's score in State is Score (0, 50 or 100).",
             "terminal": "terminal(State)             [TARGET] the game is over in State.",
             "legal_mark": "legal_mark(State, Agent, Row, Col)\n"
-                          "                            [TARGET] marking cell (Row, Col) is a legal move for Agent in State.",
+            "                            [TARGET] marking cell (Row, Col) is a legal move for Agent in State.",
             "next_cell": "next_cell(State, Row, Col, Mark)\n"
-                         "                            [TARGET] cell (Row, Col) holds Mark in the state that follows State.",
+            "                            [TARGET] cell (Row, Col) holds Mark in the state that follows State.",
             "next_control": "next_control(State, Agent)  [TARGET] Agent is in control in the state that follows State.",
         }
         lines = [

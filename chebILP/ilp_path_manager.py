@@ -11,13 +11,15 @@ PASSTHROUGH_PREFIXES = ("ec_", "scop_")
 def class_head(class_id) -> str:
     """Target predicate and problem folder name: ``chebi_<id>``, or the id itself for an EC class or SCOPe node."""
     class_id = str(class_id)
-    return class_id if class_id.startswith(PASSTHROUGH_PREFIXES) else f"chebi_{class_id}"
+    return (
+        class_id if class_id.startswith(PASSTHROUGH_PREFIXES) else f"chebi_{class_id}"
+    )
 
 
 def class_id_from_head(head: str) -> str | None:
     """Inverse of :func:`class_head`; ``None`` if ``head`` names no class target."""
     if head.startswith("chebi_"):
-        return head[len("chebi_"):]
+        return head[len("chebi_") :]
     return head if head.startswith(PASSTHROUGH_PREFIXES) else None
 
 
@@ -27,6 +29,7 @@ def get_problem_dir(chebi_id, split: Split, base_dir=None):
     problem_dir = os.path.join(base_dir, class_head(chebi_id), split)
     os.makedirs(problem_dir, exist_ok=True)
     return problem_dir
+
 
 def get_exs_path(chebi_id, split: Split, base_dir=None):
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
@@ -56,6 +59,7 @@ def get_aux_generation_log_path(chebi_id, base_dir):
     os.makedirs(logs_dir, exist_ok=True)
     return os.path.join(logs_dir, f"{class_head(chebi_id)}.md")
 
+
 # Sets whose BK is ground from an ASP rule library: the class's own selection from class_map.json,
 # or a retrieval over the whole library (the holdout variant may not pick the class's own programs).
 RETRIEVED_RULE_PREDICATE_SETS = ("llm_retrieved_rules", "llm_retrieved_rules_holdout")
@@ -65,14 +69,28 @@ LIBRARY_PREDICATE_SETS = ("llm_generated_fgs",) + RULE_PREDICATE_SETS
 
 def get_predicate_set_dirname(predicate_set, predicate_dir=None):
     """BK folder name; LLM-library sets carry the library name so several libraries can coexist."""
-    if predicate_set in LIBRARY_PREDICATE_SETS and predicate_dir and predicate_dir != "None":
+    if (
+        predicate_set in LIBRARY_PREDICATE_SETS
+        and predicate_dir
+        and predicate_dir != "None"
+    ):
         return f"{predicate_set}_{os.path.basename(os.path.normpath(predicate_dir))}"
     return predicate_set
 
 
-def get_bk_path(chebi_id, split: Split, predicate_set, base_dir=None, selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, predicate_dir=None):
+def get_bk_path(
+    chebi_id,
+    split: Split,
+    predicate_set,
+    base_dir=None,
+    selection_mode: Literal["claude", "random", "top_k"] | None = None,
+    selection_k: int | None = None,
+    predicate_dir=None,
+):
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
-    bk_dir = os.path.join(problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir))
+    bk_dir = os.path.join(
+        problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir)
+    )
     os.makedirs(bk_dir, exist_ok=True)
     if selection_mode is not None and selection_k is not None:
         bk_dir = os.path.join(bk_dir, f"selection_{selection_mode}_k={selection_k}")
@@ -80,14 +98,31 @@ def get_bk_path(chebi_id, split: Split, predicate_set, base_dir=None, selection_
     return os.path.join(bk_dir, "bk.pl")
 
 
-def get_retrieval_record_path(chebi_id, predicate_set, base_dir=None, predicate_dir=None):
+def get_retrieval_record_path(
+    chebi_id, predicate_set, base_dir=None, predicate_dir=None
+):
     """JSON record of the library programs retrieval picked for a class (train BK folder)."""
-    bk_path = get_bk_path(chebi_id, "train", predicate_set, base_dir=base_dir, predicate_dir=predicate_dir)
+    bk_path = get_bk_path(
+        chebi_id, "train", predicate_set, base_dir=base_dir, predicate_dir=predicate_dir
+    )
     return os.path.join(os.path.dirname(bk_path), "retrieved_predicates.json")
 
-def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, max_vars=None, max_body=None, predicate_dir=None):
+
+def get_bias_path(
+    chebi_id,
+    split: Split,
+    base_dir=None,
+    predicate_set="atoms",
+    selection_mode: Literal["claude", "random", "top_k"] | None = None,
+    selection_k: int | None = None,
+    max_vars=None,
+    max_body=None,
+    predicate_dir=None,
+):
     problem_dir = get_problem_dir(chebi_id, split, base_dir)
-    bk_dir = os.path.join(problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir))
+    bk_dir = os.path.join(
+        problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir)
+    )
     os.makedirs(bk_dir, exist_ok=True)
     if selection_mode is not None and selection_k is not None:
         bk_dir = os.path.join(bk_dir, f"selection_{selection_mode}_k={selection_k}")
@@ -100,13 +135,22 @@ def get_bias_path(chebi_id, split: Split, base_dir=None, predicate_set="atoms", 
     return os.path.join(bk_dir, bias_file)
 
 
-def get_aleph_stem(chebi_id, predicate_set, base_dir=None, selection_mode: Literal["claude", "random", "top_k"] | None = None, selection_k: int | None = None, predicate_dir=None):
+def get_aleph_stem(
+    chebi_id,
+    predicate_set,
+    base_dir=None,
+    selection_mode: Literal["claude", "random", "top_k"] | None = None,
+    selection_k: int | None = None,
+    predicate_dir=None,
+):
     """Aleph file stem for a class (train split only): callers append ``.b``/``.f``/``.n``.
 
     The stem basename is the bare ChEBI id, so files are e.g.
     ``.../train/atoms/13248.b``."""
     problem_dir = get_problem_dir(chebi_id, "train", base_dir)
-    bk_dir = os.path.join(problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir))
+    bk_dir = os.path.join(
+        problem_dir, get_predicate_set_dirname(predicate_set, predicate_dir)
+    )
     os.makedirs(bk_dir, exist_ok=True)
     if selection_mode is not None and selection_k is not None:
         bk_dir = os.path.join(bk_dir, f"selection_{selection_mode}_k={selection_k}")

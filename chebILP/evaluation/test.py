@@ -1,9 +1,14 @@
-
-
 import json
 import os
 import time
-from chebILP.ilp_path_manager import class_head, class_id_from_head, get_bk_path, get_exs_path, RULE_PREDICATE_SETS, RETRIEVED_RULE_PREDICATE_SETS
+from chebILP.ilp_path_manager import (
+    class_head,
+    class_id_from_head,
+    get_bk_path,
+    get_exs_path,
+    RULE_PREDICATE_SETS,
+    RETRIEVED_RULE_PREDICATE_SETS,
+)
 from typing import Literal, Optional
 
 import numpy as np
@@ -11,8 +16,7 @@ import pandas as pd
 
 
 def _silent_clingo_logger(code, message):
-    """Swallow Clingo's grounding messages.
-    """
+    """Swallow Clingo's grounding messages."""
     pass
 
 
@@ -34,7 +38,9 @@ def _aux_predicate_specs(programs, aux_library_dir):
     Returns a list of ``(name, source_file)`` telling a worker which predicates to load.
     """
     import re
-    from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates
+    from chebILP.predicate_generation.auxiliary_predicates import (
+        load_auxiliary_predicates,
+    )
 
     specs: dict[str, str] = {}
     for cls_id, prog in programs.items():
@@ -69,16 +75,21 @@ def _collect_rule_programs(programs, rule_library_dir, retrieved=False):
     resolved as usual.
     """
     import re
-    from chebILP.molecule_processing.fg_matching import FG_SEED_PREFIXES
+    from chebILP.preprocessing.molecule_processing.fg_matching import FG_SEED_PREFIXES
     from chebILP.predicate_generation.auxiliary_rules import (
-        DEFAULT_AUX_RULE_LIBRARY_DIR, aux_rule_path, load_class_rules, parse_rule_program,
+        DEFAULT_AUX_RULE_LIBRARY_DIR,
+        aux_rule_path,
+        load_class_rules,
+        parse_rule_program,
         resolve_rule_dependencies,
     )
 
     chosen = {}
     if retrieved:
         library_dir = rule_library_dir or DEFAULT_AUX_RULE_LIBRARY_DIR
-        name_re = re.compile(r"\b(?:" + "|".join(("aux_",) + FG_SEED_PREFIXES) + r")\w+")
+        name_re = re.compile(
+            r"\b(?:" + "|".join(("aux_",) + FG_SEED_PREFIXES) + r")\w+"
+        )
         for prog in programs.values():
             for name in name_re.findall(prog):
                 path = aux_rule_path(name, library_dir)
@@ -96,7 +107,8 @@ def _collect_rule_programs(programs, rule_library_dir, retrieved=False):
 
     rule_programs = list(chosen.values())
     dependencies = [
-        dep for dep in resolve_rule_dependencies(rule_programs, rule_library_dir)
+        dep
+        for dep in resolve_rule_dependencies(rule_programs, rule_library_dir)
         if dep.name not in chosen
     ]
     return rule_programs, dependencies
@@ -133,7 +145,9 @@ def _quiet_aux_logging():
     import logging
     from rdkit import RDLogger
 
-    logging.getLogger("chebILP.predicate_generation.auxiliary_predicates").setLevel(logging.ERROR)
+    logging.getLogger("chebILP.predicate_generation.auxiliary_predicates").setLevel(
+        logging.ERROR
+    )
     RDLogger.DisableLog("rdApp.*")
 
 
@@ -174,10 +188,14 @@ def _evaluate_molecule(payload):
     aux_failures: dict[str, str] = {}
     try:
         bg_facts = build_full_background(
-            row_df, predicate_set=st["predicate_set"],
-            aux_predicates=st["aux_predicates"], aux_timeout=st["aux_timeout"],
-            aux_failures=aux_failures, fowl_smarts=st.get("fowl_smarts"),
-            rule_programs=st.get("rule_programs"), rule_dependencies=st.get("rule_dependencies"),
+            row_df,
+            predicate_set=st["predicate_set"],
+            aux_predicates=st["aux_predicates"],
+            aux_timeout=st["aux_timeout"],
+            aux_failures=aux_failures,
+            fowl_smarts=st.get("fowl_smarts"),
+            rule_programs=st.get("rule_programs"),
+            rule_dependencies=st.get("rule_dependencies"),
             computed_facts=st.get("computed_facts", False),
         )
     except Exception as e:  # noqa: BLE001
@@ -264,11 +282,15 @@ def build_ilp_preds_tensor(
     ilp_class_ids = sorted(programs.keys())
     n_mols = len(mol_order)
     n_classes = len(ilp_class_ids)
-    print(f"Building ILP predictions tensor: {n_mols} molecules × {n_classes} classes "
-          f"(predicate_set={predicate_set})")
+    print(
+        f"Building ILP predictions tensor: {n_mols} molecules × {n_classes} classes "
+        f"(predicate_set={predicate_set})"
+    )
 
     # Molecules we actually have; anything missing stays False in the tensor.
-    present_rows = molecules_df[molecules_df.index.isin(set(mol_order))].dropna(subset=["mol"])
+    present_rows = molecules_df[molecules_df.index.isin(set(mol_order))].dropna(
+        subset=["mol"]
+    )
     present_mol_ids = [str(i) for i in present_rows.index]
     missing = len(set(mol_order)) - len(set(present_mol_ids))
     if missing:
@@ -285,7 +307,9 @@ def build_ilp_preds_tensor(
     for cls_id in ilp_class_ids:
         prog = "\n".join(line for line in programs[cls_id].split("\n") if line.strip())
         try:
-            clingo.Control(logger=_silent_clingo_logger).add("t", [], prog)  # syntax check only
+            clingo.Control(logger=_silent_clingo_logger).add(
+                "t", [], prog
+            )  # syntax check only
             valid_programs[cls_id] = prog
         except RuntimeError as e:
             print(f"  Skipping ChEBI:{cls_id} — failed to parse program: {e}")
@@ -297,8 +321,10 @@ def build_ilp_preds_tensor(
     aux_load_args = None
     if predicate_set == "llm_generated_fgs":
         aux_load_args = _aux_predicate_specs(valid_programs, aux_library_dir)
-        print(f"{len(aux_load_args)} distinct auxiliary predicate implementation(s) referenced "
-              f"by programs")
+        print(
+            f"{len(aux_load_args)} distinct auxiliary predicate implementation(s) referenced "
+            f"by programs"
+        )
 
     # llm_generated_rules: gather the classes' rule programs (plus the library programs they
     # build on) and recompute their extensions in the background. RuleProgram objects are
@@ -306,9 +332,18 @@ def build_ilp_preds_tensor(
     rule_programs = rule_dependencies = None
     if predicate_set in RULE_PREDICATE_SETS:
         rule_programs, rule_dependencies = _collect_rule_programs(
-            valid_programs, aux_library_dir, retrieved=predicate_set in RETRIEVED_RULE_PREDICATE_SETS)
-        print(f"{len(rule_programs)} distinct auxiliary rule(s) referenced by programs"
-              + (f" (+{len(rule_dependencies)} dependencies)" if rule_dependencies else ""))
+            valid_programs,
+            aux_library_dir,
+            retrieved=predicate_set in RETRIEVED_RULE_PREDICATE_SETS,
+        )
+        print(
+            f"{len(rule_programs)} distinct auxiliary rule(s) referenced by programs"
+            + (
+                f" (+{len(rule_dependencies)} dependencies)"
+                if rule_dependencies
+                else ""
+            )
+        )
 
     # fowl predicates are class-specific (fowl_<cls_id>) and derived from a shared
     # SMARTS table. Gather the patterns for the classes being predicted so the same
@@ -316,8 +351,13 @@ def build_ilp_preds_tensor(
     fowl_smarts = None
     if predicate_set == "fowl":
         from chebILP.ilp_problem_builder import load_fowl_smarts
+
         all_fowl_smarts = load_fowl_smarts()
-        fowl_smarts = {cls_id: all_fowl_smarts[cls_id] for cls_id in valid_programs if cls_id in all_fowl_smarts}
+        fowl_smarts = {
+            cls_id: all_fowl_smarts[cls_id]
+            for cls_id in valid_programs
+            if cls_id in all_fowl_smarts
+        }
         print(f"{len(fowl_smarts)} fowl SMARTS pattern(s) referenced by programs")
 
     programs_str = "\n".join(valid_programs.values())
@@ -325,18 +365,25 @@ def build_ilp_preds_tensor(
     # Shared, read-only config handed to each molecule evaluation (main process for the
     # serial path, or every pool worker via the initializer).
     worker_state = dict(
-        programs_str=programs_str, col_of=col_of, predicate_set=predicate_set,
-        aux_timeout=aux_timeout, label_timeout=label_timeout, fowl_smarts=fowl_smarts,
-        rule_programs=rule_programs, rule_dependencies=rule_dependencies,
+        programs_str=programs_str,
+        col_of=col_of,
+        predicate_set=predicate_set,
+        aux_timeout=aux_timeout,
+        label_timeout=label_timeout,
+        fowl_smarts=fowl_smarts,
+        rule_programs=rule_programs,
+        rule_dependencies=rule_dependencies,
         computed_facts=computed_facts,
     )
 
     # Ship mols as RDKit binary with all properties so nothing (stereo/CIP perception,
     # cached descriptors) is lost when they cross the process boundary.
     from rdkit import Chem
+
     all_props = Chem.PropertyPickleOptions.AllProps
     payloads = [
-        (str(row.Index), row.mol.ToBinary(all_props)) for row in present_rows.itertuples()
+        (str(row.Index), row.mol.ToBinary(all_props))
+        for row in present_rows.itertuples()
     ]
 
     n_timeout = 0
@@ -355,7 +402,9 @@ def build_ilp_preds_tensor(
             n_timeout += 1
         elif status.startswith("error"):
             n_error += 1
-            print(f"  Clingo evaluation failed for molecule {mol_id}: {status[len('error: '):]}")
+            print(
+                f"  Clingo evaluation failed for molecule {mol_id}: {status[len('error: ') :]}"
+            )
             return
         i = mol_idx.get(mol_id)
         if i is not None:
@@ -375,28 +424,38 @@ def build_ilp_preds_tensor(
     else:
         from concurrent.futures import ProcessPoolExecutor
 
-        print(f"Evaluating {len(payloads)} molecules across {n_jobs} worker process(es)")
+        print(
+            f"Evaluating {len(payloads)} molecules across {n_jobs} worker process(es)"
+        )
         with ProcessPoolExecutor(
-            max_workers=n_jobs, initializer=_worker_init,
+            max_workers=n_jobs,
+            initializer=_worker_init,
             initargs=(worker_state, aux_load_args),
         ) as ex:
             for result in tqdm.tqdm(
                 ex.map(_evaluate_molecule, payloads, chunksize=8),
-                total=len(payloads), desc="Molecules",
+                total=len(payloads),
+                desc="Molecules",
             ):
                 _apply(result)
 
     if n_timeout:
-        print(f"  {n_timeout} molecule(s) hit the {label_timeout}s solving timeout — those rows may be incomplete")
+        print(
+            f"  {n_timeout} molecule(s) hit the {label_timeout}s solving timeout — those rows may be incomplete"
+        )
     if n_error:
         print(f"  {n_error} molecule(s) failed to evaluate — predicted False")
     if aux_failures:
         n_aux_timeout = sum(1 for r in aux_failures.values() if r == "timeout")
         n_aux_error = sum(1 for r in aux_failures.values() if r == "error")
-        print(f"  {len(aux_failures)} auxiliary predicate(s) could not be calculated "
-              f"({n_aux_timeout} timed out, {n_aux_error} errored) and were dropped from the "
-              f"background knowledge")
-        print(f"  Failed auxiliary predicates: {', '.join(sorted(aux_failures.keys()))}")
+        print(
+            f"  {len(aux_failures)} auxiliary predicate(s) could not be calculated "
+            f"({n_aux_timeout} timed out, {n_aux_error} errored) and were dropped from the "
+            f"background knowledge"
+        )
+        print(
+            f"  Failed auxiliary predicates: {', '.join(sorted(aux_failures.keys()))}"
+        )
 
     np.save(output_npy_path, tensor)
     with open(output_meta_path, "w") as f:
@@ -457,7 +516,11 @@ def predict_smiles(
         aux_timeout = DEFAULT_AUX_TIMEOUT
 
     with open(rules_file, "r") as f:
-        rules = [line.strip() for line in f if line.strip() and not line.strip().startswith("%")]
+        rules = [
+            line.strip()
+            for line in f
+            if line.strip() and not line.strip().startswith("%")
+        ]
 
     # Auxiliary predicates (llm_generated_fgs) are class-specific, so load the ones
     # referenced by the rules for the target classes (first definition of each aux_ name
@@ -465,9 +528,14 @@ def predict_smiles(
     aux_predicates = None
     if predicate_set == "llm_generated_fgs":
         import re
-        from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates
+        from chebILP.predicate_generation.auxiliary_predicates import (
+            load_auxiliary_predicates,
+        )
+
         used_aux_names = set(re.findall(r"\baux_\w+", "\n".join(rules)))
-        class_ids = [c for c in map(class_id_from_head, target_predicates) if c is not None]
+        class_ids = [
+            c for c in map(class_id_from_head, target_predicates) if c is not None
+        ]
         seen: dict[str, object] = {}
         for cls_id in class_ids:
             for pred in load_auxiliary_predicates(cls_id, library_dir=aux_library_dir):
@@ -481,19 +549,30 @@ def predict_smiles(
     if predicate_set in RULE_PREDICATE_SETS:
         programs_by_class = {
             class_id_from_head(t): "\n".join(r for r in rules if t in r)
-            for t in target_predicates if class_id_from_head(t) is not None
+            for t in target_predicates
+            if class_id_from_head(t) is not None
         }
         rule_programs, rule_dependencies = _collect_rule_programs(
-            programs_by_class, aux_library_dir, retrieved=predicate_set in RETRIEVED_RULE_PREDICATE_SETS)
+            programs_by_class,
+            aux_library_dir,
+            retrieved=predicate_set in RETRIEVED_RULE_PREDICATE_SETS,
+        )
 
     # fowl predicates are class-specific: gather the SMARTS patterns for the target
     # classes so the background emits the fowl_<cls_id> facts the rules reference.
     fowl_smarts = None
     if predicate_set == "fowl":
         from chebILP.ilp_problem_builder import load_fowl_smarts
+
         all_fowl_smarts = load_fowl_smarts()
-        class_ids = [c for c in map(class_id_from_head, target_predicates) if c is not None]
-        fowl_smarts = {cls_id: all_fowl_smarts[cls_id] for cls_id in class_ids if cls_id in all_fowl_smarts}
+        class_ids = [
+            c for c in map(class_id_from_head, target_predicates) if c is not None
+        ]
+        fowl_smarts = {
+            cls_id: all_fowl_smarts[cls_id]
+            for cls_id in class_ids
+            if cls_id in all_fowl_smarts
+        }
 
     results: list[dict] = []
     for smiles in smiles_list:
@@ -506,37 +585,61 @@ def predict_smiles(
         mol_id = "m0"
         mol_df = pd.DataFrame([{"mol": mol}], index=[mol_id])
         background_facts = build_full_background(
-            mol_df, predicate_set=predicate_set,
-            aux_predicates=aux_predicates, aux_timeout=aux_timeout,
-            fowl_smarts=fowl_smarts, rule_programs=rule_programs,
-            rule_dependencies=rule_dependencies, computed_facts=computed_facts,
+            mol_df,
+            predicate_set=predicate_set,
+            aux_predicates=aux_predicates,
+            aux_timeout=aux_timeout,
+            fowl_smarts=fowl_smarts,
+            rule_programs=rule_programs,
+            rule_dependencies=rule_dependencies,
+            computed_facts=computed_facts,
         )
-        print(f"Evaluating {smiles!r} against {len(rules)} rules and {len(background_facts)} background facts...")
+        print(
+            f"Evaluating {smiles!r} against {len(rules)} rules and {len(background_facts)} background facts..."
+        )
         print(f"  Target predicates: {', '.join(target_predicates)}")
         print(f"  Background knowledge: {background_facts}")
 
         start_time = time.perf_counter()
         try:
-            positives = evaluate_with_clingo(rules, background_facts, target_predicates, [mol_id])
+            positives = evaluate_with_clingo(
+                rules, background_facts, target_predicates, [mol_id]
+            )
         except Exception as e:
             print(f"Clingo evaluation failed for {smiles!r}: {e}")
             positives = {}
         elapsed = time.perf_counter() - start_time
 
-        labels = [target for target in target_predicates if mol_id in positives.get(target, [])]
+        labels = [
+            target
+            for target in target_predicates
+            if mol_id in positives.get(target, [])
+        ]
         results.append({"SMILES": smiles, "labels": labels, "time": elapsed})
 
     if verbose:
         for entry in results:
             labels = entry["labels"]
             time_str = f"{entry['time']:.3f}s" if entry["time"] is not None else "n/a"
-            print(f"{entry['SMILES']} [{time_str}]: {', '.join(labels) if labels else '(none)'}")
+            print(
+                f"{entry['SMILES']} [{time_str}]: {', '.join(labels) if labels else '(none)'}"
+            )
 
     return results
 
 
-def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, results_dir, selection_mode: Optional[str], selection_k: Optional[int], test_on: Literal["validation", "test"] = "test", verbose: bool = False, predicate_dir: Optional[str] = None, **kwargs):
-
+def test_chebi_classes(
+    run_to_evaluate,
+    problem_dir: str,
+    predicate_set: str,
+    results_dir,
+    selection_mode: Optional[str],
+    selection_k: Optional[int],
+    test_on: Literal["validation", "test"] = "test",
+    verbose: bool = False,
+    predicate_dir: Optional[str] = None,
+    **kwargs,
+):
     with open(os.path.join(results_dir, "config.yml"), "a+") as f:
         f.write(f"problem_dir: {problem_dir}\n")
         f.write(f"run_to_evaluate: {run_to_evaluate}\n")
@@ -548,7 +651,7 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
                 results.append(json.loads(line))
             except json.JSONDecodeError:
                 print(f"Failed to parse line: {line}")
-    
+
     for row in results:
         chebi_id = row["chebi_id"]
         prog_str = row["program"]
@@ -559,31 +662,60 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
         start_time = time.perf_counter()
         print(f"Testing ChEBI:{chebi_id}...")
         from chebILP.evaluation.clingo_eval import run_ilp_validation_clingo
+
         try:
             conf_matrix, details = run_ilp_validation_clingo(
-                class_head(chebi_id), prog_str,
+                class_head(chebi_id),
+                prog_str,
                 exs_file=get_exs_path(chebi_id, split=test_on, base_dir=problem_dir),
-                bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split=test_on, base_dir=problem_dir,
-                                    selection_mode=selection_mode, selection_k=selection_k, predicate_dir=predicate_dir),
+                bk_file=get_bk_path(
+                    chebi_id,
+                    predicate_set=predicate_set,
+                    split=test_on,
+                    base_dir=problem_dir,
+                    selection_mode=selection_mode,
+                    selection_k=selection_k,
+                    predicate_dir=predicate_dir,
+                ),
                 return_details=True,
             )
             if verbose:
-                balanced_acc = 0.5 * (conf_matrix["TP"] / (conf_matrix["TP"] + conf_matrix["FN"]) if (conf_matrix["TP"] + conf_matrix["FN"]) > 0 else 0) + 0.5 * (conf_matrix["TN"] / (conf_matrix["TN"] + conf_matrix["FP"]) if (conf_matrix["TN"] + conf_matrix["FP"]) > 0 else 0)
-                f1_score = conf_matrix["TP"] / (conf_matrix["TP"] + 0.5 * (conf_matrix["FP"] + conf_matrix["FN"])) if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0 else 0.0
-                print(f"  F1: {f1_score:.2f}, BA: {balanced_acc:.2f} TPs: {conf_matrix['TP']}, FPs: {conf_matrix['FP']}, TNs: {conf_matrix['TN']}, FNs: {conf_matrix['FN']}")
+                balanced_acc = 0.5 * (
+                    conf_matrix["TP"] / (conf_matrix["TP"] + conf_matrix["FN"])
+                    if (conf_matrix["TP"] + conf_matrix["FN"]) > 0
+                    else 0
+                ) + 0.5 * (
+                    conf_matrix["TN"] / (conf_matrix["TN"] + conf_matrix["FP"])
+                    if (conf_matrix["TN"] + conf_matrix["FP"]) > 0
+                    else 0
+                )
+                f1_score = (
+                    conf_matrix["TP"]
+                    / (
+                        conf_matrix["TP"]
+                        + 0.5 * (conf_matrix["FP"] + conf_matrix["FN"])
+                    )
+                    if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0
+                    else 0.0
+                )
+                print(
+                    f"  F1: {f1_score:.2f}, BA: {balanced_acc:.2f} TPs: {conf_matrix['TP']}, FPs: {conf_matrix['FP']}, TNs: {conf_matrix['TN']}, FNs: {conf_matrix['FN']}"
+                )
                 for outcome in ("FP", "FN"):
                     subset = [d for d in details if d["outcome"] == outcome][:10]
-                    print(f"  {'False Positive' if outcome == 'FP' else 'False Negative'} samples (showing up to 10):")
+                    print(
+                        f"  {'False Positive' if outcome == 'FP' else 'False Negative'} samples (showing up to 10):"
+                    )
                     for d in subset:
                         print(f"    {d['id']} (true label: {d['true_label']})")
-            
+
             with open(os.path.join(results_dir, "results.json"), "a+") as f:
                 result_entry = {
                     "chebi_id": chebi_id,
                     "time_taken": time.perf_counter() - start_time,
                     "program": prog_str,
                     f"{test_on}_score": conf_matrix,
-                    f"{test_on}_details": details
+                    f"{test_on}_details": details,
                 }
                 f.write(json.dumps(result_entry) + "\n")
 
@@ -596,6 +728,6 @@ def test_chebi_classes(run_to_evaluate, problem_dir: str, predicate_set: str, re
                     "program": prog_str,
                     f"{test_on}_score": None,
                     f"{test_on}_details": None,
-                    "error": str(e)
+                    "error": str(e),
                 }
                 f.write(json.dumps(result_entry) + "\n")

@@ -24,14 +24,44 @@ _BOND_TYPES = {
 # constants, so they stay in the BK for grounding the unary unfoldings in abrc_core.pl but are not
 # offered as body predicates.
 _CONSTANT_ARG_PREDICATES = {
-    "element", "charge", "hcount", "degree", "isotope", "radical", "cip", "bond", "bond_cip",
-    "ring", "steroid_pos", "net_charge", "elem_count", "heavy_atoms", "num_rings", "mol_weight",
-    "num_components", "heavy_degree", "c_neighbors", "hetero_neighbors", "amine_class",
-    "ring_size_atom", "ring_has_el", "has_element", "carbon_count", "n_carboxylic_acid",
-    "n_carboxylate", "n_carboxy", "ring_system_size",
+    "element",
+    "charge",
+    "hcount",
+    "degree",
+    "isotope",
+    "radical",
+    "cip",
+    "bond",
+    "bond_cip",
+    "ring",
+    "steroid_pos",
+    "net_charge",
+    "elem_count",
+    "heavy_atoms",
+    "num_rings",
+    "mol_weight",
+    "num_components",
+    "heavy_degree",
+    "c_neighbors",
+    "hetero_neighbors",
+    "amine_class",
+    "ring_size_atom",
+    "ring_has_el",
+    "has_element",
+    "carbon_count",
+    "n_carboxylic_acid",
+    "n_carboxylate",
+    "n_carboxy",
+    "ring_system_size",
 }
 # Element lookup tables of abrc_core.pl; needed for grounding only, so neither written nor offered.
-_LOOKUP_PREDICATES = {"halogen_el", "chalcogen_el", "pnictogen_el", "metal_el", "alkali_el"}
+_LOOKUP_PREDICATES = {
+    "halogen_el",
+    "chalcogen_el",
+    "pnictogen_el",
+    "metal_el",
+    "alkali_el",
+}
 
 _GONANE = Chem.MolFromSmarts(
     "[#6:13]12~[#6:12]~[#6:11]~[#6:9]3~[#6:10]4~"
@@ -51,7 +81,10 @@ def _elem(atom):
 def mol_to_abrc_facts(mol_id, mol):
     """Return the ASP facts (list of strings) describing ``mol`` under id ``mol_id``."""
     M = str(mol_id)
-    aid = lambda i: f"a{M}_{i + 1}"
+
+    def aid(i):
+        return f"a{M}_{i + 1}"
+
     facts = [f"mol({M})."]
     try:
         # freeze each heavy atom's H count first: RemoveHs(sanitize=False) does not always transfer
@@ -106,7 +139,9 @@ def mol_to_abrc_facts(mol_id, mol):
             if lab:
                 facts.append(f"cip({a},{lab}).")
         if e == "h":
-            total_h += 1  # explicit H atom (counted once here; not in neighbours' implicit Hs)
+            total_h += (
+                1  # explicit H atom (counted once here; not in neighbours' implicit Hs)
+            )
         else:
             heavy += 1
             total_h += atom.GetNumImplicitHs() + atom.GetNumExplicitHs()
@@ -133,7 +168,11 @@ def mol_to_abrc_facts(mol_id, mol):
         if bond.IsInRing():
             facts.append(f"ring_bond({i},{j}).")
             facts.append(f"ring_bond({j},{i}).")
-        code = bond.GetProp("_CIPCode").lower() if bond.HasProp("_CIPCode") else bond_ez.get(bond.GetIdx())
+        code = (
+            bond.GetProp("_CIPCode").lower()
+            if bond.HasProp("_CIPCode")
+            else bond_ez.get(bond.GetIdx())
+        )
         if code:
             if code in ("e", "z"):
                 facts.append(f"bond_cip({i},{j},{code}).")
@@ -187,12 +226,11 @@ def mol_to_abrc_facts(mol_id, mol):
 
 def mol_to_abrc_core(mol_id, mol):
     """Add predicates from core.pl to the basic facts from ``mol_to_abrc_facts``."""
-    from chebILP.evaluation.clingo_eval import ground_extensions_isolated
 
     facts, body_predicates = mol_to_abrc_facts(mol_id, mol)
 
     rules = []
-    with open (os.path.join(os.path.dirname(__file__), "abrc_core.pl"), "r") as f:
+    with open(os.path.join(os.path.dirname(__file__), "abrc_core.pl"), "r") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("%"):
@@ -205,8 +243,12 @@ def mol_to_abrc_core(mol_id, mol):
         arity = head.count(",") + 1
         body_predicates[pred] = arity
 
-    grounded_rules = ground_extensions(rules_split, facts, list(body_predicates.keys()), 
-                                                timeout=DEFAULT_GROUNDING_TIMEOUT)
+    grounded_rules = ground_extensions(
+        rules_split,
+        facts,
+        list(body_predicates.keys()),
+        timeout=DEFAULT_GROUNDING_TIMEOUT,
+    )
     grounding_str = []
     for name, extensions in grounded_rules.items():
         if name in _LOOKUP_PREDICATES:
@@ -214,8 +256,11 @@ def mol_to_abrc_core(mol_id, mol):
         for ext in extensions:
             grounding_str.append(f"{name}({','.join(ext)}).")
 
-    body_predicates = {p: a for p, a in body_predicates.items()
-                       if p not in _CONSTANT_ARG_PREDICATES and p not in _LOOKUP_PREDICATES}
+    body_predicates = {
+        p: a
+        for p, a in body_predicates.items()
+        if p not in _CONSTANT_ARG_PREDICATES and p not in _LOOKUP_PREDICATES
+    }
     return facts + grounding_str, body_predicates
 
 
@@ -230,10 +275,11 @@ def build_background_abrc(rows) -> tuple[list[str], set[(str, int)]]:
     lines.sort()
     return lines, [(pred, predicates[pred]) for pred in predicates.keys()]
 
+
 if __name__ == "__main__":
     smiles = "CC1=CC(=O)C2=C(C1=O)C=CC=C2"
     mol = Chem.MolFromSmiles(smiles)
     facts, body_predicates = mol_to_abrc_core("test", mol)
     for f in facts:
         print(f)
-    #print("Body predicates:", body_predicates)
+    # print("Body predicates:", body_predicates)

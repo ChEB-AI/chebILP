@@ -12,6 +12,7 @@ Flattening follows the IGGP dataset (Cropper, Evans & Law 2020): fluent ``cell(1
 move ``noop`` stays ``does(white,noop)``), and the targets are ``next_<fluent>``,
 ``legal_<action>`` (``legal`` for constant moves), ``goal`` and ``terminal``.
 """
+
 import itertools
 import os
 import re
@@ -24,9 +25,36 @@ STATE_GUARD = "gdl_state"
 FORCED_DYNAMIC = {"legal", "goal", "terminal", "next"}
 STATIC_ONLY = {"role", "init", "base", "input"}
 FLAT_PREFIXES = {"true", "next", "does", "legal", "input"}
-PROLOG_PROTECTED = {"length", "member", "append", "last", "between", "number", "atom", "var", "nth0",
-                    "nth1", "msort", "sort", "compare", "not", "is", "call", "integer", "atomic", "ground",
-                    "functor", "arg", "findall", "forall", "true", "false", "halt", "write", "print"}
+PROLOG_PROTECTED = {
+    "length",
+    "member",
+    "append",
+    "last",
+    "between",
+    "number",
+    "atom",
+    "var",
+    "nth0",
+    "nth1",
+    "msort",
+    "sort",
+    "compare",
+    "not",
+    "is",
+    "call",
+    "integer",
+    "atomic",
+    "ground",
+    "functor",
+    "arg",
+    "findall",
+    "forall",
+    "true",
+    "false",
+    "halt",
+    "write",
+    "print",
+}
 _TOKEN = re.compile(r"\(|\)|[^\s()]+")
 _INT = re.compile(r"-?(0|[1-9]\d*)")
 # A Prolog call: arguments with a comma or a variable. KIF may also write ``(init(cell 1 b))``.
@@ -35,6 +63,7 @@ _PROLOG_CALL = re.compile(r"\w\([^()]*(,|\b[A-Z_])")
 
 # ---------------------------------------------------------------------------------------------
 # KIF parsing
+
 
 def _clean_lines(text: str, keep_percent: bool) -> str:
     """Drops ``;`` comments and Prolog lines (``:-`` or a Prolog call). ``%`` lines are dropped,
@@ -71,10 +100,17 @@ def parse_kif(text: str) -> list:
             form = stack.pop()
             if stack:
                 # a nested ``(gameOver)`` is the constant gameOver
-                stack[-1].append(form[0] if len(form) == 1 and isinstance(form[0], str) else form)
+                stack[-1].append(
+                    form[0] if len(form) == 1 and isinstance(form[0], str) else form
+                )
             else:
-                if (not bad and len(form) >= 2 and isinstance(form[0], str) and not _INT.fullmatch(form[0])
-                        and (form[0] == "<=" or "?" not in str(form))):
+                if (
+                    not bad
+                    and len(form) >= 2
+                    and isinstance(form[0], str)
+                    and not _INT.fullmatch(form[0])
+                    and (form[0] == "<=" or "?" not in str(form))
+                ):
                     forms.append(form)
                 bad = False
         elif stack:
@@ -97,6 +133,7 @@ def read_game(path: str) -> list:
 
 # ---------------------------------------------------------------------------------------------
 # Names and terms
+
 
 def const(s: str) -> str:
     """A GDL constant as an ASP constant: integers stay integers, other names get non-word
@@ -145,7 +182,11 @@ def bk_relation(name: str) -> str:
     predicate (firesheep's helper ``next_at``) get ``gdl_``."""
     if name in PROLOG_PROTECTED:
         return f"my_{name}"
-    return f"gdl_{name}" if name.split("_", 1)[0] in FLAT_PREFIXES and "_" in name else name
+    return (
+        f"gdl_{name}"
+        if name.split("_", 1)[0] in FLAT_PREFIXES and "_" in name
+        else name
+    )
 
 
 def target_atoms(info: "StateInfo", target: str) -> set[tuple]:
@@ -156,7 +197,11 @@ def target_atoms(info: "StateInfo", target: str) -> set[tuple]:
     if target == "terminal":
         return {()} if info.terminal else set()
     if target.split("_", 1)[0] == "legal":
-        atoms = (flat_atom("legal", m, (flat_value(r),)) for r, ms in info.legal.items() for m in ms)
+        atoms = (
+            flat_atom("legal", m, (flat_value(r),))
+            for r, ms in info.legal.items()
+            for m in ms
+        )
     else:
         atoms = (flat_atom("next", f) for f in info.next)
     return {args for name, args in atoms if name == target}
@@ -174,13 +219,17 @@ def flat_atom(prefix: str, sym: clingo.Symbol, pre: tuple = ()) -> tuple[str, tu
 # ---------------------------------------------------------------------------------------------
 # Types (IGGP ``.typ`` files)
 
+
 @dataclass
 class GameTypes:
     """An IGGP type file: constants per type, subtypes, and the argument types of relations,
     fluents (``prop``) and moves (``action``)."""
-    constants: dict = field(default_factory=dict)     # type -> [constant]
-    subtypes: dict = field(default_factory=dict)      # type -> {types whose constants it includes}
-    signatures: dict = field(default_factory=dict)    # name -> (arg types, kind)
+
+    constants: dict = field(default_factory=dict)  # type -> [constant]
+    subtypes: dict = field(
+        default_factory=dict
+    )  # type -> {types whose constants it includes}
+    signatures: dict = field(default_factory=dict)  # name -> (arg types, kind)
 
     @classmethod
     def read(cls, path: str) -> "GameTypes":
@@ -209,25 +258,33 @@ class GameTypes:
             if t in seen:
                 continue
             seen.add(t)
-            out += [int(c) if _INT.fullmatch(c) else c for c in self.constants.get(t, [])]
+            out += [
+                int(c) if _INT.fullmatch(c) else c for c in self.constants.get(t, [])
+            ]
             todo += self.subtypes.get(t, ())
         return list(dict.fromkeys(out))
 
     def kind_names(self, kind: str, arity: int | None = None) -> list[str]:
         """Names declared with result ``kind`` (``prop``, ``action``), optionally of one arity."""
-        return [n for n, (args, k) in self.signatures.items()
-                if k == kind and n not in ("true", "next", "legal", "input", "does")
-                and (arity is None or len(args) == arity)]
+        return [
+            n
+            for n, (args, k) in self.signatures.items()
+            if k == kind
+            and n not in ("true", "next", "legal", "input", "does")
+            and (arity is None or len(args) == arity)
+        ]
 
 
 # ---------------------------------------------------------------------------------------------
 # The game
 
+
 @dataclass
 class StateInfo:
     """What the game derives in one state; ``next`` only when the joint move was given."""
-    legal: dict          # role -> [move symbols]
-    goal: list           # [(role, value)]
+
+    legal: dict  # role -> [move symbols]
+    goal: list  # [(role, value)]
     terminal: bool
     next: frozenset | None = None
 
@@ -248,9 +305,16 @@ class GDLGame:
         self.static_model = self._solve("\n".join(static_src))
         self.static_facts = "\n".join(f"{s}." for s in self.static_model)
         self.dynamic_program = "\n".join(dynamic_src)
-        self.roles = [s.arguments[0] for s in self.static_model if s.name == "role" and len(s.arguments) == 1]
-        self.init_state = frozenset(s.arguments[0] for s in self.static_model
-                                    if s.name == "init" and len(s.arguments) == 1)
+        self.roles = [
+            s.arguments[0]
+            for s in self.static_model
+            if s.name == "role" and len(s.arguments) == 1
+        ]
+        self.init_state = frozenset(
+            s.arguments[0]
+            for s in self.static_model
+            if s.name == "init" and len(s.arguments) == 1
+        )
 
     @classmethod
     def from_file(cls, path: str) -> "GDLGame":
@@ -272,7 +336,10 @@ class GDLGame:
                 h = _name(head)
                 if h in dynamic or h in STATIC_ONLY:
                     continue
-                if any(n in dynamic or n in ("true", "does") for n in self._body_relations(body)):
+                if any(
+                    n in dynamic or n in ("true", "does")
+                    for n in self._body_relations(body)
+                ):
                     dynamic.add(h)
                     changed = True
         return dynamic
@@ -299,14 +366,19 @@ class GDLGame:
                 raise ValueError(f"cannot flatten {n} over a variable fluent")
             if not isinstance(f, list):
                 return _flat_atom(n, ["E", const(f)])
-            return _flat_atom(f"{n}_{const(f[0])}", ["E"] + [_flat_term(a) for a in f[1:]])
+            return _flat_atom(
+                f"{n}_{const(f[0])}", ["E"] + [_flat_term(a) for a in f[1:]]
+            )
         if flat and n in ("does", "legal", "input"):
             r, a = args
             if _is_var(a):
                 raise ValueError(f"cannot flatten {n} over a variable move")
             pre = [] if n == "input" else ["E"]
             if isinstance(a, list):
-                return _flat_atom(f"{n}_{const(a[0])}", pre + [term(r)] + [_flat_term(t) for t in a[1:]])
+                return _flat_atom(
+                    f"{n}_{const(a[0])}",
+                    pre + [term(r)] + [_flat_term(t) for t in a[1:]],
+                )
             return _flat_atom(n, pre + [term(r), const(a)])
         terms = [_flat_term(a) if flat else term(a) for a in args]
         if n in self.dynamic or n in ("true", "does"):
@@ -314,7 +386,9 @@ class GDLGame:
         name = bk_relation(const(n)) if flat else const(n)
         return f"{name}({','.join(terms)})" if terms else name
 
-    def _literal_alternatives(self, lit, flat: bool, neg: bool = False) -> list[list[str]]:
+    def _literal_alternatives(
+        self, lit, flat: bool, neg: bool = False
+    ) -> list[list[str]]:
         """A body literal as a disjunction of conjunctions; ``or`` splits, ``not`` pushes inward."""
         n = _name(lit)
         if n == "not":
@@ -374,9 +448,18 @@ class GDLGame:
             facts += [f"true({i},{f})." for f in state]
             if moves is not None and moves[i] is not None:
                 facts += [f"does({i},{r},{a})." for r, a in moves[i].items()]
-        model = self._solve("\n".join([self.dynamic_program, self.static_facts] + facts))
-        infos = [StateInfo({r: [] for r in self.roles}, [], False,
-                           frozenset() if moves is not None else None) for _ in states]
+        model = self._solve(
+            "\n".join([self.dynamic_program, self.static_facts] + facts)
+        )
+        infos = [
+            StateInfo(
+                {r: [] for r in self.roles},
+                [],
+                False,
+                frozenset() if moves is not None else None,
+            )
+            for _ in states
+        ]
         nexts = [set() for _ in states]
         for s in model:
             if s.name not in ("legal", "goal", "terminal", "next") or not s.arguments:
@@ -407,9 +490,14 @@ class GDLGame:
             if s.name in ("init", "base") or not s.arguments:
                 continue
             if s.name == "input" and len(s.arguments) == 2:
-                name, args = flat_atom("input", s.arguments[1], (flat_value(s.arguments[0]),))
+                name, args = flat_atom(
+                    "input", s.arguments[1], (flat_value(s.arguments[0]),)
+                )
             else:
-                name, args = bk_relation(s.name), tuple(flat_value(a) for a in s.arguments)
+                name, args = (
+                    bk_relation(s.name),
+                    tuple(flat_value(a) for a in s.arguments),
+                )
             out.setdefault(name, []).append(args)
         return out
 
@@ -437,11 +525,15 @@ class GDLGame:
                     del current[i]
                     continue
                 moving.append(i)
-                moves.append({r: rng.choice(opts) for r, opts in zip(self.roles, options)})
+                moves.append(
+                    {r: rng.choice(opts) for r, opts in zip(self.roles, options)}
+                )
             if not moving:
                 break
             by_id = dict(zip(ids, infos))
-            for i, move, after in zip(moving, moves, self.query([current[i] for i in moving], moves)):
+            for i, move, after in zip(
+                moving, moves, self.query([current[i] for i in moving], moves)
+            ):
                 by_id[i].next = after.next
                 traces[i].append((current[i], move, by_id[i]))
                 current[i] = after.next

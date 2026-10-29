@@ -34,14 +34,14 @@ The examples use ChEBI version 251; adjust `-v` / paths as needed.
 python -m chebILP prepare_dataset -v 251
 ```
 
-This downloads ChEBI and writes `data/chebi_v251/`: the class graph (`chebi_graph.pkl`) and, under `ChEBI25_3_STAR/`,
+This downloads ChEBI and writes `data/chebi_v251/`: the class graph (`chebi_graph.pkl`) and, under `processed_25_3_STAR/`,
 the molecules (`molecules.pkl`), the selected classes (`labels.txt`) and a train/validation/test split (`splits.csv`).
 Use `-2` to include 2-star entries and `--min_pos_samples` to change the class-size threshold.
 
 ### 2. Build samples and background knowledge
 
 ```bash
-LABELS=data/chebi_v251/ChEBI25_3_STAR/labels.txt
+LABELS=data/chebi_v251/processed_25_3_STAR/labels.txt
 
 python -m chebILP build_samples --labels_file $LABELS -v 251
 python -m chebILP build_bk      --labels_file $LABELS -v 251 --predicate_set atoms
@@ -65,7 +65,7 @@ Predicates are stored in a shared library and reused across classes. Programs th
 ```bash
 python -m chebILP.predicate_generation.generate_auxiliary_rules \
   --labels_file $LABELS --chebi_version 251 \
-  --molecules_path data/chebi_v251/ChEBI25_3_STAR/molecules.pkl \
+  --molecules_path data/chebi_v251/processed_25_3_STAR/molecules.pkl \
   --model claude-opus-5 \
   --predicate_dir data/llm_generated_rules \
   --seed_predicates efg

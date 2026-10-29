@@ -1,4 +1,5 @@
 """Translate chebILP ILP rules to natural language descriptions."""
+
 import os
 import re
 from typing import Optional
@@ -12,8 +13,16 @@ _ELEMENT_NAMES: dict[str, str] = {
 }
 
 _NUM_WORDS = {
-    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
-    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
 }
 
 
@@ -78,7 +87,7 @@ def _format_aux_name(pred: str) -> str:
     Drops the ``aux_`` prefix and any trailing ChEBI-id disambiguation suffix
     (``aux_acyclic_molecule_36685`` -> ``acyclic molecule``) and spaces out the rest.
     """
-    name = pred[len("aux_"):] if pred.startswith("aux_") else pred
+    name = pred[len("aux_") :] if pred.startswith("aux_") else pred
     name = re.sub(r"_\d{4,}$", "", name)
     return name.replace("_", " ").strip()
 
@@ -87,25 +96,25 @@ def _split_literals(body: str) -> list[str]:
     """Split a comma-separated body string into literals, respecting parenthesis depth."""
     literals, current, depth = [], [], 0
     for ch in body:
-        if ch == '(':
+        if ch == "(":
             depth += 1
             current.append(ch)
-        elif ch == ')':
+        elif ch == ")":
             depth -= 1
             current.append(ch)
-        elif ch == ',' and depth == 0:
-            literals.append(''.join(current).strip())
+        elif ch == "," and depth == 0:
+            literals.append("".join(current).strip())
             current = []
         else:
             current.append(ch)
     if current:
-        literals.append(''.join(current).strip())
-    return [l for l in literals if l]
+        literals.append("".join(current).strip())
+    return [lit for lit in literals if lit]
 
 
 def _parse_literal(lit: str) -> tuple[str, list[str]]:
-    pred = lit.split('(')[0].strip()
-    args_str = lit[lit.index('(') + 1: lit.rindex(')')]
+    pred = lit.split("(")[0].strip()
+    args_str = lit[lit.index("(") + 1 : lit.rindex(")")]
     args = [a.strip() for a in _split_literals(args_str)] if args_str.strip() else []
     return pred, args
 
@@ -122,18 +131,18 @@ def _parse_rule(rule: str) -> tuple[Optional[str], Optional[str], list[list[str]
     mol_var = None
     clauses: list[list[str]] = []
 
-    for line in rule.strip().split('\n'):
+    for line in rule.strip().split("\n"):
         line = line.strip()
-        if not line or line.startswith('%') or ':-' not in line:
+        if not line or line.startswith("%") or ":-" not in line:
             continue
-        line = line.rstrip('.')
-        head_str, body_str = line.split(':-', 1)
+        line = line.rstrip(".")
+        head_str, body_str = line.split(":-", 1)
         head_str = head_str.strip()
 
-        if '(' in head_str:
-            clause_head = head_str.split('(')[0].strip()
-            args_str = head_str[head_str.index('(') + 1: head_str.rindex(')')]
-            clause_mol_var = args_str.strip().split(',')[0].strip()
+        if "(" in head_str:
+            clause_head = head_str.split("(")[0].strip()
+            args_str = head_str[head_str.index("(") + 1 : head_str.rindex(")")]
+            clause_mol_var = args_str.strip().split(",")[0].strip()
         else:
             clause_head = head_str
             clause_mol_var = None
@@ -160,7 +169,7 @@ def _atom_sort_key(var: str) -> tuple[str, int]:
     (``C`` before ``C2`` before ``O``). Always returns a ``(str, int)`` tuple, so
     labels with and without a numeric suffix never compare ``str`` against ``int``.
     """
-    m = re.match(r'^([A-Za-z]*)(\d*)$', var)
+    m = re.match(r"^([A-Za-z]*)(\d*)$", var)
     if not m:
         return (var, -1)
     return (m.group(1), int(m.group(2)) if m.group(2) else -1)
@@ -171,11 +180,15 @@ def _collect_atom_vars(literals: list[str], mol_var: str) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
     for lit in literals:
-        if '(' not in lit:
+        if "(" not in lit:
             continue
         _, args = _parse_literal(lit)
         for arg in args:
-            if re.fullmatch(r'[A-Z][A-Za-z0-9]*', arg) and arg != mol_var and arg not in seen:
+            if (
+                re.fullmatch(r"[A-Z][A-Za-z0-9]*", arg)
+                and arg != mol_var
+                and arg not in seen
+            ):
                 seen.add(arg)
                 ordered.append(arg)
     return ordered
@@ -195,18 +208,20 @@ def _sort_clause_literals(literals: list[str], mol_var: str) -> list[str]:
         return literals
 
     def atom_args(lit: str) -> list[str]:
-        if '(' not in lit:
+        if "(" not in lit:
             return []
         _, args = _parse_literal(lit)
-        return [a for a in args if re.fullmatch(r'[A-Z][A-Za-z0-9]*', a) and a != mol_var]
+        return [
+            a for a in args if re.fullmatch(r"[A-Z][A-Za-z0-9]*", a) and a != mol_var
+        ]
 
     has_atom_lits, mol_lits, atom_lits = [], [], []
     for lit in literals:
-        if '(' not in lit:
+        if "(" not in lit:
             atom_lits.append(lit)
             continue
         pred, _ = _parse_literal(lit)
-        if pred == 'has_atom':
+        if pred == "has_atom":
             has_atom_lits.append(lit)
         elif not atom_args(lit):
             mol_lits.append(lit)
@@ -273,7 +288,9 @@ def _sort_clause_literals(literals: list[str], mol_var: str) -> list[str]:
     return result
 
 
-def _make_clause_var_maps(clauses: list[list[str]], mol_var: str) -> list[dict[str, str]]:
+def _make_clause_var_maps(
+    clauses: list[list[str]], mol_var: str
+) -> list[dict[str, str]]:
     """Build per-clause variable maps with a global atom counter across all clauses.
 
     Variables in different clauses are unrelated, so each gets a unique label
@@ -281,7 +298,7 @@ def _make_clause_var_maps(clauses: list[list[str]], mol_var: str) -> list[dict[s
     """
     per_clause_vars = [_collect_atom_vars(lits, mol_var) for lits in clauses]
     all_vars = [v for vs in per_clause_vars for v in vs]
-    use_global = bool(all_vars) and all(re.fullmatch(r'V\d+', v) for v in all_vars)
+    use_global = bool(all_vars) and all(re.fullmatch(r"V\d+", v) for v in all_vars)
 
     maps: list[dict[str, str]] = []
     counter = 1
@@ -297,7 +314,7 @@ def _make_clause_var_maps(clauses: list[list[str]], mol_var: str) -> list[dict[s
 
 def _apply_map(text: str, var_map: dict[str, str]) -> str:
     for old, new in var_map.items():
-        text = re.sub(rf'\b{re.escape(old)}\b', new, text)
+        text = re.sub(rf"\b{re.escape(old)}\b", new, text)
     return text
 
 
@@ -308,7 +325,7 @@ def _literal_to_nl(
     aux_descriptions: Optional[dict[str, str]] = None,
 ) -> Optional[str]:
     """Translate a single predicate to a natural language phrase, or None to skip."""
-    if pred == 'has_atom':
+    if pred == "has_atom":
         return None
 
     if pred in _ELEMENT_NAMES:
@@ -316,70 +333,70 @@ def _literal_to_nl(
         article = _get_a_an(name)
         return f"{args[0]} is {article} {name} atom"
 
-    m = re.fullmatch(r'bSTEREO([A-Z]+)', pred)
+    m = re.fullmatch(r"bSTEREO([A-Z]+)", pred)
     if m:
         return f"{args[0]} has a stereo bond to {args[1]} ({m.group(1)} configuration)"
 
-    if re.fullmatch(r'b[A-Z]+', pred):
+    if re.fullmatch(r"b[A-Z]+", pred):
         bond_type = pred[1:].lower()
         article = _get_a_an(bond_type)
         return f"{args[0]} has {article} {bond_type} bond to {args[1]}"
 
-    if pred == 'has_bond_to':
+    if pred == "has_bond_to":
         return f"{args[0]} has a bond to {args[1]}"
 
-    if pred == 'in_ring':
+    if pred == "in_ring":
         return f"{args[0]} is in a ring"
-    m = re.fullmatch(r'in_ring(\d+)', pred)
+    m = re.fullmatch(r"in_ring(\d+)", pred)
     if m:
         return f"{args[0]} is in a {m.group(1)}-membered ring"
 
-    m = re.fullmatch(r'has_(\d+)_hs', pred)
+    m = re.fullmatch(r"has_(\d+)_hs", pred)
     if m:
         n = int(m.group(1))
         noun = "hydrogen atom" if n == 1 else "hydrogen atoms"
         count = "no" if n == 0 else _num_word(n)
         return f"{args[0]} has {count} {noun}"
 
-    m = re.fullmatch(r'has_at_least_(\d+)_hs', pred)
+    m = re.fullmatch(r"has_at_least_(\d+)_hs", pred)
     if m:
         n = int(m.group(1))
         noun = "hydrogen atom" if n == 1 else "hydrogen atoms"
         return f"{args[0]} has at least {_num_word(n)} {noun}"
 
-    if pred == 'charge0':
+    if pred == "charge0":
         return f"{args[0]} has no formal charge"
-    if pred == 'charge_p':
+    if pred == "charge_p":
         return f"{args[0]} has a positive formal charge"
-    if pred == 'charge_n':
+    if pred == "charge_n":
         return f"{args[0]} has a negative formal charge"
-    m = re.fullmatch(r'charge_m(\d+)', pred)
+    m = re.fullmatch(r"charge_m(\d+)", pred)
     if m:
         return f"{args[0]} has formal charge -{m.group(1)}"
-    m = re.fullmatch(r'charge(\d+)', pred)
+    m = re.fullmatch(r"charge(\d+)", pred)
     if m:
         return f"{args[0]} has formal charge +{m.group(1)}"
 
-    if pred.startswith('cip_code_'):
-        code = pred.replace('cip_code_', '').upper()
+    if pred.startswith("cip_code_"):
+        code = pred.replace("cip_code_", "").upper()
         return f"{args[0]} has CIP code {code}"
 
-    if pred.startswith('steroid_'):
-        num = pred.replace('steroid_', '')
+    if pred.startswith("steroid_"):
+        num = pred.replace("steroid_", "")
         return f"{args[0]} is at steroid position {num}"
 
-    if pred == 'aromatic':
+    if pred == "aromatic":
         return "the molecule is aromatic"
-    if pred == 'aliphatic':
+    if pred == "aliphatic":
         return "the molecule is aliphatic"
-    if pred == 'net_charge_positive':
+    if pred == "net_charge_positive":
         return "the molecule has a positive net charge"
-    if pred == 'net_charge_negative':
+    if pred == "net_charge_negative":
         return "the molecule has a negative net charge"
-    if pred == 'net_charge_neutral':
+    if pred == "net_charge_neutral":
         return "the molecule has no net charge"
 
-    if pred.startswith('aux_'):
+    if pred.startswith("aux_"):
         label = _format_aux_name(pred)
         desc = (aux_descriptions or {}).get(pred)
         detail = f" ({desc})" if desc else ""
@@ -415,7 +432,7 @@ def _clause_to_nl(
         parts.append(f"it has atoms {listed}")
 
     for lit in literals:
-        if '(' not in lit:
+        if "(" not in lit:
             continue
         pred, args = _parse_literal(lit)
         mapped_args = [_apply_map(a, var_map) for a in args]
@@ -428,7 +445,7 @@ def _clause_to_nl(
 
 
 def _get_a_an(word: str) -> str:
-    return 'an' if word[0].lower() in 'aeiou' or word.startswith(('s-', '-f')) else 'a'
+    return "an" if word[0].lower() in "aeiou" or word.startswith(("s-", "-f")) else "a"
 
 
 def translate_rule(
@@ -459,8 +476,8 @@ def translate_rule(
     head_pred, mol_var, clauses = _parse_rule(rule)
 
     chebi_id: Optional[str] = None
-    if head_pred and head_pred.startswith('chebi_'):
-        chebi_id = head_pred.split('_', 1)[1]
+    if head_pred and head_pred.startswith("chebi_"):
+        chebi_id = head_pred.split("_", 1)[1]
 
     chebi_name: Optional[str] = None
     parent_ids: list[str] = []
@@ -482,7 +499,7 @@ def translate_rule(
         header = "A compound satisfies the rule if it"
 
     lines = [header]
-    label = ord('a')
+    label = ord("a")
 
     for pid, pname in zip(parent_ids, parent_names):
         a = _get_a_an(pname)
@@ -495,13 +512,17 @@ def translate_rule(
     if not clauses:
         lines.append(f"({chr(label)}) (no conditions found)")
     elif len(clauses) == 1:
-        lines.append(f"({chr(label)}) {_clause_to_nl(sorted_clauses[0], mol_var, clause_var_maps[0], aux_descriptions)}")
+        lines.append(
+            f"({chr(label)}) {_clause_to_nl(sorted_clauses[0], mol_var, clause_var_maps[0], aux_descriptions)}"
+        )
     else:
         lines.append(f"({chr(label)}) satisfies one of the following conditions:")
-        for i, (clause_lits, var_map) in enumerate(zip(sorted_clauses, clause_var_maps)):
+        for i, (clause_lits, var_map) in enumerate(
+            zip(sorted_clauses, clause_var_maps)
+        ):
             suffix = "" if i == len(clauses) - 1 else " OR"
-            lines.append(f"    - {_clause_to_nl(clause_lits, mol_var, var_map, aux_descriptions)}{suffix}")
+            lines.append(
+                f"    - {_clause_to_nl(clause_lits, mol_var, var_map, aux_descriptions)}{suffix}"
+            )
 
     return "\n".join(lines)
-
-

@@ -1,10 +1,9 @@
 """
-SCOPe protein domains labelled with their fold, laid out like a ChEBI dataset.
+SCOPe protein domains labelled with their fold.
 
-Each domain is a leaf ``d<sid>`` with an ``is_a`` edge to its fold ``scop_<cl>_<cf>``, which
-sits under its class ``scop_<cl>`` and the root ``scop``. Fold and class nodes carry ``name``
-(the ``dir.des`` description) and ``definition`` (the ``dir.com`` comments, e.g. "core: 6
-helices; folded leaf, partly opened").
+The hierarchy layers are domain ``d<sid>`` → fold ``scop_<cl>_<cf>`` → class ``scop_<cl>`` → root ``scop``.
+Fold and class nodes carry ``name`` (the ``dir.des`` description) and
+``definition`` (the ``dir.com`` comments, e.g. "core: 6 helices; folded leaf, partly opened").
 
 Only human-curated domains of the true classes a–g are kept. SCOPe has no flag for that,
 so a domain is dropped when its family or protein node is an "automated matches" node, or
@@ -46,8 +45,10 @@ AUTOMATED_COMMENT = "automated match to"
 
 
 def raw_files(version: str, subset: int) -> dict[str, str]:
-    files = {f"dir.{kind}.scope.{version}-stable.txt": f"{SCOPE_URL}/parse/dir.{kind}.scope.{version}-stable.txt"
-             for kind in ("des", "cla", "com")}
+    files = {
+        f"dir.{kind}.scope.{version}-stable.txt": f"{SCOPE_URL}/parse/dir.{kind}.scope.{version}-stable.txt"
+        for kind in ("des", "cla", "com")
+    }
     name = f"pdbstyle-sel-gs-bib-{subset}-{version}.tgz"
     files[name] = f"{SCOPE_URL}/pdbstyle/{name}"
     return files
@@ -96,7 +97,9 @@ def parse_cla(path: str) -> pd.DataFrame:
                 continue
             sid, pdb, region, sccs, px, ancestors = line.rstrip("\n").split("\t")
             record = {"sid": sid, "pdb": pdb, "region": region, "sccs": sccs}
-            record.update({k: int(v) for k, v in (kv.split("=") for kv in ancestors.split(","))})
+            record.update(
+                {k: int(v) for k, v in (kv.split("=") for kv in ancestors.split(","))}
+            )
             records.append(record)
     return pd.DataFrame(records)
 
@@ -106,10 +109,17 @@ def curated_domains(cla: pd.DataFrame, des: dict, com: dict) -> pd.DataFrame:
     counts = {"all": len(cla)}
     cla = cla[cla["sccs"].str[0].isin(list(CURATED_CLASSES))]
     counts["classes a-g"] = len(cla)
-    automated_node = lambda sunid: des[sunid][2] == AUTOMATED_NODE
+
+    def automated_node(sunid):
+        return des[sunid][2] == AUTOMATED_NODE
+
     cla = cla[~cla["fa"].map(automated_node) & ~cla["dm"].map(automated_node)]
     counts["no automated family/protein"] = len(cla)
-    cla = cla[~cla["px"].map(lambda px: any(c.startswith(AUTOMATED_COMMENT) for c in com.get(px, [])))]
+    cla = cla[
+        ~cla["px"].map(
+            lambda px: any(c.startswith(AUTOMATED_COMMENT) for c in com.get(px, []))
+        )
+    ]
     counts["no automated match comment"] = len(cla)
     print("Curation filter:", counts)
     return cla
@@ -130,13 +140,21 @@ class ScopeDataset:
     :func:`~chebILP.protein_processing.dssp.domain_structure`) and ``chebi_graph`` the fold graph.
     """
 
-    def __init__(self, scope_version: str = "2.08", base_dir: str = "data", min_pos_samples: int = 25,
-                 subset: int = 40, workers: int = 8):
+    def __init__(
+        self,
+        scope_version: str = "2.08",
+        base_dir: str = "data",
+        min_pos_samples: int = 25,
+        subset: int = 40,
+        workers: int = 8,
+    ):
         self.scope_version = scope_version
         self.subset = subset
         self.min_pos_samples = min_pos_samples
         self.workers = workers
-        self.data_dir = os.path.join(base_dir, f"scope_{scope_version.replace('.', '')}")
+        self.data_dir = os.path.join(
+            base_dir, f"scope_{scope_version.replace('.', '')}"
+        )
         self.raw_dir = os.path.join(self.data_dir, "raw")
         self.processed_dir = os.path.join(self.data_dir, f"Scope{min_pos_samples}")
         self.graph_path = os.path.join(self.data_dir, "scope_graph.pkl")
@@ -169,7 +187,9 @@ class ScopeDataset:
         paths = {}
         if os.path.isdir(out_dir):
             for root, _, files in os.walk(out_dir):
-                paths.update({f[:-4]: os.path.join(root, f) for f in files if f[:-4] in sids})
+                paths.update(
+                    {f[:-4]: os.path.join(root, f) for f in files if f[:-4] in sids}
+                )
             return paths
         os.makedirs(out_dir)
         with tarfile.open(tgz) as tar:
@@ -187,7 +207,9 @@ class ScopeDataset:
         v = self.scope_version
         des = parse_des(self._raw(f"dir.des.scope.{v}-stable.txt"))
         com = parse_com(self._raw(f"dir.com.scope.{v}-stable.txt"))
-        cla = curated_domains(parse_cla(self._raw(f"dir.cla.scope.{v}-stable.txt")), des, com)
+        cla = curated_domains(
+            parse_cla(self._raw(f"dir.cla.scope.{v}-stable.txt")), des, com
+        )
 
         paths = self._extract(set(cla["sid"]))
         cla = cla[cla["sid"].isin(paths)]
@@ -195,20 +217,35 @@ class ScopeDataset:
 
         ordered = list(cla["sid"])
         with ProcessPoolExecutor(self.workers) as pool:
-            structures = list(tqdm.tqdm(pool.map(_structure, [paths[s] for s in ordered], chunksize=16),
-                                        total=len(ordered), desc="DSSP"))
+            structures = list(
+                tqdm.tqdm(
+                    pool.map(_structure, [paths[s] for s in ordered], chunksize=16),
+                    total=len(ordered),
+                    desc="DSSP",
+                )
+            )
         records, dropped = [], Counter()
         for row, structure in zip(cla.itertuples(index=False), structures):
             if structure is None or len(structure["sses"]) < 2:
                 dropped["fewer than 2 SSEs"] += 1
                 continue
             did = domain_id(row.sid)
-            records.append({
-                "id": did, "chebi_id": did, "mol": structure, "sid": row.sid, "pdb": row.pdb,
-                "region": row.region, "sccs": row.sccs, "fold": node_id(row.sccs),
-                "superfamily": ".".join(row.sccs.split(".")[:3]), "family": row.sccs,
-                "protein": des[row.dm][2], "species": des[row.sp][2],
-            })
+            records.append(
+                {
+                    "id": did,
+                    "chebi_id": did,
+                    "mol": structure,
+                    "sid": row.sid,
+                    "pdb": row.pdb,
+                    "region": row.region,
+                    "sccs": row.sccs,
+                    "fold": node_id(row.sccs),
+                    "superfamily": ".".join(row.sccs.split(".")[:3]),
+                    "family": row.sccs,
+                    "protein": des[row.dm][2],
+                    "species": des[row.sp][2],
+                }
+            )
         domains = pd.DataFrame(records).set_index("id")
         domains.index.name = None
         assert domains.index.is_unique, "domain ids collide after sanitising sids"
@@ -221,7 +258,11 @@ class ScopeDataset:
         return domains, graph
 
     def _build_graph(self, domains: pd.DataFrame, des: dict, com: dict) -> nx.DiGraph:
-        by_sccs = {(level, sccs): sunid for sunid, (level, sccs, _) in des.items() if level in ("cl", "cf")}
+        by_sccs = {
+            (level, sccs): sunid
+            for sunid, (level, sccs, _) in des.items()
+            if level in ("cl", "cf")
+        }
         graph = nx.DiGraph()
         graph.add_node(SCOP_ROOT, name="protein domain", definition=None)
 
@@ -230,8 +271,12 @@ class ScopeDataset:
             if node not in graph:
                 sunid = by_sccs[(level, sccs)]
                 comments = com.get(sunid, [])
-                graph.add_node(node, name=des[sunid][2], sccs=sccs,
-                               definition="; ".join(comments) if comments else None)
+                graph.add_node(
+                    node,
+                    name=des[sunid][2],
+                    sccs=sccs,
+                    definition="; ".join(comments) if comments else None,
+                )
                 graph.add_edge(node, parent, relation="is_a")
             return node
 
@@ -247,7 +292,9 @@ class ScopeDataset:
 
     def select_labels(self, output_path: Optional[str] = None) -> list[str]:
         """Folds and classes with at least ``min_pos_samples`` domains (the synthetic root excluded)."""
-        labeled_df, labels = build_labeled_dataset(self.chebi_graph, self.molecules, min_molecules=self.min_pos_samples)
+        labeled_df, labels = build_labeled_dataset(
+            self.chebi_graph, self.molecules, min_molecules=self.min_pos_samples
+        )
         labels = [lbl for lbl in labels if lbl.startswith("scop_")]
         self._labeled_df = labeled_df[["chebi_id", "mol"] + labels]
         if output_path:
@@ -260,8 +307,14 @@ class ScopeDataset:
             f.write("\n".join(labels) + "\n")
         print(f"Saved {len(labels)} labels to {output_path}")
 
-    def create_splits(self, labels: list[str], val_ratio=0.2, test_ratio=0.2, seed=42,
-                      output_path: Optional[str] = None) -> pd.DataFrame:
+    def create_splits(
+        self,
+        labels: list[str],
+        val_ratio=0.2,
+        test_ratio=0.2,
+        seed=42,
+        output_path: Optional[str] = None,
+    ) -> pd.DataFrame:
         """Stratified split over superfamilies, so a test domain has no homologue in train.
 
         Domains of one superfamily share an evolutionary origin; a fold is the structure
@@ -274,22 +327,42 @@ class ScopeDataset:
         members = self.molecules.groupby("superfamily").groups
         groups = sorted(members)
         group_df = pd.DataFrame(
-            [{"chebi_id": str(i), "mol": None, **labeled.loc[list(members[sf]), labels].any().to_dict()}
-             for i, sf in enumerate(groups)]
+            [
+                {
+                    "chebi_id": str(i),
+                    "mol": None,
+                    **labeled.loc[list(members[sf]), labels].any().to_dict(),
+                }
+                for i, sf in enumerate(groups)
+            ]
         )
-        raw = create_multilabel_splits(group_df, label_start_col=2, train_ratio=round(1 - val_ratio - test_ratio, 10),
-                                       val_ratio=val_ratio, test_ratio=test_ratio, seed=seed)
-        records = [(did, split) for split, df in raw.items()
-                   for gid in df["chebi_id"] for did in members[groups[int(gid)]]]
+        raw = create_multilabel_splits(
+            group_df,
+            label_start_col=2,
+            train_ratio=round(1 - val_ratio - test_ratio, 10),
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+        )
+        records = [
+            (did, split)
+            for split, df in raw.items()
+            for gid in df["chebi_id"]
+            for did in members[groups[int(gid)]]
+        ]
         splits_df = pd.DataFrame(records, columns=["id", "split"])
         if output_path:
             splits_df.to_csv(output_path, index=False)
             n = splits_df["split"].value_counts()
-            print(f"Saved splits to {output_path} ({n.get('train', 0)} train / "
-                  f"{n.get('validation', 0)} val / {n.get('test', 0)} test domains, {len(groups)} superfamilies)")
+            print(
+                f"Saved splits to {output_path} ({n.get('train', 0)} train / "
+                f"{n.get('validation', 0)} val / {n.get('test', 0)} test domains, {len(groups)} superfamilies)"
+            )
         return splits_df
 
-    def labels_in_every_split(self, labels: list[str], splits: pd.DataFrame, min_per_split: int = 3) -> list[str]:
+    def labels_in_every_split(
+        self, labels: list[str], splits: pd.DataFrame, min_per_split: int = 3
+    ) -> list[str]:
         """The labels with at least ``min_per_split`` positives in each split.
 
         Grouping by superfamily puts a fold with one or two superfamilies wholly into one or two
@@ -299,34 +372,64 @@ class ScopeDataset:
         labeled = self._labeled_df.set_index("chebi_id")
         kept, dropped = [], []
         for label in labels:
-            n = Counter(split_of[d] for d in labeled.index[labeled[label]] if d in split_of)
-            (kept if all(n[s] >= min_per_split for s in ("train", "validation", "test")) else dropped).append(label)
+            n = Counter(
+                split_of[d] for d in labeled.index[labeled[label]] if d in split_of
+            )
+            (
+                kept
+                if all(n[s] >= min_per_split for s in ("train", "validation", "test"))
+                else dropped
+            ).append(label)
         if dropped:
-            print(f"Dropped {len(dropped)} labels with fewer than {min_per_split} positives in some split: {', '.join(dropped)}")
+            print(
+                f"Dropped {len(dropped)} labels with fewer than {min_per_split} positives in some split: {', '.join(dropped)}"
+            )
         return kept
 
     def load_splits_from_csv(self) -> pd.DataFrame:
         splits_path = os.path.join(self.processed_dir, "splits.csv")
         if not os.path.exists(splits_path):
-            raise FileNotFoundError(f"Splits file not found: {splits_path}. "
-                                    f"Run `python -m chebILP.protein_processing.scope_data` to create it.")
+            raise FileNotFoundError(
+                f"Splits file not found: {splits_path}. "
+                f"Run `python -m chebILP.protein_processing.scope_data` to create it."
+            )
         return pd.read_csv(splits_path, dtype={"id": str})
 
     @classmethod
-    def prepare(cls, scope_version: str = "2.08", base_dir: str = "data", min_pos_samples: int = 25,
-                val_ratio: float = 0.2, test_ratio: float = 0.2, seed: int = 42, min_per_split: int = 3,
-                workers: int = 8) -> "ScopeDataset":
-        dataset = cls(scope_version=scope_version, base_dir=base_dir, min_pos_samples=min_pos_samples, workers=workers)
+    def prepare(
+        cls,
+        scope_version: str = "2.08",
+        base_dir: str = "data",
+        min_pos_samples: int = 25,
+        val_ratio: float = 0.2,
+        test_ratio: float = 0.2,
+        seed: int = 42,
+        min_per_split: int = 3,
+        workers: int = 8,
+    ) -> "ScopeDataset":
+        dataset = cls(
+            scope_version=scope_version,
+            base_dir=base_dir,
+            min_pos_samples=min_pos_samples,
+            workers=workers,
+        )
         labels = dataset.select_labels()
-        splits = dataset.create_splits(labels, val_ratio=val_ratio, test_ratio=test_ratio, seed=seed,
-                                       output_path=os.path.join(dataset.processed_dir, "splits.csv"))
+        splits = dataset.create_splits(
+            labels,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+            output_path=os.path.join(dataset.processed_dir, "splits.csv"),
+        )
         labels = dataset.labels_in_every_split(labels, splits, min_per_split)
         dataset._write_labels(labels, os.path.join(dataset.processed_dir, "labels.txt"))
         return dataset
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--scope_version", default="2.08")
     parser.add_argument("--base_dir", default="data")
     parser.add_argument("--min_pos_samples", type=int, default=25)
@@ -336,8 +439,16 @@ def main():
     parser.add_argument("--min_per_split", type=int, default=3)
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
-    ScopeDataset.prepare(args.scope_version, args.base_dir, args.min_pos_samples, args.val_ratio, args.test_ratio,
-                         args.seed, args.min_per_split, args.workers)
+    ScopeDataset.prepare(
+        args.scope_version,
+        args.base_dir,
+        args.min_pos_samples,
+        args.val_ratio,
+        args.test_ratio,
+        args.seed,
+        args.min_per_split,
+        args.workers,
+    )
 
 
 if __name__ == "__main__":

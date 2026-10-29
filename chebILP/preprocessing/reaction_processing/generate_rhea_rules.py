@@ -15,11 +15,22 @@ import os
 import pandas as pd
 from dotenv import load_dotenv
 
-from chebILP.predicate_generation.auxiliary_generation import OUTPUT_CONTRACT, format_candidates
-from chebILP.predicate_generation.generate_auxiliary_rules import RuleGenerator, _load_train_samples
-from chebILP.reaction_processing.reaction_to_fol import build_background_reaction, build_computed_facts_reaction
-from chebILP.reaction_processing.rhea_data import RheaDataset
-from chebILP.reaction_processing.rhea_problem_builder import DEFAULT_PROBLEM_DIR
+from chebILP.predicate_generation.auxiliary_generation import (
+    OUTPUT_CONTRACT,
+    format_candidates,
+)
+from chebILP.predicate_generation.generate_auxiliary_rules import (
+    RuleGenerator,
+    _load_train_samples,
+)
+from chebILP.preprocessing.reaction_processing.reaction_to_fol import (
+    build_background_reaction,
+    build_computed_facts_reaction,
+)
+from chebILP.preprocessing.reaction_processing.rhea_data import RheaDataset
+from chebILP.preprocessing.reaction_processing.rhea_problem_builder import (
+    DEFAULT_PROBLEM_DIR,
+)
 from chebILP.utils import add_class_arguments, resolve_classes
 
 DEFAULT_LIBRARY_DIR = os.path.join("data", "rhea_v142", "llm_rules")
@@ -144,14 +155,16 @@ class RheaRuleGenerator(RuleGenerator):
         return _SYSTEM_PROMPT
 
     def class_context(self, chebi_id) -> dict:
-        pos_rows, neg_rows = _load_train_samples(chebi_id, self.problem_dir, self.molecules)
+        pos_rows, neg_rows = _load_train_samples(
+            chebi_id, self.problem_dir, self.molecules
+        )
         val_rows = pd.concat([pos_rows, neg_rows])
         val_facts, _ = build_background_reaction(val_rows)
         if self.computed_facts:
             val_facts += build_computed_facts_reaction(val_rows)
         return {
-            "pos_smiles": list(pos_rows["smiles"][:self.prompt_samples]),
-            "neg_smiles": list(neg_rows["smiles"][:self.prompt_samples]),
+            "pos_smiles": list(pos_rows["smiles"][: self.prompt_samples]),
+            "neg_smiles": list(neg_rows["smiles"][: self.prompt_samples]),
             "smiles_by_id": dict(val_rows["smiles"]),
             "val_facts": val_facts,
             "val_ids": [str(i) for i in val_rows.index],
@@ -160,16 +173,26 @@ class RheaRuleGenerator(RuleGenerator):
         }
 
     def build_user_prompt(self, chebi_id, info, candidates, ctx) -> str:
-        parents = "".join(f"  - {ec_label(p['id'])}: {p['name']}\n" for p in info["parents"])
-        siblings = "".join(f"  - {ec_label(s['id'])}: {s['name']}\n" for s in info["siblings"])
-        examples = ["Positive example reactions (reaction SMILES, reactants>>products):"]
+        parents = "".join(
+            f"  - {ec_label(p['id'])}: {p['name']}\n" for p in info["parents"]
+        )
+        siblings = "".join(
+            f"  - {ec_label(s['id'])}: {s['name']}\n" for s in info["siblings"]
+        )
+        examples = [
+            "Positive example reactions (reaction SMILES, reactants>>products):"
+        ]
         examples += [f"  + {s}" for s in ctx["pos_smiles"]]
         examples += ["Negative reactions (from the sibling classes):"]
         examples += [f"  - {s}" for s in ctx["neg_smiles"]]
-        computed = f"\nExtra facts available in this mode:\n{_COMPUTED_PREDICATES}\n" if self.computed_facts else ""
+        computed = (
+            f"\nExtra facts available in this mode:\n{_COMPUTED_PREDICATES}\n"
+            if self.computed_facts
+            else ""
+        )
         return f"""\
-Target class: {ec_label(chebi_id)} {info['name']} (target predicate {chebi_id})
-Definition: {info['definition']}
+Target class: {ec_label(chebi_id)} {info["name"]} (target predicate {chebi_id})
+Definition: {info["definition"]}
 Superclass:
 {parents}Sibling classes (the negatives come from these):
 {siblings}
@@ -192,27 +215,48 @@ wherever they fit; only write NEW rules for properties they do not already cover
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     add_class_arguments(parser)
     parser.add_argument("--rhea_version", type=int, default=142)
     parser.add_argument("--min_pos_samples", type=int, default=25)
     parser.add_argument("--problem_dir", default=DEFAULT_PROBLEM_DIR)
-    parser.add_argument("--predicate_dir", default=DEFAULT_LIBRARY_DIR, help="Auxiliary-rule library directory.")
-    parser.add_argument("--model", default="claude-opus-5-5",
-                        help="Bare Claude id (via the `claude` CLI) or 'provider/name' (OpenAI-compatible).")
+    parser.add_argument(
+        "--predicate_dir",
+        default=DEFAULT_LIBRARY_DIR,
+        help="Auxiliary-rule library directory.",
+    )
+    parser.add_argument(
+        "--model",
+        default="claude-opus-5-5",
+        help="Bare Claude id (via the `claude` CLI) or 'provider/name' (OpenAI-compatible).",
+    )
     parser.add_argument("--n_predicates", type=int, default=4)
     parser.add_argument("--top_k", type=int, default=16)
-    parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], default=None)
-    parser.add_argument("--no_computed_facts", dest="computed_facts", action="store_false", default=True)
+    parser.add_argument(
+        "--effort", choices=["low", "medium", "high", "xhigh", "max"], default=None
+    )
+    parser.add_argument(
+        "--no_computed_facts", dest="computed_facts", action="store_false", default=True
+    )
     parser.add_argument("--prompt_samples", type=int, default=6)
     args = parser.parse_args()
 
     load_dotenv()
-    dataset = RheaDataset(rhea_version=args.rhea_version, min_pos_samples=args.min_pos_samples)
+    dataset = RheaDataset(
+        rhea_version=args.rhea_version, min_pos_samples=args.min_pos_samples
+    )
     RheaRuleGenerator(
-        args.predicate_dir, args.model, args.n_predicates, args.top_k,
-        molecules=dataset.molecules, problem_dir=args.problem_dir, computed_facts=args.computed_facts,
-        prompt_samples=args.prompt_samples, effort=args.effort,
+        args.predicate_dir,
+        args.model,
+        args.n_predicates,
+        args.top_k,
+        molecules=dataset.molecules,
+        problem_dir=args.problem_dir,
+        computed_facts=args.computed_facts,
+        prompt_samples=args.prompt_samples,
+        effort=args.effort,
     ).run(dataset.chebi_graph, resolve_classes(args))
 
 

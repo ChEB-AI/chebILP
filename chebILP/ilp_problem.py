@@ -1,8 +1,7 @@
-
-
 from abc import ABC
 
 import os
+
 
 def write(path, lines):
     with open(path, "w+", newline="\n") as f:
@@ -31,10 +30,17 @@ def build_aleph_background(head_name, body_predicates, train_bk_lines, head_arit
     Deliberately carries no ``:- set(...)`` or ``:- dynamic``
     directives -- those are injected at learn time (chebILP.aleph_runner)."""
     body = sorted(body_predicates)
-    lines = [":- use_module(library(lists)).", "", _aleph_mode_str(head_name, head_arity, True)]
+    lines = [
+        ":- use_module(library(lists)).",
+        "",
+        _aleph_mode_str(head_name, head_arity, True),
+    ]
     lines += [_aleph_mode_str(name, arity, False) for name, arity in body]
     lines.append("")
-    lines += [f":- determination({head_name}/{head_arity}, {name}/{arity})." for name, arity in body]
+    lines += [
+        f":- determination({head_name}/{head_arity}, {name}/{arity})."
+        for name, arity in body
+    ]
     lines += ["", "%% ===== background knowledge ====="]
     return "\n".join(lines) + "\n" + "\n".join(train_bk_lines) + "\n"
 
@@ -44,7 +50,13 @@ class ILPProblem(ABC):
     Abstract base class for ILP problems.
     """
 
-    def __init__(self, head_predicate: tuple[str, int], pos_samples: list[tuple|str], neg_samples: list[tuple|str], bk_facts: dict[str, list[tuple|str]]):
+    def __init__(
+        self,
+        head_predicate: tuple[str, int],
+        pos_samples: list[tuple | str],
+        neg_samples: list[tuple | str],
+        bk_facts: dict[str, list[tuple | str]],
+    ):
         """
         Initialize the ILP problem.
 
@@ -65,12 +77,19 @@ class ILPProblem(ABC):
             if len(facts) == 0:
                 continue
             arity = len(facts[0]) if isinstance(facts[0], tuple) else 1
-            assert all(arity == len(fact) if isinstance(fact, tuple) else arity == 1 for fact in facts), f"All facts for predicate {pred} must have the same arity."
+            assert all(
+                arity == len(fact) if isinstance(fact, tuple) else arity == 1
+                for fact in facts
+            ), f"All facts for predicate {pred} must have the same arity."
             preds.append((pred, arity))
         return preds
 
     def _bk_lines(self):
-        return [f"{_atom(pred, fact)}." for pred, facts in self.bk_facts.items() for fact in facts]
+        return [
+            f"{_atom(pred, fact)}."
+            for pred, facts in self.bk_facts.items()
+            for fact in facts
+        ]
 
     def write_popper(self, folder: str, exs_folder: str | None = None):
         """
@@ -83,8 +102,12 @@ class ILPProblem(ABC):
             exs_folder: Where exs.pl goes, if not ``folder``.
         """
         head, arity = self.head_predicate
-        bias_lines = ["%% max_vars(TODO).", "%% max_body(TODO).", "",
-                      f"head_pred({head}, {arity})."]
+        bias_lines = [
+            "%% max_vars(TODO).",
+            "%% max_body(TODO).",
+            "",
+            f"head_pred({head}, {arity}).",
+        ]
         bias_lines += [f"body_pred({pred}, {a})." for pred, a in self.body_predicates()]
 
         examples = [f"pos({_atom(head, s)})." for s in self.pos_samples]
@@ -109,4 +132,8 @@ class ILPProblem(ABC):
         write(path + ".f", [f"{_atom(head, s)}." for s in self.pos_samples])
         write(path + ".n", [f"{_atom(head, s)}." for s in self.neg_samples])
         with open(path + ".b", "w+", newline="\n") as f:
-            f.write(build_aleph_background(head, self.body_predicates(), self._bk_lines(), head_arity=arity))
+            f.write(
+                build_aleph_background(
+                    head, self.body_predicates(), self._bk_lines(), head_arity=arity
+                )
+            )

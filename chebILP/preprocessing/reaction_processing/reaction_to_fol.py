@@ -24,14 +24,20 @@ def participant_rows(reactions: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             for chebi_id, mol in row[side]:
                 k += 1
                 mid = f"m{rid[1:]}_{k}"
-                records.append({"id": mid, "mol": mol, "chebi": chebi_id, "reaction": rid})
+                records.append(
+                    {"id": mid, "mol": mol, "chebi": chebi_id, "reaction": rid}
+                )
                 links.append(f"{link}({rid},{mid}).")
-    frame = pd.DataFrame(records, columns=["id", "mol", "chebi", "reaction"]).set_index("id")
+    frame = pd.DataFrame(records, columns=["id", "mol", "chebi", "reaction"]).set_index(
+        "id"
+    )
     frame.index.name = None
     return frame, links
 
 
-def build_background_reaction(reactions: pd.DataFrame, **kwargs) -> tuple[list[str], list[tuple[str, int]]]:
+def build_background_reaction(
+    reactions: pd.DataFrame, **kwargs
+) -> tuple[list[str], list[tuple[str, int]]]:
     """BK facts and body predicates for ``reactions``; ``kwargs`` go to ``build_background_chemlog``."""
     participants, links = participant_rows(reactions)
     lines, predicates = build_background_chemlog(participants, **kwargs)

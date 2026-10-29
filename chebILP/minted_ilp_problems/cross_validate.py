@@ -7,6 +7,7 @@ per-fold scores and the pooled validation confusion matrix go to ``<results_dir>
 Usage (from repo root):
     wsl -e bash -lc '.wslvenv/bin/python -m chebILP.minted_ilp_problems.cross_validate --tool popper'
 """
+
 import argparse
 import json
 import os
@@ -22,40 +23,92 @@ from chebILP.minted_ilp_problems.generate_minted_predicates import augment_probl
 from popper.util import MAX_BODY, MAX_VARS
 
 
-def split_folds(problem: ILPProblem, k: int, fold_seed: int) -> list[tuple[ILPProblem, ILPProblem]]:
+def split_folds(
+    problem: ILPProblem, k: int, fold_seed: int
+) -> list[tuple[ILPProblem, ILPProblem]]:
     """(train, validation) per fold. Both keep the full BK."""
-    first = lambda s: s[0] if isinstance(s, tuple) else s
-    entities = sorted({first(s) for s in problem.pos_samples + problem.neg_samples}, key=str)
+
+    def first(s):
+        return s[0] if isinstance(s, tuple) else s
+
+    entities = sorted(
+        {first(s) for s in problem.pos_samples + problem.neg_samples}, key=str
+    )
     random.Random(fold_seed).shuffle(entities)
     fold_of = {e: i % k for i, e in enumerate(entities)}
     folds = []
     for i in range(k):
-        held_out = lambda s: fold_of[first(s)] == i
-        folds.append(tuple(
-            ILPProblem(problem.head_predicate,
-                       [s for s in problem.pos_samples if held_out(s) == is_val],
-                       [s for s in problem.neg_samples if held_out(s) == is_val],
-                       problem.bk_facts)
-            for is_val in (False, True)))
+
+        def held_out(s, i=i):
+            return fold_of[first(s)] == i
+
+        folds.append(
+            tuple(
+                ILPProblem(
+                    problem.head_predicate,
+                    [s for s in problem.pos_samples if held_out(s) == is_val],
+                    [s for s in problem.neg_samples if held_out(s) == is_val],
+                    problem.bk_facts,
+                )
+                for is_val in (False, True)
+            )
+        )
     return folds
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tool", choices=["popper", "aleph"], default="popper", help="ILP system to use (default: popper)")
-    ap.add_argument("--seed", type=int, default=20260907, help="Seed for problem generation")
-    ap.add_argument("--k_folds", type=int, default=5, help="Number of folds for cross-validation")
+    ap.add_argument(
+        "--tool",
+        choices=["popper", "aleph"],
+        default="popper",
+        help="ILP system to use (default: popper)",
+    )
+    ap.add_argument(
+        "--seed", type=int, default=20260907, help="Seed for problem generation"
+    )
+    ap.add_argument(
+        "--k_folds", type=int, default=5, help="Number of folds for cross-validation"
+    )
     ap.add_argument("--fold_seed", type=int, default=0, help="Seed for fold assignment")
-    ap.add_argument("--timeout", type=int, default=120, help="Per-problem timeout for ILP system (seconds, default: 120)")
-    ap.add_argument("--nuwls", action=argparse.BooleanOptionalAction, default=True, help="Use NUWLS for Popper (default: True)")
-    ap.add_argument("--results_dir", default=None, help="Directory to store results (default: data/results/minted_cv/<timestamp>)")
-    ap.add_argument("--problem_type", default=None, help="Only run problems whose type starts with this prefix (default: all)")
-    ap.add_argument("--problems", nargs="+", default=None, help="Only run these problems (default: all)")
-    ap.add_argument("--library_root", default=None,
-                    help="Add the auxiliary rules selected in this rule-library root as background (default: none)")
+    ap.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        help="Per-problem timeout for ILP system (seconds, default: 120)",
+    )
+    ap.add_argument(
+        "--nuwls",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use NUWLS for Popper (default: True)",
+    )
+    ap.add_argument(
+        "--results_dir",
+        default=None,
+        help="Directory to store results (default: data/results/minted_cv/<timestamp>)",
+    )
+    ap.add_argument(
+        "--problem_type",
+        default=None,
+        help="Only run problems whose type starts with this prefix (default: all)",
+    )
+    ap.add_argument(
+        "--problems",
+        nargs="+",
+        default=None,
+        help="Only run these problems (default: all)",
+    )
+    ap.add_argument(
+        "--library_root",
+        default=None,
+        help="Add the auxiliary rules selected in this rule-library root as background (default: none)",
+    )
     args = ap.parse_args()
 
-    results_dir = args.results_dir or os.path.join("data", "results", "minted_cv", time.strftime("%Y%m%d_%H%M%S"))
+    results_dir = args.results_dir or os.path.join(
+        "data", "results", "minted_cv", time.strftime("%Y%m%d_%H%M%S")
+    )
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, "config.json"), "w") as f:
         json.dump(vars(args), f, indent=2)
@@ -76,47 +129,75 @@ def main():
         head, arity = problem.head_predicate
         fold_results = []
         pooled = {"TP": 0, "FP": 0, "TN": 0, "FN": 0}
-        for i, (train, val) in enumerate(split_folds(problem, args.k_folds, args.fold_seed)):
+        for i, (train, val) in enumerate(
+            split_folds(problem, args.k_folds, args.fold_seed)
+        ):
             fold_dir = os.path.join(results_dir, name, f"fold{i}")
-            train_dir, val_dir = os.path.join(fold_dir, "train"), os.path.join(fold_dir, "validation")
+            train_dir, val_dir = (
+                os.path.join(fold_dir, "train"),
+                os.path.join(fold_dir, "validation"),
+            )
             train.write_popper(train_dir)
             val.write_popper(val_dir)
             bias_path = os.path.join(train_dir, "bias.pl")
             with open(bias_path) as f:
                 bias = f.read()
-            bias = bias.replace(f"%% max_vars(TODO).", f"max_vars({max_vars}).")
-            bias = bias.replace(f"%% max_body(TODO).", f"max_body({max_body}).")
+            bias = bias.replace("%% max_vars(TODO).", f"max_vars({max_vars}).")
+            bias = bias.replace("%% max_body(TODO).", f"max_body({max_body}).")
             with open(bias_path, "w") as f:
                 f.write(bias)
 
-            print(f"[{name}] fold {i}: {len(train.pos_samples)}+/{len(train.neg_samples)}- train, "
-                  f"{len(val.pos_samples)}+/{len(val.neg_samples)}- validation")
+            print(
+                f"[{name}] fold {i}: {len(train.pos_samples)}+/{len(train.neg_samples)}- train, "
+                f"{len(val.pos_samples)}+/{len(val.neg_samples)}- validation"
+            )
             start = time.perf_counter()
             if args.tool == "aleph":
                 train.write_aleph(train_dir)
-                out = run_ilp_training_aleph(None, os.path.join(train_dir, head), bias_path, timeout=args.timeout,
-                                             max_body=max_body, log_dir=fold_dir, head_name=head,
-                                             head_arity=arity, run_stem_name=head)
+                out = run_ilp_training_aleph(
+                    None,
+                    os.path.join(train_dir, head),
+                    bias_path,
+                    timeout=args.timeout,
+                    max_body=max_body,
+                    log_dir=fold_dir,
+                    head_name=head,
+                    head_arity=arity,
+                    run_stem_name=head,
+                )
             else:
-                out = run_ilp_training_subprocess(os.path.join(train_dir, "exs.pl"), os.path.join(train_dir, "bk.pl"),
-                                                  bias_path, settings, log_dir=fold_dir)
+                out = run_ilp_training_subprocess(
+                    os.path.join(train_dir, "exs.pl"),
+                    os.path.join(train_dir, "bk.pl"),
+                    bias_path,
+                    settings,
+                    log_dir=fold_dir,
+                )
             elapsed = time.perf_counter() - start
 
             val_cm = None
             if out["prog_str"]:
-                val_cm = run_ilp_validation_clingo(head, out["prog_str"], os.path.join(val_dir, "exs.pl"),
-                                                   os.path.join(val_dir, "bk.pl"))
+                val_cm = run_ilp_validation_clingo(
+                    head,
+                    out["prog_str"],
+                    os.path.join(val_dir, "exs.pl"),
+                    os.path.join(val_dir, "bk.pl"),
+                )
                 for key in pooled:
                     pooled[key] += val_cm[key]
             score = out["score"]
-            fold_results.append({
-                "fold": i,
-                "program": out["prog_str"],
-                "train_score": dict(zip(("TP", "FN", "TN", "FP"), score)) if score else None,
-                "validation_score": val_cm,
-                "num_programs": out.get("num_programs"),
-                "time_taken": elapsed,
-            })
+            fold_results.append(
+                {
+                    "fold": i,
+                    "program": out["prog_str"],
+                    "train_score": dict(zip(("TP", "FN", "TN", "FP"), score))
+                    if score
+                    else None,
+                    "validation_score": val_cm,
+                    "num_programs": out.get("num_programs"),
+                    "time_taken": elapsed,
+                }
+            )
             print(f"    program:\n    {out['prog_str']}\n    validation: {val_cm}")
         results[name] = {"folds": fold_results, "pooled_validation_score": pooled}
         print(f"[{name}] pooled validation: {pooled}")

@@ -1,18 +1,39 @@
-
 from typing import Literal
 import sys
 from contextlib import contextmanager
 from datetime import datetime
 import networkx as nx
 
-AVAILABLE_PREDICATE_SETS = Literal["atoms", "chembl_fgs", "chebi_fgs", "efg", "efg_atoms", "chebi_fg_rules", "chebi_fg_learned_rules", "llm_generated_fgs", "llm_generated_rules", "llm_retrieved_rules", "llm_retrieved_rules_holdout", "farm_fgs", "farm_fgs_atoms", "fowl", "abrc"]
+AVAILABLE_PREDICATE_SETS = Literal[
+    "atoms",
+    "chembl_fgs",
+    "chebi_fgs",
+    "efg",
+    "efg_atoms",
+    "chebi_fg_rules",
+    "chebi_fg_learned_rules",
+    "llm_generated_fgs",
+    "llm_generated_rules",
+    "llm_retrieved_rules",
+    "llm_retrieved_rules_holdout",
+    "farm_fgs",
+    "farm_fgs_atoms",
+    "fowl",
+    "abrc",
+]
 
 
 def add_class_arguments(parser, required: bool = True) -> None:
     """Target classes as either ``--labels_file <file>`` or ``--classes <id> ...``."""
     group = parser.add_mutually_exclusive_group(required=required)
-    group.add_argument("--labels_file", type=str, help="File with one class id per line (ChEBI id or ec_a_b_c).")
-    group.add_argument("--classes", nargs="+", help="Class ids, e.g. 33838 or ec_3_1_1.")
+    group.add_argument(
+        "--labels_file",
+        type=str,
+        help="File with one class id per line (ChEBI id or ec_a_b_c).",
+    )
+    group.add_argument(
+        "--classes", nargs="+", help="Class ids, e.g. 33838 or ec_3_1_1."
+    )
 
 
 def resolve_classes(args) -> list[str]:
@@ -28,25 +49,25 @@ def split_prolog_literals(body):
     literals, current, depth = [], [], 0
     curly_depth = 0
     for char in body:
-        if char == '(':
+        if char == "(":
             depth += 1
             current.append(char)
-        elif char == ')':
+        elif char == ")":
             depth -= 1
             current.append(char)
-        elif char == '{':
+        elif char == "{":
             curly_depth += 1
             current.append(char)
-        elif char == '}':
+        elif char == "}":
             curly_depth -= 1
             current.append(char)
-        elif char == ',' and depth == 0 and curly_depth == 0:
-            literals.append(''.join(current).strip())
+        elif char == "," and depth == 0 and curly_depth == 0:
+            literals.append("".join(current).strip())
             current = []
         else:
             current.append(char)
     if current:
-        literals.append(''.join(current).strip())
+        literals.append("".join(current).strip())
     return literals
 
 
@@ -72,7 +93,7 @@ def tee_output(log_path):
                 if newline_index == -1:
                     break
                 line = self._buffer[:newline_index].rstrip("\r")
-                self._buffer = self._buffer[newline_index + 1:]
+                self._buffer = self._buffer[newline_index + 1 :]
                 self._emit(line, "\n")
 
         def flush(self):
@@ -101,7 +122,9 @@ def get_atom_id(atom: int, molecule_id):
 def sort_labels_by_hierarchy(labels: list[str], chebi_graph: nx.DiGraph):
     """Sort a list of ChEBI ids by their hierarchy in ChEBI. If A is a superclass of B, A will appear before B in the returned list."""
     if any(label not in chebi_graph for label in labels):
-        raise ValueError(f"Some labels are not in the ChEBI graph: {set(labels) - set(chebi_graph)}")
+        raise ValueError(
+            f"Some labels are not in the ChEBI graph: {set(labels) - set(chebi_graph)}"
+        )
     label_set = set(labels)
 
     order_graph = nx.DiGraph()

@@ -6,6 +6,7 @@ here are novel (none restates a canonical zendo1..zendo10 rule). Scenes are reje
 with forced positives, near-miss negatives and decoys planted in both classes, so that a
 partial pattern is not itself discriminative.
 """
+
 import random
 from dataclasses import dataclass
 
@@ -49,7 +50,9 @@ def size_bucket(v: int) -> str:
     return "large"
 
 
-def random_scene(rng: random.Random, n_pieces: int, contact_prob: float = 0.45) -> Scene:
+def random_scene(
+    rng: random.Random, n_pieces: int, contact_prob: float = 0.45
+) -> Scene:
     color = [rng.choice(COLORS) for _ in range(n_pieces)]
     orientation = [rng.choice(ORIENTATIONS) for _ in range(n_pieces)]
     size = [rng.randint(SIZE_MIN, SIZE_MAX) for _ in range(n_pieces)]
@@ -74,17 +77,24 @@ def force_size_chain(rng: random.Random, sc: Scene) -> tuple:
     return a, b, c
 
 
-def has_size_chain(sc: Scene, top=lambda c: True, same_color=False, root=lambda a: True) -> bool:
+def has_size_chain(
+    sc: Scene, top=lambda c: True, same_color=False, root=lambda a: True
+) -> bool:
     """A small -> medium -> large contact chain whose root and top satisfy the given conditions."""
     for a in range(sc.n_pieces):
         if size_bucket(sc.size[a]) != "small" or not root(a):
             continue
         for b in sc.touches(a):
-            if size_bucket(sc.size[b]) != "medium" or (same_color and sc.color[b] != sc.color[a]):
+            if size_bucket(sc.size[b]) != "medium" or (
+                same_color and sc.color[b] != sc.color[a]
+            ):
                 continue
             for c in sc.touches(b):
-                if (size_bucket(sc.size[c]) == "large" and top(c)
-                        and (not same_color or sc.color[c] == sc.color[a])):
+                if (
+                    size_bucket(sc.size[c]) == "large"
+                    and top(c)
+                    and (not same_color or sc.color[c] == sc.color[a])
+                ):
                     return True
     return False
 
@@ -121,7 +131,9 @@ class ZendoMinter(ILPProblemMinter):
 
     has_neg_force = False
 
-    def sample_scenes(self, rng: random.Random, n_pos: int, n_neg: int, max_attempts: int = 500_000):
+    def sample_scenes(
+        self, rng: random.Random, n_pos: int, n_neg: int, max_attempts: int = 500_000
+    ):
         pos, neg = [], []
         attempts = 0
         while (len(pos) < n_pos or len(neg) < n_neg) and attempts < max_attempts:
@@ -140,8 +152,10 @@ class ZendoMinter(ILPProblemMinter):
             elif not label and len(neg) < n_neg:
                 neg.append(sc)
         if len(pos) < n_pos or len(neg) < n_neg:
-            raise RuntimeError(f"{type(self).__name__}: only got {len(pos)} pos / {len(neg)} neg "
-                               f"after {attempts} attempts")
+            raise RuntimeError(
+                f"{type(self).__name__}: only got {len(pos)} pos / {len(neg)} neg "
+                f"after {attempts} attempts"
+            )
         return pos, neg
 
     def mint(self, seed, n_pos: int = 50, n_neg: int = 50) -> ILPProblem:
@@ -149,14 +163,19 @@ class ZendoMinter(ILPProblemMinter):
         rng = random.Random(seed)
         pos, neg = self.sample_scenes(rng, n_pos, n_neg)
         scenes = list(enumerate(pos + neg))
-        pieces = [(s, f"p{s}_{i}", i, sc) for s, sc in scenes for i in range(sc.n_pieces)]
+        pieces = [
+            (s, f"p{s}_{i}", i, sc) for s, sc in scenes for i in range(sc.n_pieces)
+        ]
         contacts = []
         for s, sc in scenes:
             for i, j in sorted(tuple(sorted(pair)) for pair in sc.contacts):
                 contacts += [(f"p{s}_{i}", f"p{s}_{j}"), (f"p{s}_{j}", f"p{s}_{i}")]
         bk_facts = {
             **{c: [p for _, p, i, sc in pieces if sc.color[i] == c] for c in COLORS},
-            **{o: [p for _, p, i, sc in pieces if sc.orientation[i] == o] for o in ORIENTATIONS},
+            **{
+                o: [p for _, p, i, sc in pieces if sc.orientation[i] == o]
+                for o in ORIENTATIONS
+            },
             "contact": contacts,
             "coord1": [(p, sc.coord1[i]) for _, p, i, sc in pieces],
             "coord2": [(p, sc.coord2[i]) for _, p, i, sc in pieces],
@@ -167,7 +186,12 @@ class ZendoMinter(ILPProblemMinter):
             "size": [(p, sc.size[i]) for _, p, i, sc in pieces],
             "piece": [(s, p) for s, p, _, _ in pieces],
         }
-        return ILPProblem((self.target, 1), list(range(n_pos)), list(range(n_pos, n_pos + n_neg)), bk_facts)
+        return ILPProblem(
+            (self.target, 1),
+            list(range(n_pos)),
+            list(range(n_pos, n_pos + n_neg)),
+            bk_facts,
+        )
 
     def get_task_description(self):
         return f"""\
@@ -280,8 +304,8 @@ class RedChainMinter(ZendoMinter):
 class ChainMinter(ZendoMinter):
     """zendo_mint3: a small piece touches a medium piece that touches a large piece.
 
-        zendo(S) :- piece(S,A), size(A,SA), small(SA), contact(A,B), size(B,SB),
-                    medium(SB), contact(B,C), size(C,SC), large(SC).
+    zendo(S) :- piece(S,A), size(A,SA), small(SA), contact(A,B), size(B,SB),
+                medium(SB), contact(B,C), size(C,SC), large(SC).
     """
 
     _max_vars, _max_body = 7, 9
@@ -307,7 +331,9 @@ class Ascend4Minter(ZendoMinter):
         if sc.n_pieces < 4:
             return None
         a, b, c, d = rng.sample(range(sc.n_pieces), 4)
-        sc.size[a], sc.size[b], sc.size[c], sc.size[d] = sorted(rng.sample(range(SIZE_MIN, SIZE_MAX + 1), 4))
+        sc.size[a], sc.size[b], sc.size[c], sc.size[d] = sorted(
+            rng.sample(range(SIZE_MIN, SIZE_MAX + 1), 4)
+        )
         sc.contacts.add(frozenset((a, b)))
         sc.contacts.add(frozenset((b, c)))
         sc.contacts.add(frozenset((c, d)))
@@ -324,7 +350,9 @@ class Ascend4Minter(ZendoMinter):
         if len(candidates) < 3 or rng.random() >= 0.85:
             return
         p, q, r = rng.sample(candidates, 3)
-        sc.size[p], sc.size[q], sc.size[r] = sorted(rng.sample(range(SIZE_MIN, SIZE_MAX + 1), 3))
+        sc.size[p], sc.size[q], sc.size[r] = sorted(
+            rng.sample(range(SIZE_MIN, SIZE_MAX + 1), 3)
+        )
         sc.contacts.add(frozenset((p, q)))
         sc.contacts.add(frozenset((q, r)))
         for f in sc.touches(r):  # no fourth ascending hop off the top
@@ -336,8 +364,11 @@ class Ascend4Minter(ZendoMinter):
             if len(path) == 4:
                 return True
             last = path[-1]
-            return any(nxt not in path and sc.size[nxt] > sc.size[last] and dfs(path + [nxt])
-                       for nxt in sc.touches(last))
+            return any(
+                nxt not in path and sc.size[nxt] > sc.size[last] and dfs(path + [nxt])
+                for nxt in sc.touches(last)
+            )
+
         return any(dfs([start]) for start in range(sc.n_pieces))
 
 
@@ -389,7 +420,9 @@ class RedTiltedTopMinter(ZendoMinter):
             sc.orientation[d] = rng.choice(TILTED)
 
     def check(self, sc):
-        return has_size_chain(sc, top=lambda c: sc.color[c] == "red" and sc.orientation[c] != "upright")
+        return has_size_chain(
+            sc, top=lambda c: sc.color[c] == "red" and sc.orientation[c] != "upright"
+        )
 
 
 class MonoChainMinter(ZendoMinter):

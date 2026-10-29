@@ -12,7 +12,13 @@ import traceback
 import tqdm
 from typing import Literal, Optional
 
-from chebILP.ilp_path_manager import class_head, get_bias_path, get_bk_path, get_exs_path, get_aleph_stem
+from chebILP.ilp_path_manager import (
+    class_head,
+    get_bias_path,
+    get_bk_path,
+    get_exs_path,
+    get_aleph_stem,
+)
 from chebILP.utils import AVAILABLE_PREDICATE_SETS
 from popper.util import MAX_BODY, MAX_VARS
 
@@ -124,7 +130,8 @@ def build_hypothesis_heuristic_lines(clause, body_preds, level=DEFAULT_HEURISTIC
     names_in_bk = {pred for pred, _ in body_preds}
     return [
         f"prefer_body_pred({name},{level})."
-        for name in info["body_pred_names"] if name in names_in_bk
+        for name in info["body_pred_names"]
+        if name in names_in_bk
     ]
 
 
@@ -135,7 +142,7 @@ def build_body_cost_lines(body_preds, aux_cost=1, seed_cost=1, base_cost=1):
     ``efga_``, ``chembl_fg_``) and everything else (atom-level primitives). Popper's default
     cost is 1, so only predicates with a different cost get a line.
     """
-    from chebILP.molecule_processing.fg_matching import is_fg_seed_name
+    from chebILP.preprocessing.molecule_processing.fg_matching import is_fg_seed_name
 
     lines = []
     for name in sorted({pred for pred, _ in body_preds}):
@@ -176,10 +183,12 @@ def log_subprocess_output(log_dir, phase, result):
                 f.write(f"[{timestamp}] [stderr] {line}\n")
 
 
-def run_ilp_training_subprocess(exs_file, bk_file, bias_file, settings_parameters, log_dir=None):
+def run_ilp_training_subprocess(
+    exs_file, bk_file, bias_file, settings_parameters, log_dir=None
+):
     """Run Popper ILP learning in a separate subprocess for isolated Prolog session."""
-    #print(f"Running ILP training subprocess with exs_file={exs_file}, bk_file={bk_file}, bias_file={bias_file}...")
-    #print(f"Settings parameters: {settings_parameters}")
+    # print(f"Running ILP training subprocess with exs_file={exs_file}, bk_file={bk_file}, bias_file={bias_file}...")
+    # print(f"Settings parameters: {settings_parameters}")
     script = f'''
 import json
 import pickle
@@ -206,14 +215,27 @@ print(json.dumps(result))
             timeout=hard_limit,
         )
     except subprocess.TimeoutExpired as e:
-        stderr = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-        log_subprocess_output(log_dir, f"Training: {bias_file} (killed after {hard_limit} s)", stderr)
-        print(f"    Popper did not finish within {hard_limit} s (final combine stage); no solution.")
-        return {"prog_str": None, "score": None, "timed_out": True, "time_to_best": None}
+        stderr = (
+            e.stderr.decode(errors="replace")
+            if isinstance(e.stderr, bytes)
+            else (e.stderr or "")
+        )
+        log_subprocess_output(
+            log_dir, f"Training: {bias_file} (killed after {hard_limit} s)", stderr
+        )
+        print(
+            f"    Popper did not finish within {hard_limit} s (final combine stage); no solution."
+        )
+        return {
+            "prog_str": None,
+            "score": None,
+            "timed_out": True,
+            "time_to_best": None,
+        }
     if log_dir:
         log_subprocess_output(log_dir, f"Training: {bias_file}", result)
     # Parse only the last line (JSON output), ignore earlier lines (warnings/progress)
-    stdout_lines = result.stdout.strip().split('\n')
+    stdout_lines = result.stdout.strip().split("\n")
     try:
         output = json.loads(stdout_lines[-1])
     except json.decoder.JSONDecodeError:
@@ -230,47 +252,130 @@ print(json.dumps(result))
     return output
 
 
-def build_bias(problem_dir, predicate_set, target_ids, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=MAX_VARS, max_body=MAX_BODY, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, aux_pred_cost=1, seed_pred_cost=1, base_pred_cost=1):
+def build_bias(
+    problem_dir,
+    predicate_set,
+    target_ids,
+    selection_mode: Literal["claude", "random", "top_k"] | None = None,
+    selection_k: int | None = None,
+    max_vars=MAX_VARS,
+    max_body=MAX_BODY,
+    heuristic_guidance=False,
+    aux_library_dir=None,
+    heuristic_level=DEFAULT_HEURISTIC_LEVEL,
+    aux_pred_cost=1,
+    seed_pred_cost=1,
+    base_pred_cost=1,
+):
     # use bias template generated in build_bk and create settings-specific bias files
-    for target_id in tqdm.tqdm(target_ids, desc="Building bias files for ChEBI classes"):
-        plain_bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, predicate_dir=aux_library_dir) # template bias file created in build_bk
+    for target_id in tqdm.tqdm(
+        target_ids, desc="Building bias files for ChEBI classes"
+    ):
+        plain_bias_path = get_bias_path(
+            target_id,
+            split="train",
+            base_dir=problem_dir,
+            predicate_set=predicate_set,
+            selection_mode=selection_mode,
+            selection_k=selection_k,
+            predicate_dir=aux_library_dir,
+        )  # template bias file created in build_bk
         if selection_mode is None:
-            assert os.path.exists(plain_bias_path), f"Bias template file {plain_bias_path} does not exist. Please run build_bk first to create the bias template before running build_bias."
+            assert os.path.exists(plain_bias_path), (
+                f"Bias template file {plain_bias_path} does not exist. Please run build_bk first to create the bias template before running build_bias."
+            )
         else:
-            assert os.path.exists(plain_bias_path), f"Bias template file {plain_bias_path} does not exist. Please run predicate selection with selection_mode={selection_mode} and top_k={selection_k} first."
+            assert os.path.exists(plain_bias_path), (
+                f"Bias template file {plain_bias_path} does not exist. Please run predicate selection with selection_mode={selection_mode} and top_k={selection_k} first."
+            )
 
-        bias_path = get_bias_path(target_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, predicate_dir=aux_library_dir)
+        bias_path = get_bias_path(
+            target_id,
+            split="train",
+            base_dir=problem_dir,
+            predicate_set=predicate_set,
+            selection_mode=selection_mode,
+            selection_k=selection_k,
+            max_vars=max_vars,
+            max_body=max_body,
+            predicate_dir=aux_library_dir,
+        )
         # use bias.pl to generate settings-specific bias file
         with open(plain_bias_path, "r") as f:
             bias_content = f.read()
-        bias_content = bias_content.replace("%% max_vars(TODO).", f"max_vars({max_vars}).")
-        bias_content = bias_content.replace("%% max_body(TODO).", f"max_body({max_body}).")
+        bias_content = bias_content.replace(
+            "%% max_vars(TODO).", f"max_vars({max_vars})."
+        )
+        bias_content = bias_content.replace(
+            "%% max_body(TODO).", f"max_body({max_body})."
+        )
 
         # Heuristic guidance: steer Popper's non-recursive generator toward the class's chosen
         # auxiliary predicates by appending prefer_body_pred/2 directives (only those actually
         # declared as body_pred in the template — Popper error-exits on an undeclared one).
         if heuristic_guidance and predicate_set == RULE_PREDICATE_SET:
-            from chebILP.predicate_generation.auxiliary_rules import load_class_hypothesis
+            from chebILP.predicate_generation.auxiliary_rules import (
+                load_class_hypothesis,
+            )
+
             # Steer toward the predicates in the LLM's class hypothesis.
             hypothesis = load_class_hypothesis(target_id, library_dir=aux_library_dir)
             hint_lines = []
             if hypothesis and hypothesis.get("hypothesis"):
                 hint_lines = build_hypothesis_heuristic_lines(
-                    hypothesis["hypothesis"], _parse_body_preds(bias_content), level=heuristic_level
+                    hypothesis["hypothesis"],
+                    _parse_body_preds(bias_content),
+                    level=heuristic_level,
                 )
             if hint_lines:
-                bias_content = bias_content.rstrip("\n") + "\n\n%% heuristic guidance toward LLM-chosen predicates\n" + "\n".join(hint_lines) + "\n"
+                bias_content = (
+                    bias_content.rstrip("\n")
+                    + "\n\n%% heuristic guidance toward LLM-chosen predicates\n"
+                    + "\n".join(hint_lines)
+                    + "\n"
+                )
 
-        cost_lines = build_body_cost_lines(_parse_body_preds(bias_content), aux_cost=aux_pred_cost,
-                                           seed_cost=seed_pred_cost, base_cost=base_pred_cost)
+        cost_lines = build_body_cost_lines(
+            _parse_body_preds(bias_content),
+            aux_cost=aux_pred_cost,
+            seed_cost=seed_pred_cost,
+            base_cost=base_pred_cost,
+        )
         if cost_lines:
-            bias_content = bias_content.rstrip("\n") + "\n\n%% per-predicate costs in the MDL size term\n" + "\n".join(cost_lines) + "\n"
+            bias_content = (
+                bias_content.rstrip("\n")
+                + "\n\n%% per-predicate costs in the MDL size term\n"
+                + "\n".join(cost_lines)
+                + "\n"
+            )
 
         with open(bias_path, "w+") as f:
             f.write(bias_content)
 
 
-def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:Literal[AVAILABLE_PREDICATE_SETS], results_dir, timeout=20, selection_mode:Literal["claude", "random", "top_k"]|None=None, selection_k:int|None=None, max_vars=MAX_VARS, max_body=MAX_BODY, mdl_weight_fn=1, mdl_weight_fp=1, mdl_weight_size=1, seed_hypothesis=False, heuristic_guidance=False, aux_library_dir=None, heuristic_level=DEFAULT_HEURISTIC_LEVEL, tool:Literal["popper", "aleph"]="popper", nuwls=True, aux_pred_cost=1, seed_pred_cost=1, base_pred_cost=1):
+def learn_chebi_classes(
+    classes_list,
+    problem_dir: Optional[str],
+    predicate_set: Literal[AVAILABLE_PREDICATE_SETS],
+    results_dir,
+    timeout=20,
+    selection_mode: Literal["claude", "random", "top_k"] | None = None,
+    selection_k: int | None = None,
+    max_vars=MAX_VARS,
+    max_body=MAX_BODY,
+    mdl_weight_fn=1,
+    mdl_weight_fp=1,
+    mdl_weight_size=1,
+    seed_hypothesis=False,
+    heuristic_guidance=False,
+    aux_library_dir=None,
+    heuristic_level=DEFAULT_HEURISTIC_LEVEL,
+    tool: Literal["popper", "aleph"] = "popper",
+    nuwls=True,
+    aux_pred_cost=1,
+    seed_pred_cost=1,
+    base_pred_cost=1,
+):
     if problem_dir is None:
         problem_dir = os.path.join("data", "ilp_problems")
     # Build settings parameters for Popper
@@ -298,53 +403,113 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         f.write(f"predicate_dir: {aux_library_dir}\n")
         if seed_hypothesis or heuristic_guidance:
             f.write(f"aux_library_dir: {aux_library_dir}\n")
-        f.write(f"pred_costs: {{aux: {aux_pred_cost}, seed: {seed_pred_cost}, base: {base_pred_cost}}}\n")
+        f.write(
+            f"pred_costs: {{aux: {aux_pred_cost}, seed: {seed_pred_cost}, base: {base_pred_cost}}}\n"
+        )
         f.write("popper_settings:\n")
         for key, value in settings_parameters.items():
             f.write(f"\t{key}: {value}\n")
 
     if tool == "aleph" and (aux_pred_cost, seed_pred_cost, base_pred_cost) != (1, 1, 1):
-        print("Warning: predicate costs only apply to Popper; ignoring them for --tool aleph.")
+        print(
+            "Warning: predicate costs only apply to Popper; ignoring them for --tool aleph."
+        )
         aux_pred_cost = seed_pred_cost = base_pred_cost = 1
-    build_bias(problem_dir, predicate_set, classes_list, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, heuristic_guidance=heuristic_guidance, aux_library_dir=aux_library_dir, heuristic_level=heuristic_level,
-               aux_pred_cost=aux_pred_cost, seed_pred_cost=seed_pred_cost, base_pred_cost=base_pred_cost)
+    build_bias(
+        problem_dir,
+        predicate_set,
+        classes_list,
+        selection_mode=selection_mode,
+        selection_k=selection_k,
+        max_vars=max_vars,
+        max_body=max_body,
+        heuristic_guidance=heuristic_guidance,
+        aux_library_dir=aux_library_dir,
+        heuristic_level=heuristic_level,
+        aux_pred_cost=aux_pred_cost,
+        seed_pred_cost=seed_pred_cost,
+        base_pred_cost=base_pred_cost,
+    )
 
     if seed_hypothesis and tool != "aleph":
-        print("Warning: --seed_hypothesis only works with --tool aleph; ignoring it for Popper.")
+        print(
+            "Warning: --seed_hypothesis only works with --tool aleph; ignoring it for Popper."
+        )
         seed_hypothesis = False
     if seed_hypothesis and predicate_set != RULE_PREDICATE_SET:
-        print(f"Warning: --seed_hypothesis only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'.")
+        print(
+            f"Warning: --seed_hypothesis only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'."
+        )
     if tool == "popper" and nuwls and shutil.which("NuWLS-c") is None:
-        print("Warning: --nuwls is on but no NuWLS-c binary is on PATH, so Popper's anytime MaxSAT solve does nothing. "
-              "Install it as described in the Popper README (https://github.com/logic-and-learning-lab/Popper), "
-              "or pass --no-nuwls.")
+        print(
+            "Warning: --nuwls is on but no NuWLS-c binary is on PATH, so Popper's anytime MaxSAT solve does nothing. "
+            "Install it as described in the Popper README (https://github.com/logic-and-learning-lab/Popper), "
+            "or pass --no-nuwls."
+        )
     if heuristic_guidance and predicate_set != RULE_PREDICATE_SET:
-        print(f"Warning: --heuristic_guidance only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'.")
+        print(
+            f"Warning: --heuristic_guidance only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'."
+        )
     if tool == "aleph" and selection_mode is not None:
-        print(f"Warning: --tool aleph does not apply predicate selection; the Aleph problem uses "
-              f"the full '{predicate_set}' predicate set (selection_mode='{selection_mode}' ignored).")
+        print(
+            f"Warning: --tool aleph does not apply predicate selection; the Aleph problem uses "
+            f"the full '{predicate_set}' predicate set (selection_mode='{selection_mode}' ignored)."
+        )
 
     for chebi_id in classes_list:
         start_time = time.perf_counter()
         # Run training in subprocess (isolated Prolog session)
         print(f"Training ChEBI:{chebi_id}")
         exs_path = get_exs_path(chebi_id, split="train", base_dir=problem_dir)
-        bk_path = get_bk_path(chebi_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, predicate_dir=aux_library_dir)
-        bias_path = get_bias_path(chebi_id, split="train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=selection_k, max_vars=max_vars, max_body=max_body, predicate_dir=aux_library_dir)
-        if not os.path.exists(exs_path) or not os.path.exists(bk_path) or not os.path.exists(bias_path):
-            print(f"Missing files for ChEBI:{chebi_id} - skipping. exs_path: {exs_path}, bk_path: {bk_path}, bias_path: {bias_path}")
+        bk_path = get_bk_path(
+            chebi_id,
+            split="train",
+            base_dir=problem_dir,
+            predicate_set=predicate_set,
+            selection_mode=selection_mode,
+            selection_k=selection_k,
+            predicate_dir=aux_library_dir,
+        )
+        bias_path = get_bias_path(
+            chebi_id,
+            split="train",
+            base_dir=problem_dir,
+            predicate_set=predicate_set,
+            selection_mode=selection_mode,
+            selection_k=selection_k,
+            max_vars=max_vars,
+            max_body=max_body,
+            predicate_dir=aux_library_dir,
+        )
+        if (
+            not os.path.exists(exs_path)
+            or not os.path.exists(bk_path)
+            or not os.path.exists(bias_path)
+        ):
+            print(
+                f"Missing files for ChEBI:{chebi_id} - skipping. exs_path: {exs_path}, bk_path: {bk_path}, bias_path: {bias_path}"
+            )
             continue
 
         # Seed Aleph's search with the LLM's class hypothesis.
         seed_clause = None
         if seed_hypothesis and predicate_set == RULE_PREDICATE_SET:
-            from chebILP.predicate_generation.auxiliary_rules import load_class_hypothesis
+            from chebILP.predicate_generation.auxiliary_rules import (
+                load_class_hypothesis,
+            )
+
             with open(bias_path, "r") as f:
                 body_preds = _parse_body_preds(f.read())
             hypothesis = load_class_hypothesis(chebi_id, library_dir=aux_library_dir)
             seed_info = None
-            if hypothesis and hypothesis.get("groundable") and hypothesis.get("hypothesis"):
-                seed_info = seed_from_hypothesis(hypothesis["hypothesis"], chebi_id, body_preds)
+            if (
+                hypothesis
+                and hypothesis.get("groundable")
+                and hypothesis.get("hypothesis")
+            ):
+                seed_info = seed_from_hypothesis(
+                    hypothesis["hypothesis"], chebi_id, body_preds
+                )
             if seed_info:
                 seed, n_vars, n_body = seed_info
                 # The seed must satisfy the bias it is validated against. Widening max_vars /
@@ -353,32 +518,60 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
                 # classes for no F1 gain). So keep the standard bounds and drop a seed that does
                 # not fit — running unseeded at the same bias as every other config.
                 if n_vars > max_vars or n_body > max_body:
-                    print(f"    Seed needs max_vars={n_vars}, max_body={n_body} > bounds "
-                          f"(max_vars={max_vars}, max_body={max_body}); running unseeded.")
+                    print(
+                        f"    Seed needs max_vars={n_vars}, max_body={n_body} > bounds "
+                        f"(max_vars={max_vars}, max_body={max_body}); running unseeded."
+                    )
                 else:
                     print(f"    Seeding search with: {seed}")
                     seed_clause = seed
             else:
-                print(f"    No usable LLM hypothesis for ChEBI:{chebi_id} "
-                      f"(missing, did not ground, or does not fit the bias); running unseeded.")
+                print(
+                    f"    No usable LLM hypothesis for ChEBI:{chebi_id} "
+                    f"(missing, did not ground, or does not fit the bias); running unseeded."
+                )
 
         if tool == "aleph":
             from chebILP.aleph_runner import run_ilp_training_aleph
-            aleph_stem = get_aleph_stem(chebi_id, predicate_set=predicate_set, base_dir=problem_dir, predicate_dir=aux_library_dir)
-            missing = [aleph_stem + ext for ext in (".b", ".f", ".n") if not os.path.exists(aleph_stem + ext)]
+
+            aleph_stem = get_aleph_stem(
+                chebi_id,
+                predicate_set=predicate_set,
+                base_dir=problem_dir,
+                predicate_dir=aux_library_dir,
+            )
+            missing = [
+                aleph_stem + ext
+                for ext in (".b", ".f", ".n")
+                if not os.path.exists(aleph_stem + ext)
+            ]
             if missing:
-                print(f"Missing Aleph file(s) for ChEBI:{chebi_id}: {', '.join(missing)}; "
-                      f"run build_samples + build_bk (Aleph output on) first - skipping.")
+                print(
+                    f"Missing Aleph file(s) for ChEBI:{chebi_id}: {', '.join(missing)}; "
+                    f"run build_samples + build_bk (Aleph output on) first - skipping."
+                )
                 continue
-            train_result = run_ilp_training_aleph(chebi_id, aleph_stem, bias_path, timeout=timeout, max_body=max_body, seed_clause=seed_clause, log_dir=results_dir)
+            train_result = run_ilp_training_aleph(
+                chebi_id,
+                aleph_stem,
+                bias_path,
+                timeout=timeout,
+                max_body=max_body,
+                seed_clause=seed_clause,
+                log_dir=results_dir,
+            )
         else:
-            train_result = run_ilp_training_subprocess(exs_path, bk_path, bias_path, settings_parameters, log_dir=results_dir)
+            train_result = run_ilp_training_subprocess(
+                exs_path, bk_path, bias_path, settings_parameters, log_dir=results_dir
+            )
         prog_str = train_result["prog_str"]  # string representation for display/storage
         score = train_result["score"]
         if score:
             tp, fn, tn, fp = score[0], score[1], score[2], score[3]
-            f1 = (2*tp / (2*tp + fn + fp)) if (tp + fn + fp) > 0 else 0.0
-            print(f"ChEBI:{chebi_id} - F1: {f1:.2f} (TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn})")
+            f1 = (2 * tp / (2 * tp + fn + fp)) if (tp + fn + fp) > 0 else 0.0
+            print(
+                f"ChEBI:{chebi_id} - F1: {f1:.2f} (TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn})"
+            )
         if prog_str:
             print(f"    Learned program:\n    {prog_str}")
         else:
@@ -390,13 +583,37 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
             print(f"Validating ChEBI:{chebi_id}...")
             try:
                 from chebILP.evaluation.clingo_eval import run_ilp_validation_clingo
+
                 conf_matrix = run_ilp_validation_clingo(
-                    class_head(chebi_id), prog_str,
-                    exs_file=get_exs_path(chebi_id, split="validation", base_dir=problem_dir),
-                    bk_file=get_bk_path(chebi_id, predicate_set=predicate_set, split="validation", base_dir=problem_dir, predicate_dir=aux_library_dir),
+                    class_head(chebi_id),
+                    prog_str,
+                    exs_file=get_exs_path(
+                        chebi_id, split="validation", base_dir=problem_dir
+                    ),
+                    bk_file=get_bk_path(
+                        chebi_id,
+                        predicate_set=predicate_set,
+                        split="validation",
+                        base_dir=problem_dir,
+                        predicate_dir=aux_library_dir,
+                    ),
                 )
-                f1 = (2*conf_matrix["TP"] / (2*conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"])) if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0 else 0.0
-                print(f"    Validation F1: {f1:.2f} (TP: {conf_matrix['TP']}, FP: {conf_matrix['FP']}, TN: {conf_matrix['TN']}, FN: {conf_matrix['FN']})")
+                f1 = (
+                    (
+                        2
+                        * conf_matrix["TP"]
+                        / (
+                            2 * conf_matrix["TP"]
+                            + conf_matrix["FP"]
+                            + conf_matrix["FN"]
+                        )
+                    )
+                    if (conf_matrix["TP"] + conf_matrix["FP"] + conf_matrix["FN"]) > 0
+                    else 0.0
+                )
+                print(
+                    f"    Validation F1: {f1:.2f} (TP: {conf_matrix['TP']}, FP: {conf_matrix['FP']}, TN: {conf_matrix['TN']}, FN: {conf_matrix['FN']})"
+                )
             except Exception as e:
                 print(f"Validation failed for ChEBI:{chebi_id} with error: {e}")
                 traceback.print_exc()
@@ -405,7 +622,9 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
         with open(os.path.join(results_dir, "results.json"), "a+") as f:
             result_entry = {
                 "chebi_id": chebi_id,
-                "train_score": {"TP": tp, "FP": fp, "TN": tn, "FN": fn} if score else None,
+                "train_score": {"TP": tp, "FP": fp, "TN": tn, "FN": fn}
+                if score
+                else None,
                 "time_taken": time.perf_counter() - start_time,
                 "time_to_best": train_result.get("time_to_best"),
                 "num_programs": train_result.get("num_programs"),
@@ -414,4 +633,3 @@ def learn_chebi_classes(classes_list, problem_dir:Optional[str], predicate_set:L
                 "validation_score": conf_matrix,
             }
             f.write(json.dumps(result_entry) + "\n")
-

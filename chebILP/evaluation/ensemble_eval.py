@@ -26,6 +26,7 @@ import pandas as pd
 # DL evaluation on correct validation set
 # ---------------------------------------------------------------------------
 
+
 def load_dl_preds(npy_path: str, meta_json_path: str) -> pd.DataFrame:
     """
     Load pre-extracted DL predictions (created by prepare_dl_preds.py).
@@ -80,7 +81,13 @@ def eval_dl_on_ids(
     return {"TP": tp, "FP": fp, "TN": tn, "FN": fn}
 
 
-def get_dl_direct_neighbor_scores(dl_preds: pd.DataFrame, chebi_graph: nx.DiGraph, hierarchy_graph, molecules_df, output_path: str):
+def get_dl_direct_neighbor_scores(
+    dl_preds: pd.DataFrame,
+    chebi_graph: nx.DiGraph,
+    hierarchy_graph,
+    molecules_df,
+    output_path: str,
+):
     """
     Compute DL confusion matrices for all classes.
 
@@ -99,7 +106,9 @@ def get_dl_direct_neighbor_scores(dl_preds: pd.DataFrame, chebi_graph: nx.DiGrap
         f.write("class_id,TP,FP,TN,FN\n")
         for cls_id, conf in scores.items():
             if conf is not None:
-                f.write(f"{cls_id},{conf['TP']},{conf['FP']},{conf['TN']},{conf['FN']}\n")
+                f.write(
+                    f"{cls_id},{conf['TP']},{conf['FP']},{conf['TN']},{conf['FN']}\n"
+                )
             else:
                 f.write(f"{cls_id},,,,\n")
 
@@ -107,6 +116,7 @@ def get_dl_direct_neighbor_scores(dl_preds: pd.DataFrame, chebi_graph: nx.DiGrap
 # ---------------------------------------------------------------------------
 # ILP predictions tensor
 # ---------------------------------------------------------------------------
+
 
 def load_ilp_preds(npy_path: str, meta_json_path: str) -> pd.DataFrame:
     """
@@ -124,6 +134,7 @@ def load_ilp_preds(npy_path: str, meta_json_path: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Loading ILP run results
 # ---------------------------------------------------------------------------
+
 
 def load_ilp_results(run_dir: str) -> dict[str, dict]:
     """Load results.json from a run directory → {chebi_id: result_dict}."""
@@ -145,6 +156,7 @@ def load_ilp_results(run_dir: str) -> dict[str, dict]:
 # Metric helpers
 # ---------------------------------------------------------------------------
 
+
 def balanced_accuracy(conf: dict) -> Optional[float]:
     tp, fp, tn, fn = conf["TP"], conf["FP"], conf["TN"], conf["FN"]
     tpr = tp / (tp + fn) if (tp + fn) > 0 else None
@@ -164,7 +176,6 @@ def compute_ground_truth(
     Molecule M is positive for class C iff M is a descendant of C in the
     ChEBI hierarchy. Descendants are found via BFS over chebi_graph.predecessors.
     """
-    mol_set = set(mol_order)
     gt: dict[str, list[bool]] = {}
     for cls_id in class_ids:
         descendants: set[str] = set()
@@ -200,8 +211,12 @@ def compute_scores_from_preds(
     fn = (~p & g).sum()
     tn = (~p & ~g).sum()
     return {
-        str(cls_id): {"TP": int(tp[cls_id]), "FP": int(fp[cls_id]),
-                      "TN": int(tn[cls_id]), "FN": int(fn[cls_id])}
+        str(cls_id): {
+            "TP": int(tp[cls_id]),
+            "FP": int(fp[cls_id]),
+            "TN": int(tn[cls_id]),
+            "FN": int(fn[cls_id]),
+        }
         for cls_id in common_cls
     }
 
@@ -228,6 +243,7 @@ def build_label_parents(label_set, chebi_graph) -> dict[str, set]:
 # ---------------------------------------------------------------------------
 # Ensemble construction: model selection + ILP tensor generation
 # ---------------------------------------------------------------------------
+
 
 class EnsembleConstructor:
     """
@@ -257,7 +273,7 @@ class EnsembleConstructor:
         chebi_graph: nx.DiGraph,
         predict_on: str = "validation",
     ):
-        self.label_set = set(str(l) for l in label_stats)
+        self.label_set = set(str(lb) for lb in label_stats)
         self.dl_val_preds = dl_val_preds
         self.chebi_graph = chebi_graph
 
@@ -272,10 +288,14 @@ class EnsembleConstructor:
         # Ground truth: positive iff molecule is a ChEBI descendant of the class
         print("Computing ground truth from ChEBI hierarchy...")
         gt_class_ids = [c for c in self.label_set if c in dl_val_preds.columns]
-        self._gt = compute_ground_truth(dl_val_preds.index.tolist(), gt_class_ids, chebi_graph)
+        self._gt = compute_ground_truth(
+            dl_val_preds.index.tolist(), gt_class_ids, chebi_graph
+        )
 
         # DL validation scores derived from the predictions tensor
-        self.dl_val_scores: dict[str, dict] = compute_scores_from_preds(dl_val_preds, self._gt)
+        self.dl_val_scores: dict[str, dict] = compute_scores_from_preds(
+            dl_val_preds, self._gt
+        )
         print(f"  DL val scores computed for {len(self.dl_val_scores)} classes")
 
         # Load ILP programs and validation predictions per run
@@ -286,7 +306,9 @@ class EnsembleConstructor:
         print("Loading ILP validation runs...")
         for run_name, run_dir in ilp_val_runs.items():
             results = load_ilp_results(run_dir)
-            self.ilp_programs[run_name] = {cid: e.get("program") for cid, e in results.items()}
+            self.ilp_programs[run_name] = {
+                cid: e.get("program") for cid, e in results.items()
+            }
 
             npy_path = os.path.join(run_dir, "full_val_preds.npy")
             meta_path = os.path.join(run_dir, "full_val_preds_metadata.json")
@@ -297,13 +319,17 @@ class EnsembleConstructor:
                     ilp_preds.astype(float), self._gt
                 )
                 n_progs = sum(1 for p in self.ilp_programs[run_name].values() if p)
-                print(f"  '{run_name}': {n_progs} programs, "
-                      f"{ilp_preds.shape[0]} mol × {ilp_preds.shape[1]} classes in val tensor")
+                print(
+                    f"  '{run_name}': {n_progs} programs, "
+                    f"{ilp_preds.shape[0]} mol × {ilp_preds.shape[1]} classes in val tensor"
+                )
             else:
                 self.ilp_val_preds[run_name] = None
                 self.ilp_val_scores[run_name] = {}
-                print(f"  Warning: no val tensor for '{run_name}' "
-                      f"(expected {npy_path}); skipping run in model selection")
+                print(
+                    f"  Warning: no val tensor for '{run_name}' "
+                    f"(expected {npy_path}); skipping run in model selection"
+                )
 
         # Load predictions for the target split (for slicing output tensor)
         slice_prefix = "val" if predict_on == "validation" else predict_on
@@ -314,14 +340,20 @@ class EnsembleConstructor:
             print(f"Loading ILP {predict_on} tensors for slicing...")
             for run_name, run_dir in ilp_val_runs.items():
                 npy_path = os.path.join(run_dir, f"full_{slice_prefix}_preds.npy")
-                meta_path = os.path.join(run_dir, f"full_{slice_prefix}_preds_metadata.json")
+                meta_path = os.path.join(
+                    run_dir, f"full_{slice_prefix}_preds_metadata.json"
+                )
                 if os.path.exists(npy_path) and os.path.exists(meta_path):
                     self.ilp_slice_preds[run_name] = load_ilp_preds(npy_path, meta_path)
-                    print(f"  '{run_name}': loaded {slice_prefix} tensor {self.ilp_slice_preds[run_name].shape}")
+                    print(
+                        f"  '{run_name}': loaded {slice_prefix} tensor {self.ilp_slice_preds[run_name].shape}"
+                    )
                 else:
                     self.ilp_slice_preds[run_name] = None
-                    print(f"  Warning: no {predict_on} tensor for '{run_name}' "
-                          f"(expected {npy_path}). Run build_ilp_preds_for_ensemble first.")
+                    print(
+                        f"  Warning: no {predict_on} tensor for '{run_name}' "
+                        f"(expected {npy_path}). Run build_ilp_preds_for_ensemble first."
+                    )
 
         print("Selecting models...")
         self.trusted_model = self._select_trusted_models()
@@ -355,29 +387,40 @@ class EnsembleConstructor:
         if ilp_preds is None or cls_id not in ilp_preds.columns:
             return None
         if cls_id not in self._gt.columns:
-            print(f"  Warning: class {cls_id} not in ground truth, cannot compute bottom ILP F1")
+            print(
+                f"  Warning: class {cls_id} not in ground truth, cannot compute bottom ILP F1"
+            )
             return None
 
-        parents = [p for p in self.label_parents.get(cls_id, set())
-                   if p in self.dl_val_preds.columns]
+        parents = [
+            p
+            for p in self.label_parents.get(cls_id, set())
+            if p in self.dl_val_preds.columns
+        ]
         common_mols = ilp_preds.index.intersection(self._gt.index)
         if len(common_mols) != len(self._gt.index):
-            raise ValueError(f"ILP preds and GT have different molecule sets for class {cls_id} in run {run_name}: {len(ilp_preds.index)} != {len(self._gt.index)}")
+            raise ValueError(
+                f"ILP preds and GT have different molecule sets for class {cls_id} in run {run_name}: {len(ilp_preds.index)} != {len(self._gt.index)}"
+            )
 
         ilp_pred = ilp_preds.loc[common_mols, cls_id].astype(bool)
         if parents:
-            dl_parents_pos = (self.dl_val_preds.loc[common_mols, parents] >= 0.5).all(axis=1)
+            dl_parents_pos = (self.dl_val_preds.loc[common_mols, parents] >= 0.5).all(
+                axis=1
+            )
             ensemble_pred = ilp_pred & dl_parents_pos
         else:
             ensemble_pred = ilp_pred
 
         gt = self._gt.loc[common_mols, cls_id]
-        return self._f1_from_conf({
-            "TP": int((ensemble_pred & gt).sum()),
-            "FP": int((ensemble_pred & ~gt).sum()),
-            "FN": int((~ensemble_pred & gt).sum()),
-            "TN": int((~ensemble_pred & ~gt).sum()),
-        })
+        return self._f1_from_conf(
+            {
+                "TP": int((ensemble_pred & gt).sum()),
+                "FP": int((ensemble_pred & ~gt).sum()),
+                "FN": int((~ensemble_pred & gt).sum()),
+                "TN": int((~ensemble_pred & ~gt).sum()),
+            }
+        )
 
     def _select_trusted_models(self) -> dict[str, str]:
         trusted: dict[str, str] = {}
@@ -396,7 +439,9 @@ class EnsembleConstructor:
                     ilp_score = self._compute_bottom_ilp_f1(cls_id, run_name)
                     if ilp_score is None:
                         continue
-                    if ilp_score >= best_score and self.ilp_programs.get(run_name, {}).get(cls_id):
+                    if ilp_score >= best_score and self.ilp_programs.get(
+                        run_name, {}
+                    ).get(cls_id):
                         best_model, best_score = run_name, ilp_score
 
             trusted[cls_id] = best_model
@@ -429,21 +474,28 @@ class EnsembleConstructor:
         cols = {}
         for cls_id in ilp_class_ids:
             run_name = cls_to_run[cls_id]
-            cols[cls_id] = self.ilp_slice_preds[run_name][cls_id].reindex(mol_order, fill_value=False).astype(bool)
+            cols[cls_id] = (
+                self.ilp_slice_preds[run_name][cls_id]
+                .reindex(mol_order, fill_value=False)
+                .astype(bool)
+            )
 
         result = pd.DataFrame(cols, index=mol_order)
         arr = result.to_numpy().astype(bool)
         np.save(output_npy_path, arr)
         with open(output_meta_path, "w") as f:
             json.dump({"mol_order": mol_order, "class_labels": ilp_class_ids}, f)
-        print(f"Saved ILP predictions tensor: {output_npy_path} "
-              f"({len(mol_order)} × {len(ilp_class_ids)})")
+        print(
+            f"Saved ILP predictions tensor: {output_npy_path} "
+            f"({len(mol_order)} × {len(ilp_class_ids)})"
+        )
         return result
 
 
 # ---------------------------------------------------------------------------
 # Ensemble aggregation: combine DL + ILP tensors into predictions
 # ---------------------------------------------------------------------------
+
 
 class EnsembleAggregator:
     """
@@ -471,7 +523,7 @@ class EnsembleAggregator:
 
         self.dl_preds = dl_preds
         self.ilp_preds = ilp_preds
-        self.label_set = set(str(l) for l in label_stats)
+        self.label_set = set(str(lb) for lb in label_stats)
         self.trusted_model = trusted_model or {}
         self.model_weights = model_weights or {}
 
@@ -497,17 +549,17 @@ class EnsembleAggregator:
                 counts[model] = counts.get(model, 0) + 1
             print("  Trusted model counts:", counts)
 
-
     # ── Prediction ────────────────────────────────────────────────────────
 
     def predict_sample(self, mol_id: str) -> set[str]:
         """Predict all positive classes for a single molecule."""
         positive: set[str] = set()
         for cls in self.topo_order:
-            always_pos = (
-                self.trusted_model.get(cls) == "always_positive"
-                or self.model_weights.get(cls, {}) == {"always_positive": 1.0}
-            )
+            always_pos = self.trusted_model.get(
+                cls
+            ) == "always_positive" or self.model_weights.get(cls, {}) == {
+                "always_positive": 1.0
+            }
             trusted_model_is_dl = self.trusted_model.get(cls) == "dl"
             # ILP and always-positive models follow the hierarchy chain;
             # DL can predict regardless of parent predictions (native mode)
@@ -531,16 +583,24 @@ class EnsembleAggregator:
             return True
         if model == "dl":
             if cls not in self.dl_preds.columns:
-                raise ValueError(f"DL predictions for cls={cls} not found in dl_preds. dl_preds has {len(self.dl_preds.columns)} classes: {self.dl_preds.columns.tolist()[:10]}...")
+                raise ValueError(
+                    f"DL predictions for cls={cls} not found in dl_preds. dl_preds has {len(self.dl_preds.columns)} classes: {self.dl_preds.columns.tolist()[:10]}..."
+                )
             if mol_id not in self.dl_preds.index:
-                raise ValueError(f"DL predictions for mol_id={mol_id} not found in dl_preds. dl_preds has {len(self.dl_preds.index)} molecules: {self.dl_preds.index.tolist()[:10]}...")
+                raise ValueError(
+                    f"DL predictions for mol_id={mol_id} not found in dl_preds. dl_preds has {len(self.dl_preds.index)} molecules: {self.dl_preds.index.tolist()[:10]}..."
+                )
             return float(self.dl_preds.at[mol_id, cls]) >= 0.5
         # ILP model: look up in pre-computed tensor; False if not covered
         if cls not in self.ilp_preds.columns or mol_id not in self.ilp_preds.index:
-            raise ValueError(f"ILP predictions for cls={cls} or mol_id={mol_id} not found in ilp_preds. ilp_preds has {len(self.ilp_preds.columns)} classes: {self.ilp_preds.columns.tolist()[:10]} and {len(self.ilp_preds.index)} molecules: {self.ilp_preds.index.tolist()[:10]}...")
+            raise ValueError(
+                f"ILP predictions for cls={cls} or mol_id={mol_id} not found in ilp_preds. ilp_preds has {len(self.ilp_preds.columns)} classes: {self.ilp_preds.columns.tolist()[:10]} and {len(self.ilp_preds.index)} molecules: {self.ilp_preds.index.tolist()[:10]}..."
+            )
         return bool(self.ilp_preds.at[mol_id, cls])
 
-    def _compute_weighted_prediction(self, cls: str, mol_id: str, weights: dict[str, float]) -> bool:
+    def _compute_weighted_prediction(
+        self, cls: str, mol_id: str, weights: dict[str, float]
+    ) -> bool:
         total = 0.0
         for model_name, weight in weights.items():
             if weight <= 0:
@@ -550,7 +610,9 @@ class EnsembleAggregator:
                     total += weight * float(self.dl_preds.at[mol_id, cls])
             else:
                 if cls in self.ilp_preds.columns and mol_id in self.ilp_preds.index:
-                    total += weight * (1.0 if bool(self.ilp_preds.at[mol_id, cls]) else 0.0)
+                    total += weight * (
+                        1.0 if bool(self.ilp_preds.at[mol_id, cls]) else 0.0
+                    )
         return total >= 0.5
 
     def predict_set(self, mol_ids: list[str]) -> pd.DataFrame:
@@ -569,9 +631,9 @@ class EnsembleAggregator:
 
 
 def ensemble_construct_demo():
-    from chebi_utils import build_chebi_graph, extract_molecules, get_hierarchy_subgraph
+    from chebi_utils import build_chebi_graph, get_hierarchy_subgraph
+
     obo_path = os.path.join("data", "chebi_v248", "raw", "chebi.obo")
-    sdf_path = os.path.join("data", "chebi_v248", "raw", "chebi.sdf.gz")
     chebi_graph = get_hierarchy_subgraph(build_chebi_graph(obo_path))
 
     dl_val_preds = load_dl_preds(
@@ -580,14 +642,26 @@ def ensemble_construct_demo():
     )
     print(f"Loaded DL val preds: {dl_val_preds.shape}")
 
-    with open(os.path.join("data", "chebi_v248", "ChEBI25_3_STAR", "processed", "class_stats.csv")) as _f:
-        _lines = [l.strip().split(",") for l in _f if l.strip()][1:]
-        label_stats = {l[0]: {"has_negatives": l[3].lower() == "true"} for l in _lines}
+    with open(
+        os.path.join(
+            "data", "chebi_v248", "processed_25_3_STAR", "processed", "class_stats.csv"
+        )
+    ) as _f:
+        _lines = [row.strip().split(",") for row in _f if row.strip()][1:]
+        label_stats = {
+            row[0]: {"has_negatives": row[3].lower() == "true"} for row in _lines
+        }
 
     ilp_val_runs = {
-        "server_20260511_163024_fp60": os.path.join("data", "results_val", "server_20260511_163024_fp60"),
-        "server_20260511_162944_fn60": os.path.join("data", "results_val", "server_20260511_162944_fn60"),
-        "server_20260511_153741_standard60": os.path.join("data", "results_val", "server_20260511_153741_standard60"),
+        "server_20260511_163024_fp60": os.path.join(
+            "data", "results_val", "server_20260511_163024_fp60"
+        ),
+        "server_20260511_162944_fn60": os.path.join(
+            "data", "results_val", "server_20260511_162944_fn60"
+        ),
+        "server_20260511_153741_standard60": os.path.join(
+            "data", "results_val", "server_20260511_153741_standard60"
+        ),
     }
 
     constructor = EnsembleConstructor(
@@ -601,9 +675,14 @@ def ensemble_construct_demo():
     print(f"Slicing ILP tensor for {len(samples)} validation molecules...")
     constructor.slice_ilp_preds(
         mol_order=samples,
-        output_npy_path=os.path.join("data", "ensemble_predictions", "demo_ilp_preds.npy"),
-        output_meta_path=os.path.join("data", "ensemble_predictions", "demo_ilp_preds_metadata.json"),
+        output_npy_path=os.path.join(
+            "data", "ensemble_predictions", "demo_ilp_preds.npy"
+        ),
+        output_meta_path=os.path.join(
+            "data", "ensemble_predictions", "demo_ilp_preds_metadata.json"
+        ),
     )
+
 
 if __name__ == "__main__":
     ensemble_construct_demo()

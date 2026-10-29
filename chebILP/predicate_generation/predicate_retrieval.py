@@ -19,14 +19,42 @@ import logging
 import math
 import re
 
-from chebILP.molecule_processing.fg_matching import is_fg_seed_name
+from chebILP.preprocessing.chebi.fg_matching import is_fg_seed_name
 
 logger = logging.getLogger(__name__)
 
 _STOPWORDS = {
-    "a", "an", "and", "any", "are", "as", "at", "be", "by", "for", "from", "has",
-    "in", "is", "it", "its", "of", "on", "one", "or", "that", "the", "this", "to",
-    "which", "with", "group", "groups", "atom", "atoms", "molecule",
+    "a",
+    "an",
+    "and",
+    "any",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "in",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "one",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "which",
+    "with",
+    "group",
+    "groups",
+    "atom",
+    "atoms",
+    "molecule",
 }
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -41,7 +69,11 @@ def _singularize(token: str) -> str:
     """
     if len(token) > 4 and token.endswith("ies"):
         return token[:-3] + "y"
-    if len(token) > 3 and token.endswith("s") and not token.endswith(("ss", "us", "is")):
+    if (
+        len(token) > 3
+        and token.endswith("s")
+        and not token.endswith(("ss", "us", "is"))
+    ):
         return token[:-1]
     return token
 
@@ -49,7 +81,9 @@ def _singularize(token: str) -> str:
 def tokenize(text: str) -> list[str]:
     """Lowercase, split on non-alphanumerics, drop very short tokens and stopwords, singularise."""
     return [
-        _singularize(t) for t in _TOKEN_RE.findall(text.lower()) if len(t) > 1 and t not in _STOPWORDS
+        _singularize(t)
+        for t in _TOKEN_RE.findall(text.lower())
+        if len(t) > 1 and t not in _STOPWORDS
     ]
 
 
@@ -70,7 +104,7 @@ class _IncrementalBM25:
         self.b = b
         self.doc_freqs: list[dict[str, int]] = []  # per-document term -> count
         self.doc_len: list[int] = []
-        self.df: dict[str, int] = {}               # term -> number of documents containing it
+        self.df: dict[str, int] = {}  # term -> number of documents containing it
         self._total_len = 0
 
     @property
@@ -105,13 +139,17 @@ class _IncrementalBM25:
             if df == 0:
                 continue
             idf = math.log(1 + (n - df + 0.5) / (df + 0.5))
-            q_freq = np.fromiter((d.get(q, 0) for d in self.doc_freqs), dtype=float, count=n)
+            q_freq = np.fromiter(
+                (d.get(q, 0) for d in self.doc_freqs), dtype=float, count=n
+            )
             scores += idf * (q_freq * (self.k1 + 1) / (q_freq + denom_len))
         return scores
 
 
 class HybridPredicateRetriever:
-    def __init__(self, entries, model_name="all-MiniLM-L6-v2", rrf_k=60, use_dense=True):
+    def __init__(
+        self, entries, model_name="all-MiniLM-L6-v2", rrf_k=60, use_dense=True
+    ):
         """``entries``: list of dicts with at least ``name`` and ``description`` keys.
 
         The initial ``entries`` are indexed in bulk (batch dense encoding); predicates
@@ -121,23 +159,30 @@ class HybridPredicateRetriever:
         self.rrf_k = rrf_k
         self._bm25 = _IncrementalBM25()
         self._dense_model = None
-        self._dense_embeddings = None   # materialised (n, dim) matrix aligned with entries
+        self._dense_embeddings = (
+            None  # materialised (n, dim) matrix aligned with entries
+        )
         self._dense_pending: list = []  # embedding rows added since the last retrieve()
 
         for e in self.entries:
             self._bm25.add(tokenize(self._doc_text_lexical(e)))
         if use_dense:
-            self._load_dense_model(model_name)  # load the model even if the library is empty
+            self._load_dense_model(
+                model_name
+            )  # load the model even if the library is empty
             if self._dense_model is not None and self.entries:
                 self._dense_embeddings = self._dense_model.encode(
-                    [self._doc_text_dense(e) for e in self.entries], normalize_embeddings=True
+                    [self._doc_text_dense(e) for e in self.entries],
+                    normalize_embeddings=True,
                 )
 
     @classmethod
     def from_library(cls, base_dir: str, **kwargs) -> "HybridPredicateRetriever":
         import os
 
-        from chebILP.predicate_generation.auxiliary_predicates import load_library_predicates
+        from chebILP.predicate_generation.auxiliary_predicates import (
+            load_library_predicates,
+        )
 
         entries = [
             {
@@ -202,7 +247,9 @@ class HybridPredicateRetriever:
         self._bm25.add(tokenize(self._doc_text_lexical(entry)))
         if self._dense_model is not None:
             self._dense_pending.append(
-                self._dense_model.encode(self._doc_text_dense(entry), normalize_embeddings=True)
+                self._dense_model.encode(
+                    self._doc_text_dense(entry), normalize_embeddings=True
+                )
             )
 
     def _flush_dense(self):
@@ -213,7 +260,9 @@ class HybridPredicateRetriever:
 
         new = np.asarray(self._dense_pending)
         self._dense_embeddings = (
-            new if self._dense_embeddings is None else np.vstack([self._dense_embeddings, new])
+            new
+            if self._dense_embeddings is None
+            else np.vstack([self._dense_embeddings, new])
         )
         self._dense_pending = []
 
@@ -241,7 +290,9 @@ class HybridPredicateRetriever:
         chosen = set(seeds[:n_seed]) | set(rest[:n_rest])
         return [i for i in order if i in chosen]
 
-    def retrieve(self, query_text: str, top_k: int = 25, exclude: set[str] | None = None) -> list[dict]:
+    def retrieve(
+        self, query_text: str, top_k: int = 25, exclude: set[str] | None = None
+    ) -> list[dict]:
         """Return the top-k library entries for ``query_text``, best first.
 
         Seeded functional-group predicates and the other (aux) entries each get half of the
@@ -273,7 +324,11 @@ class HybridPredicateRetriever:
 
         order = np.argsort(fused)[::-1]
         if exclude:
-            order = [i for i in order if self.entries[i].get("stem", self.entries[i]["name"]) not in exclude]
+            order = [
+                i
+                for i in order
+                if self.entries[i].get("stem", self.entries[i]["name"]) not in exclude
+            ]
         top_idx = self._split_top(order, top_k)
         results = []
         for i in top_idx:

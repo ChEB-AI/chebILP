@@ -11,9 +11,29 @@ and SSE pairs with packed Cα atoms marked as contacts.
 import numpy as np
 
 THREE_TO_ONE = {
-    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C", "GLN": "Q", "GLU": "E", "GLY": "G",
-    "HIS": "H", "ILE": "I", "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P", "SER": "S",
-    "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V", "MSE": "M", "SEC": "C", "PYL": "K",
+    "ALA": "A",
+    "ARG": "R",
+    "ASN": "N",
+    "ASP": "D",
+    "CYS": "C",
+    "GLN": "Q",
+    "GLU": "E",
+    "GLY": "G",
+    "HIS": "H",
+    "ILE": "I",
+    "LEU": "L",
+    "LYS": "K",
+    "MET": "M",
+    "PHE": "F",
+    "PRO": "P",
+    "SER": "S",
+    "THR": "T",
+    "TRP": "W",
+    "TYR": "Y",
+    "VAL": "V",
+    "MSE": "M",
+    "SEC": "C",
+    "PYL": "K",
 }
 BACKBONE = ("N", "CA", "C", "O")
 HBOND_ENERGY_CUTOFF = -0.5  # kcal/mol
@@ -40,10 +60,14 @@ def read_backbone(path: str) -> tuple[list[str], np.ndarray]:
                 continue
             key = (line[21], line[22:26], line[26])
             res = residues.setdefault(key, {"name": line[17:20].strip()})
-            res.setdefault(name, [float(line[30:38]), float(line[38:46]), float(line[46:54])])
+            res.setdefault(
+                name, [float(line[30:38]), float(line[38:46]), float(line[46:54])]
+            )
     complete = [r for r in residues.values() if all(a in r for a in BACKBONE)]
     names = [r["name"] for r in complete]
-    coords = np.array([[r[a] for a in BACKBONE] for r in complete], dtype=float).reshape(-1, 4, 3)
+    coords = np.array(
+        [[r[a] for a in BACKBONE] for r in complete], dtype=float
+    ).reshape(-1, 4, 3)
     return names, coords
 
 
@@ -53,11 +77,11 @@ def hbond_matrix(coords: np.ndarray, names: list[str]) -> tuple[np.ndarray, np.n
     ``cont[i]`` is True when residue i+1 follows residue i without a break (C–N under 2.5 Å).
     """
     n = len(coords)
-    N, CA, C, O = (coords[:, k] for k in range(4))
+    N, CA, C, Ox = (coords[:, k] for k in range(4))
     cont = np.linalg.norm(N[1:] - C[:-1], axis=1) < 2.5
     # Amide H: on N, opposite the previous residue's carbonyl, 1 Å out.
     H = N.copy()
-    co = C[:-1] - O[:-1]
+    co = C[:-1] - Ox[:-1]
     H[1:] = N[1:] + co / np.linalg.norm(co, axis=1, keepdims=True)
     has_h = np.zeros(n, dtype=bool)
     has_h[1:] = cont & np.array([nm != "PRO" for nm in names[1:]])
@@ -66,7 +90,9 @@ def hbond_matrix(coords: np.ndarray, names: list[str]) -> tuple[np.ndarray, np.n
         return np.linalg.norm(a[:, None, :] - b[None, :, :], axis=2)
 
     with np.errstate(divide="ignore"):
-        energy = 27.888 * (1 / dist(O, N) + 1 / dist(C, H) - 1 / dist(O, H) - 1 / dist(C, N))
+        energy = 27.888 * (
+            1 / dist(Ox, N) + 1 / dist(C, H) - 1 / dist(Ox, H) - 1 / dist(C, N)
+        )
     hb = (energy < HBOND_ENERGY_CUTOFF) & has_h[None, :] & (dist(CA, CA) < 9.0)
     idx = np.arange(n)
     hb &= np.abs(idx[:, None] - idx[None, :]) >= 2
@@ -88,11 +114,13 @@ def assign_secondary_structure(coords: np.ndarray, names: list[str]):
     hb, cont = hbond_matrix(coords, names)
     ss = np.array(["-"] * n)
 
-    turn4 = np.array([i + 4 < n and hb[i, i + 4] and _unbroken(cont, i, i + 4) for i in range(n)])
+    turn4 = np.array(
+        [i + 4 < n and hb[i, i + 4] and _unbroken(cont, i, i + 4) for i in range(n)]
+    )
     helix = np.zeros(n, dtype=bool)
     for i in range(1, n):
         if turn4[i - 1] and turn4[i]:
-            helix[i:i + 4] = True
+            helix[i : i + 4] = True
 
     bridges = []
     for i in range(1, n - 1):
@@ -140,8 +168,8 @@ def assign_secondary_structure(coords: np.ndarray, names: list[str]):
     for _, pairs in ladders:
         ii = [i for i, _ in pairs]
         jj = [j for _, j in pairs]
-        ss[min(ii):max(ii) + 1] = "E"
-        ss[min(jj):max(jj) + 1] = "E"
+        ss[min(ii) : max(ii) + 1] = "E"
+        ss[min(jj) : max(jj) + 1] = "E"
     ss[helix] = "H"
     return ss, ladders, cont
 
@@ -152,7 +180,9 @@ def segment(ss: np.ndarray, cont: np.ndarray) -> list[tuple[str, int, int]]:
     for i in range(1, len(ss) + 1):
         if i == len(ss) or ss[i] != ss[start] or not cont[i - 1]:
             kind, length = ss[start], i - start
-            if (kind == "H" and length >= MIN_HELIX_LENGTH) or (kind == "E" and length >= MIN_STRAND_LENGTH):
+            if (kind == "H" and length >= MIN_HELIX_LENGTH) or (
+                kind == "E" and length >= MIN_STRAND_LENGTH
+            ):
                 runs.append((kind, start, i - 1))
             start = i
     return runs
@@ -174,15 +204,29 @@ def domain_structure(path: str) -> dict | None:
     sse_of = np.full(len(ss), -1)
     sses = []
     for k, (kind, s, e) in enumerate(runs):
-        sse_of[s:e + 1] = k
-        sses.append({"type": kind, "start": s, "end": e, "length": e - s + 1,
-                     "gly": "GLY" in names[s:e + 1], "pro": "PRO" in names[s:e + 1]})
+        sse_of[s : e + 1] = k
+        sses.append(
+            {
+                "type": kind,
+                "start": s,
+                "end": e,
+                "length": e - s + 1,
+                "gly": "GLY" in names[s : e + 1],
+                "pro": "PRO" in names[s : e + 1],
+            }
+        )
 
     votes: dict[tuple[int, int], dict[str, int]] = {}
     for kind, pairs in ladders:
         for i, j in pairs:
             a, b = sse_of[i], sse_of[j]
-            if a < 0 or b < 0 or a == b or sses[a]["type"] != "E" or sses[b]["type"] != "E":
+            if (
+                a < 0
+                or b < 0
+                or a == b
+                or sses[a]["type"] != "E"
+                or sses[b]["type"] != "E"
+            ):
                 continue
             key = (min(a, b), max(a, b))
             votes.setdefault(key, {"P": 0, "A": 0})[kind] += 1
@@ -208,8 +252,8 @@ def domain_structure(path: str) -> dict | None:
     contacts = []
     for a in range(len(sses)):
         for b in range(a + 2, len(sses)):
-            xa = ca[sses[a]["start"]:sses[a]["end"] + 1]
-            xb = ca[sses[b]["start"]:sses[b]["end"] + 1]
+            xa = ca[sses[a]["start"] : sses[a]["end"] + 1]
+            xb = ca[sses[b]["start"] : sses[b]["end"] + 1]
             close = np.linalg.norm(xa[:, None] - xb[None], axis=2) < CONTACT_DISTANCE
             if close.sum() >= MIN_CONTACT_PAIRS:
                 contacts.append([a, b])

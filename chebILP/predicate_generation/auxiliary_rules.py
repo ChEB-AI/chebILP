@@ -72,7 +72,9 @@ class RuleProgram:
     source_file: str = ""
 
 
-def parse_rule_program(source: str, source_file: str = "<string>") -> RuleProgram | None:
+def parse_rule_program(
+    source: str, source_file: str = "<string>"
+) -> RuleProgram | None:
     """Parse a rule-program string into a :class:`RuleProgram`, or ``None`` if invalid.
 
     Only the ``%`` annotation headers are read; the program body is carried verbatim and
@@ -109,8 +111,12 @@ def parse_rule_program(source: str, source_file: str = "<string>") -> RuleProgra
 # Facts linking an example to its parts: atoms of a molecule, SSEs of a protein domain.
 MEMBER_PREDICATES = ("has_atom", "has_sse")
 _MEMBER_ALT = "|".join(MEMBER_PREDICATES)
-_HAS_ATOM_RE = re.compile(rf"^\s*(?:{_MEMBER_ALT})\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$")
-_PARTICIPANT_RE = re.compile(r"^\s*has_(?:reactant|product)\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$")
+_HAS_ATOM_RE = re.compile(
+    rf"^\s*(?:{_MEMBER_ALT})\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$"
+)
+_PARTICIPANT_RE = re.compile(
+    r"^\s*has_(?:reactant|product)\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$"
+)
 _FACT_RE = re.compile(r"^\s*[a-z_][A-Za-z0-9_]*\s*\((.*)\)\s*\.\s*$")
 
 
@@ -195,7 +201,9 @@ def rule_program_error(source: str) -> str | None:
 _COMMENT_RE = re.compile(r"%.*")
 _PRED_RE = re.compile(r"\b([a-z_][A-Za-z0-9_]*)\s*\(")
 # ``L = L0 + 1`` and friends: a variable assigned another variable offset by a constant.
-_INCREMENT_RE = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\s*=\s*([A-Z][A-Za-z0-9_]*)\s*[+-]\s*\d+")
+_INCREMENT_RE = re.compile(
+    r"\b([A-Z][A-Za-z0-9_]*)\s*=\s*([A-Z][A-Za-z0-9_]*)\s*[+-]\s*\d+"
+)
 # the same growth written straight into a head argument: ``aux_p(A, D, N+1)``
 _ARG_ARITH_RE = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\s*[+-]\s*\d+")
 
@@ -223,7 +231,9 @@ def _recursive_predicates(progs) -> set[str]:
 
     reach = {name: set(deps) for name, deps in edges.items()}
     changed = True
-    while changed:  # transitive closure; a class's dependency graph is a handful of nodes
+    while (
+        changed
+    ):  # transitive closure; a class's dependency graph is a handful of nodes
         changed = False
         for name, deps in reach.items():
             grown = deps.union(*(reach.get(d, set()) for d in deps)) if deps else deps
@@ -265,7 +275,9 @@ def unbounded_recursion_errors(progs) -> dict[str, str]:
                 continue
             clause = f"{head} :- {body}"
             growing = {v for pair in _INCREMENT_RE.findall(clause) for v in pair}
-            growing |= set(_ARG_ARITH_RE.findall(head[head.find("(") + 1:] if "(" in head else ""))
+            growing |= set(
+                _ARG_ARITH_RE.findall(head[head.find("(") + 1 :] if "(" in head else "")
+            )
             if growing and not _bounded_above(clause, growing):
                 errors[prog.name] = (
                     f"non-terminating recursion: {m.group(1)} recurses while incrementing "
@@ -328,7 +340,9 @@ class _Union:
         return groups
 
 
-def _clause_components(head: str, body: str) -> tuple[dict[str, set[str]], list[str], set[str]]:
+def _clause_components(
+    head: str, body: str
+) -> tuple[dict[str, set[str]], list[str], set[str]]:
     """``(variable components, negative literals, aggregate result variables)`` for a clause.
 
     Variables are joined only by *positive* predicate literals and by plain ``=``. A negated
@@ -350,7 +364,9 @@ def _clause_components(head: str, body: str) -> tuple[dict[str, set[str]], list[
             continue
         if "#" in literal:
             elsewhere = set(_VAR_RE.findall(head))
-            elsewhere.update(v for j, o in enumerate(literals) if j != i for v in _VAR_RE.findall(o))
+            elsewhere.update(
+                v for j, o in enumerate(literals) if j != i for v in _VAR_RE.findall(o)
+            )
             union.union([v for v in _VAR_RE.findall(literal) if v in elsewhere])
             # variables outside the braces are the aggregate's result, bound by it
             outer = _VAR_RE.findall(_AGG_BRACES_RE.sub(" ", literal))
@@ -362,7 +378,11 @@ def _clause_components(head: str, body: str) -> tuple[dict[str, set[str]], list[
             if re.fullmatch(r"[^!<>=]*=[^=]*", literal):  # plain equality does bind
                 union.union(_VAR_RE.findall(literal))
 
-    return union.components(), [lit for lit in literals if _NOT_RE.match(lit)], aggregate_results
+    return (
+        union.components(),
+        [lit for lit in literals if _NOT_RE.match(lit)],
+        aggregate_results,
+    )
 
 
 # Stable identifiers for the static rejections, so a caller — a repair prompt for a second
@@ -378,7 +398,9 @@ def _is_static_literal(literal: str, static_predicates) -> bool:
     return m is not None and m.group(1) in static_predicates
 
 
-def cross_product_errors(progs, static_predicates=frozenset()) -> dict[str, tuple[str, str]]:
+def cross_product_errors(
+    progs, static_predicates=frozenset()
+) -> dict[str, tuple[str, str]]:
     """Programs with an unjoined-variable clause, as ``{name: (code, message)}``.
 
     ``static_predicates`` names background predicates whose facts do not grow with the
@@ -420,8 +442,12 @@ def cross_product_errors(progs, static_predicates=frozenset()) -> dict[str, tupl
             positive_vars = {
                 v
                 for lit in _body_literals(body)
-                if not _NOT_RE.match(lit) and "(" in lit and not _is_static_literal(lit, static_predicates)
-                for v in _VAR_RE.findall(_AGG_BRACES_RE.sub(" ", lit) if "#" in lit else lit)
+                if not _NOT_RE.match(lit)
+                and "(" in lit
+                and not _is_static_literal(lit, static_predicates)
+                for v in _VAR_RE.findall(
+                    _AGG_BRACES_RE.sub(" ", lit) if "#" in lit else lit
+                )
             }
             generating = [c for c in components.values() if c & positive_vars]
             if len(generating) < 2:
@@ -463,7 +489,9 @@ def cross_product_errors(progs, static_predicates=frozenset()) -> dict[str, tupl
     return errors
 
 
-def static_rule_errors(progs, static_predicates=frozenset()) -> dict[str, tuple[str, str]]:
+def static_rule_errors(
+    progs, static_predicates=frozenset()
+) -> dict[str, tuple[str, str]]:
     """All static rejections for ``progs``, as ``{program name: (code, message)}``.
 
     The single entry point for checks that must run *before* clingo sees a program, because
@@ -480,31 +508,44 @@ def static_rule_errors(progs, static_predicates=frozenset()) -> dict[str, tuple[
     return errors
 
 
-def derive_rule_extensions(progs, facts: list[str], mol_ids, timeout: float | None = DEFAULT_GROUNDING_TIMEOUT, batch_size: int | None = None) -> dict[str, dict[str, list[tuple[str, ...]]]]:
+def derive_rule_extensions(
+    progs,
+    facts: list[str],
+    mol_ids,
+    timeout: float | None = DEFAULT_GROUNDING_TIMEOUT,
+    batch_size: int | None = None,
+) -> dict[str, dict[str, list[tuple[str, ...]]]]:
     """Ground ``progs`` together and group each one's derived atoms by molecule.
 
     All programs go into a single clingo instance, so one may build on predicates another
-    defines. 
+    defines.
 
     The facts are split per molecule and ground in batches of ``batch_size`` rather than all
-    at once. 
-    
+    at once.
+
     ``timeout`` is the wall-clock ceiling for the whole call.
 
     Returns ``{program_name: {mol_id: [arg_tuple, ...]}}``, with one entry per program.
     """
-    from chebILP.evaluation.clingo_eval import GROUNDING_BATCH_SIZE, ground_extensions_isolated
+    from chebILP.evaluation.clingo_eval import (
+        GROUNDING_BATCH_SIZE,
+        ground_extensions_isolated,
+    )
 
     if batch_size is None:
         batch_size = GROUNDING_BATCH_SIZE
     names = [p.name for p in progs]
     per_molecule = group_facts_by_molecule(facts, mol_ids)
     fact_groups = [
-        [line for group in per_molecule[i:i + batch_size] for line in group]
+        [line for group in per_molecule[i : i + batch_size] for line in group]
         for i in range(0, len(per_molecule), batch_size)
     ] or [facts]
     derived = ground_extensions_isolated(
-        [p.source for p in progs], fact_groups, names, timeout=timeout, total_timeout=timeout,
+        [p.source for p in progs],
+        fact_groups,
+        names,
+        timeout=timeout,
+        total_timeout=timeout,
     )
     atom2mol = atom_to_molecule(facts)
     known = {str(m) for m in mol_ids}
@@ -513,7 +554,9 @@ def derive_rule_extensions(progs, facts: list[str], mol_ids, timeout: float | No
     for name in names:
         by_mol: dict[str, list[tuple[str, ...]]] = {}
         for args in derived.get(name, []):
-            molecules = {atom2mol[a] for a in args if a in atom2mol} | {a for a in args if a in known}
+            molecules = {atom2mol[a] for a in args if a in atom2mol} | {
+                a for a in args if a in known
+            }
             for mol in molecules & known:
                 by_mol.setdefault(mol, []).append(args)
         extensions[name] = by_mol
@@ -522,13 +565,20 @@ def derive_rule_extensions(progs, facts: list[str], mol_ids, timeout: float | No
 
 def _rewrite_rule_name(source: str, old: str, new: str) -> str:
     """Rename the primary predicate ``old`` to ``new`` (header + word-boundary heads)."""
-    source = _NAME_RE.sub(f"% PREDICATE_NAME: {new}", source, count=1) if _NAME_RE.search(source) else source
+    source = (
+        _NAME_RE.sub(f"% PREDICATE_NAME: {new}", source, count=1)
+        if _NAME_RE.search(source)
+        else source
+    )
     return re.sub(rf"\b{re.escape(old)}\b", new, source)
 
 
 def aux_rule_path(name: str, library_dir: str) -> str:
     """Path of a rule program's canonical ``.pl`` file in the library."""
-    return os.path.join(get_aux_programs_dir(base_dir=library_dir), f"{sanitize_predicate_name(name)}.pl")
+    return os.path.join(
+        get_aux_programs_dir(base_dir=library_dir),
+        f"{sanitize_predicate_name(name)}.pl",
+    )
 
 
 def add_rule_to_library(source: str, library_dir: str, chebi_id=None):
@@ -613,7 +663,9 @@ def _defined_predicates(progs) -> set[str]:
 
 def _referenced_predicates(prog) -> set[str]:
     """Predicate names appearing in the body of any clause of ``prog``."""
-    return {name for _, body in _clauses(prog.source) for name in _PRED_RE.findall(body)}
+    return {
+        name for _, body in _clauses(prog.source) for name in _PRED_RE.findall(body)
+    }
 
 
 def referenced_fact_predicates(progs, prefix: str) -> set[str]:
@@ -656,7 +708,9 @@ def _definition_index(library_dir: str) -> dict[str, list[str]]:
     return index
 
 
-def resolve_rule_dependencies(progs, library_dir: str | None = None) -> list[RuleProgram]:
+def resolve_rule_dependencies(
+    progs, library_dir: str | None = None
+) -> list[RuleProgram]:
     """Library programs defining ``aux_*`` predicates ``progs`` reference but do not define.
 
     ``class_map.json`` records only the predicates a class *chose*, never the ones those
@@ -695,10 +749,14 @@ def resolve_rule_dependencies(progs, library_dir: str | None = None) -> list[Rul
                 if len(stems) > 1:
                     logger.warning(
                         "Auxiliary predicate %s is defined by %d library programs; using %s.",
-                        name, len(stems), stem,
+                        name,
+                        len(stems),
+                        stem,
                     )
             if stem in loaded_stems:
-                defined.add(name)  # already pulled in under a different predicate's name
+                defined.add(
+                    name
+                )  # already pulled in under a different predicate's name
                 continue
             loaded_stems.add(stem)
             path = aux_rule_path(stem, library_dir)
@@ -781,7 +839,11 @@ def analyze_hypothesis(clause_source: str) -> dict | None:
     datalog_ok = True
     for lit in literals:
         stripped = lit.strip()
-        if _NOT_RE.match(stripped) or "#" in stripped or not _SIMPLE_LITERAL_RE.match(stripped):
+        if (
+            _NOT_RE.match(stripped)
+            or "#" in stripped
+            or not _SIMPLE_LITERAL_RE.match(stripped)
+        ):
             datalog_ok = False
             continue
         m = _PRED_RE.match(stripped)
@@ -831,8 +893,11 @@ def prune_hypothesis(clause_source: str, available_predicates) -> str | None:
         return m.group(1) if m else None
 
     kept = [
-        lit for lit in literals
-        if not ((n := _name(lit)) and n.startswith("aux_") and n not in available_predicates)
+        lit
+        for lit in literals
+        if not (
+            (n := _name(lit)) and n.startswith("aux_") and n not in available_predicates
+        )
     ]
 
     # Drop has_atom(A, X) links whose atom variable no longer appears in any other literal.
@@ -842,7 +907,8 @@ def prune_hypothesis(clause_source: str, available_predicates) -> str | None:
             args = _head_args(lit.strip())
             atom_var = args[1] if len(args) == 2 else None
             if atom_var is not None and not any(
-                j != i and atom_var in _VAR_RE.findall(other) for j, other in enumerate(kept)
+                j != i and atom_var in _VAR_RE.findall(other)
+                for j, other in enumerate(kept)
             ):
                 continue
         pruned.append(lit.strip())
@@ -850,14 +916,23 @@ def prune_hypothesis(clause_source: str, available_predicates) -> str | None:
     if not pruned:
         return None
     if len(kept) < len(literals):
-        bound = {v for lit in pruned if not _NOT_RE.match(lit) and _name(lit) for v in _VAR_RE.findall(lit)}
-        needed = set(_VAR_RE.findall(head)) | {v for lit in pruned for v in _VAR_RE.findall(lit)}
+        bound = {
+            v
+            for lit in pruned
+            if not _NOT_RE.match(lit) and _name(lit)
+            for v in _VAR_RE.findall(lit)
+        }
+        needed = set(_VAR_RE.findall(head)) | {
+            v for lit in pruned for v in _VAR_RE.findall(lit)
+        }
         if needed - bound:
             return None
     return f"{head.strip()} :- {', '.join(pruned)}."
 
 
-def save_class_hypothesis(chebi_id, entry: dict, library_dir: str | None = None) -> None:
+def save_class_hypothesis(
+    chebi_id, entry: dict, library_dir: str | None = None
+) -> None:
     """Record one class's LLM hypothesis (clause text + train-F1 metrics) in the library."""
     import json
 
@@ -913,7 +988,9 @@ def load_class_rules(chebi_id, library_dir: str | None = None) -> list[RuleProgr
         if not os.path.exists(path):
             logger.warning(
                 "Auxiliary rule %s used by CHEBI:%s is missing from the library (%s).",
-                name, chebi_id, path,
+                name,
+                chebi_id,
+                path,
             )
             continue
         with open(path, "r", encoding="utf-8") as f:
@@ -941,7 +1018,9 @@ def load_created_rules(library_dir: str) -> dict[str, set[str]]:
         return {}
     created: dict[str, set[str]] = {}
     for fname in os.listdir(logs_dir):
-        class_id = class_id_from_head(fname[:-len(".md")]) if fname.endswith(".md") else None
+        class_id = (
+            class_id_from_head(fname[: -len(".md")]) if fname.endswith(".md") else None
+        )
         if class_id is None:
             continue
         stems: set[str] = set()
@@ -965,7 +1044,10 @@ def dependent_rules(programs: dict[str, RuleProgram], stems) -> set[str]:
     ``programs`` maps library stem to program. Only ``aux_*`` predicates link programs, as in
     :func:`resolve_rule_dependencies`; a helper predicate is private to the program defining it.
     """
-    defines = {s: {n for n in _defined_predicates([p]) if n.startswith("aux_")} for s, p in programs.items()}
+    defines = {
+        s: {n for n in _defined_predicates([p]) if n.startswith("aux_")}
+        for s, p in programs.items()
+    }
     uses = {
         s: {n for n in _referenced_predicates(p) if n.startswith("aux_")} - defines[s]
         for s, p in programs.items()

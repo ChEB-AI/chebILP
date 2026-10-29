@@ -75,7 +75,7 @@ _rate_limit: RateLimitInfo | None = None  # from the latest CLI query
 
 def _backoff(attempt: int) -> float:
     """Seconds to wait before retry ``attempt + 1``: ~7.5 min in total over 5 attempts."""
-    return min(30 * 2 ** attempt, 300)
+    return min(30 * 2**attempt, 300)
 
 
 def _wait_for_session_window() -> None:
@@ -88,19 +88,32 @@ def _wait_for_session_window() -> None:
     used, resets_at = window.get("utilization"), window.get("resetsAt")
     if info.rate_limit_type == "five_hour":
         resets_at = resets_at or info.resets_at
-        used = 1.0 if info.status == "rejected" else (used if used is not None else info.utilization)
+        used = (
+            1.0
+            if info.status == "rejected"
+            else (used if used is not None else info.utilization)
+        )
     if used is None or used < _SESSION_LIMIT or not resets_at:
         return
     wait = resets_at + _RESET_MARGIN - time.time()
     if wait > 0:
-        resume = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(resets_at + _RESET_MARGIN))
-        print(f"  5-hour session window at {used:.0%} (limit {_SESSION_LIMIT:.0%}); pausing until {resume}", flush=True)
+        resume = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(resets_at + _RESET_MARGIN)
+        )
+        print(
+            f"  5-hour session window at {used:.0%} (limit {_SESSION_LIMIT:.0%}); pausing until {resume}",
+            flush=True,
+        )
         time.sleep(wait)
     _rate_limit = None
 
 
 async def _run_query(
-    model: str, system: str, prompt: str, schema: type[BaseModel], effort: str | None = None
+    model: str,
+    system: str,
+    prompt: str,
+    schema: type[BaseModel],
+    effort: str | None = None,
 ) -> ResultMessage | None:
     """Drive one CLI query to completion and return its final ``ResultMessage``.
 
@@ -111,9 +124,9 @@ async def _run_query(
     _drop_api_key_auth()
     options = ClaudeAgentOptions(
         model=model,
-        system_prompt=system,  
+        system_prompt=system,
         tools=[],
-        setting_sources=[],         
+        setting_sources=[],
         output_format={"type": "json_schema", "schema": schema.model_json_schema()},
         effort=effort,
         # Skips the per-session title request the CLI otherwise sends to a Haiku model.
@@ -153,7 +166,9 @@ def _price_key(model: str) -> str | None:
     return max(hits, key=len) if hits else None
 
 
-def _usage_summary(model: str, result: ResultMessage) -> tuple[dict | None, float | None]:
+def _usage_summary(
+    model: str, result: ResultMessage
+) -> tuple[dict | None, float | None]:
     """Tokens of ``model`` in one CLI query, and the list-price cost of every model it used.
 
     The CLI also makes a small side call on another model (e.g. a Haiku session title); it is
@@ -161,21 +176,34 @@ def _usage_summary(model: str, result: ResultMessage) -> tuple[dict | None, floa
     """
     model_usage = result.model_usage or {}
     split = (result.usage or {}).get("cache_creation") or {}
-    w1h, w5m = split.get("ephemeral_1h_input_tokens") or 0, split.get("ephemeral_5m_input_tokens") or 0
+    w1h, w5m = (
+        split.get("ephemeral_1h_input_tokens") or 0,
+        split.get("ephemeral_5m_input_tokens") or 0,
+    )
     write_mult = (2.0 * w1h + 1.25 * w5m) / (w1h + w5m) if (w1h + w5m) else 1.25
     tokens, cost = None, (0.0 if model_usage else None)
     for name, mu in model_usage.items():
         t_in, t_out = mu.get("inputTokens", 0), mu.get("outputTokens", 0)
-        t_w, t_r = mu.get("cacheCreationInputTokens", 0), mu.get("cacheReadInputTokens", 0)
+        t_w, t_r = (
+            mu.get("cacheCreationInputTokens", 0),
+            mu.get("cacheReadInputTokens", 0),
+        )
         key = _price_key(mu.get("canonicalModel") or name)
         if key is not None and key == _price_key(model):
-            tokens = {"input": t_in, "output": t_out, "thinking": mu.get("thinkingTokens", 0),
-                      "cache_write": t_w, "cache_read": t_r}
+            tokens = {
+                "input": t_in,
+                "output": t_out,
+                "thinking": mu.get("thinkingTokens", 0),
+                "cache_write": t_w,
+                "cache_read": t_r,
+            }
         if key is None or cost is None:
             cost = None
             continue
         p_in, p_out, p_read = _PRICES[key]
-        cost += (t_in * p_in + t_out * p_out + t_w * p_in * write_mult + t_r * p_read) / 1e6
+        cost += (
+            t_in * p_in + t_out * p_out + t_w * p_in * write_mult + t_r * p_read
+        ) / 1e6
     return tokens, cost
 
 
@@ -209,8 +237,12 @@ def structured_completion(
     """
     try:
         if "/" in model:
-            return _openai_structured_completion(model, system, prompt, schema, max_retries=max_retries)
-        return _cli_structured_completion(model, system, prompt, schema, max_retries=max_retries, effort=effort)
+            return _openai_structured_completion(
+                model, system, prompt, schema, max_retries=max_retries
+            )
+        return _cli_structured_completion(
+            model, system, prompt, schema, max_retries=max_retries, effort=effort
+        )
     except LLMCallFailed:
         raise
     except Exception as e:
@@ -245,20 +277,31 @@ def _cli_structured_completion(
         attempt += 1
         try:
             started = time.monotonic()
-            print(f"  requesting {cli_model} via CLI (attempt {attempt}/{max_retries}, timeout {_CLI_TIMEOUT:.0f}s)...")
-            result = asyncio.run(asyncio.wait_for(_run_query(cli_model, system, prompt, schema, effort), timeout=_CLI_TIMEOUT))
+            print(
+                f"  requesting {cli_model} via CLI (attempt {attempt}/{max_retries}, timeout {_CLI_TIMEOUT:.0f}s)..."
+            )
+            result = asyncio.run(
+                asyncio.wait_for(
+                    _run_query(cli_model, system, prompt, schema, effort),
+                    timeout=_CLI_TIMEOUT,
+                )
+            )
             print(f"  response in {time.monotonic() - started:.0f}s")
         except asyncio.TimeoutError:
             last_exc = TimeoutError(f"CLI query timed out after {_CLI_TIMEOUT:.0f}s")
             wait = _backoff(attempt - 1)
-            print(f"  CLI timeout (attempt {attempt}/{max_retries}), retrying in {wait}s")
+            print(
+                f"  CLI timeout (attempt {attempt}/{max_retries}), retrying in {wait}s"
+            )
             if attempt < max_retries:
                 time.sleep(wait)
             continue
         except (CLIConnectionError, ProcessError) as e:
             last_exc = e
             wait = _backoff(attempt - 1)
-            print(f"  CLI error (attempt {attempt}/{max_retries}), retrying in {wait}s: {e}")
+            print(
+                f"  CLI error (attempt {attempt}/{max_retries}), retrying in {wait}s: {e}"
+            )
             if attempt < max_retries:
                 time.sleep(wait)
             continue
@@ -273,19 +316,49 @@ def _cli_structured_completion(
 
         tokens, cost = _usage_summary(cli_model, result)
         info = _rate_limit
-        if info is not None and info.status == "rejected" and not (result.subtype == "success" and result.structured_output):
-            attempts.append({"error": f"rate limit ({info.rate_limit_type})", "raw": result.result, "cost": cost, "tokens": tokens})
-            reset_at = info.resets_at or ((info.raw.get("unifiedWindows") or {}).get(info.rate_limit_type) or {}).get("resetsAt")
-            if info.rate_limit_type == "five_hour" and reset_at and reset_at > time.time() - _RESET_MARGIN:
+        if (
+            info is not None
+            and info.status == "rejected"
+            and not (result.subtype == "success" and result.structured_output)
+        ):
+            attempts.append(
+                {
+                    "error": f"rate limit ({info.rate_limit_type})",
+                    "raw": result.result,
+                    "cost": cost,
+                    "tokens": tokens,
+                }
+            )
+            reset_at = info.resets_at or (
+                (info.raw.get("unifiedWindows") or {}).get(info.rate_limit_type) or {}
+            ).get("resetsAt")
+            if (
+                info.rate_limit_type == "five_hour"
+                and reset_at
+                and reset_at > time.time() - _RESET_MARGIN
+            ):
                 attempt -= 1  # waited out at the top of the loop
                 continue
-            resets = time.strftime("%Y-%m-%d %H:%M", time.localtime(reset_at)) if reset_at else "unknown"
-            exc = LLMCallFailed(f"{info.rate_limit_type} usage limit reached (resets {resets})")
+            resets = (
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(reset_at))
+                if reset_at
+                else "unknown"
+            )
+            exc = LLMCallFailed(
+                f"{info.rate_limit_type} usage limit reached (resets {resets})"
+            )
             exc._chebilp_attempts = attempts
             raise exc
 
         if result.stop_reason == "refusal":
-            attempts.append({"error": "refusal", "raw": result.result, "cost": cost, "tokens": tokens})
+            attempts.append(
+                {
+                    "error": "refusal",
+                    "raw": result.result,
+                    "cost": cost,
+                    "tokens": tokens,
+                }
+            )
             exc = ModelRefusal(f"{cli_model} declined this request (safety classifier)")
             exc._chebilp_attempts = attempts
             raise exc
@@ -298,7 +371,9 @@ def _cli_structured_completion(
             return parsed, raw, attempts
 
         # No structured output despite the SDK's own retries — terminal, don't re-ask.
-        raw = json.dumps(structured, ensure_ascii=False) if structured else result.result
+        raw = (
+            json.dumps(structured, ensure_ascii=False) if structured else result.result
+        )
         detail = f"subtype={result.subtype}, errors={result.errors}"
         attempts.append({"error": detail, "raw": raw, "cost": cost, "tokens": tokens})
         last_exc = RuntimeError(f"no valid structured output ({detail})")
@@ -338,15 +413,21 @@ def _openai_structured_completion(
     api_base = os.environ.get("OPENAI_API_BASE") or os.environ.get("OPENAI_BASE_URL")
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_base:
-        raise RuntimeError("OPENAI_API_BASE is not set (needed for the 'provider/name' backend)")
+        raise RuntimeError(
+            "OPENAI_API_BASE is not set (needed for the 'provider/name' backend)"
+        )
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set (needed for the 'provider/name' backend)")
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set (needed for the 'provider/name' backend)"
+        )
 
     # A hung/slow endpoint must surface as a retryable APITimeoutError, not an invisible
     # block: the SDK default is 600s per request, long enough to look like a wedged run.
     request_timeout = float(os.environ.get("OPENAI_TIMEOUT", "300"))
     client = openai.OpenAI(base_url=api_base, api_key=api_key, timeout=request_timeout)
-    api_model = model.split("/", 1)[1]  # drop the "provider/" prefix; keep the rest verbatim
+    api_model = model.split("/", 1)[
+        1
+    ]  # drop the "provider/" prefix; keep the rest verbatim
 
     schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
     system_full = (
@@ -370,7 +451,9 @@ def _openai_structured_completion(
     for attempt in range(max_retries):
         try:
             started = time.monotonic()
-            print(f"  requesting {api_model} (attempt {attempt + 1}/{max_retries}, timeout {request_timeout:.0f}s)...")
+            print(
+                f"  requesting {api_model} (attempt {attempt + 1}/{max_retries}, timeout {request_timeout:.0f}s)..."
+            )
             response = client.chat.completions.create(
                 model=api_model,
                 messages=messages,
@@ -379,11 +462,15 @@ def _openai_structured_completion(
             elapsed = time.monotonic() - started
             finish = response.choices[0].finish_reason
             chars = len(response.choices[0].message.content or "")
-            print(f"  response in {elapsed:.0f}s (finish_reason={finish}, {chars} chars)")
+            print(
+                f"  response in {elapsed:.0f}s (finish_reason={finish}, {chars} chars)"
+            )
         except transient as e:
             last_exc = e
             wait = _backoff(attempt)
-            print(f"  API error (attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {e}")
+            print(
+                f"  API error (attempt {attempt + 1}/{max_retries}), retrying in {wait}s: {e}"
+            )
             if attempt + 1 < max_retries:
                 time.sleep(wait)
             continue
@@ -406,10 +493,12 @@ def _openai_structured_completion(
             last_exc = RuntimeError(f"invalid structured output: {e}")
             # Reask: show the model its reply and the validation error.
             messages.append({"role": "assistant", "content": content})
-            messages.append({
-                "role": "user",
-                "content": f"That reply was not valid: {e}. Return only the JSON object required by the schema.",
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"That reply was not valid: {e}. Return only the JSON object required by the schema.",
+                }
+            )
 
     exc = LLMCallFailed(f"no answer from {model}: {last_exc}")
     exc._chebilp_attempts = attempts

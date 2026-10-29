@@ -3,7 +3,7 @@
 Each example is one game state; the BK gives the fluents true in it and the move taken, and the
 target is a ``next`` relation: the value a fluent takes in the following state.
 """
-import itertools
+
 import random
 import string
 
@@ -56,9 +56,17 @@ class DialMinter(IGGPMinter):
     target = "next_count"
     actions = ["inc", "dec", "stay", "spin"]
 
-    def __init__(self, out_root=None, n_positions: int = 6, spin_steps: int = 3, library_root=None):
+    def __init__(
+        self,
+        out_root=None,
+        n_positions: int = 6,
+        spin_steps: int = 3,
+        library_root=None,
+    ):
         super().__init__(out_root, library_root)
-        assert 1 < spin_steps < n_positions - 1, "spin must differ from inc, dec and stay"
+        assert 1 < spin_steps < n_positions - 1, (
+            "spin must differ from inc, dec and stay"
+        )
         self.n_positions = n_positions
         self.spin_steps = spin_steps
 
@@ -141,8 +149,14 @@ class SwitchesMinter(IGGPMinter):
     problem_type = "iggp_switches"
     target = "next_a"
 
-    def __init__(self, out_root=None, n_switches: int = 3, hit_all: bool = True, sync: bool = True,
-                 library_root=None):
+    def __init__(
+        self,
+        out_root=None,
+        n_switches: int = 3,
+        hit_all: bool = True,
+        sync: bool = True,
+        library_root=None,
+    ):
         super().__init__(out_root, library_root)
         assert 2 <= n_switches <= 26
         self.switches = list(string.ascii_lowercase[:n_switches])
@@ -189,21 +203,32 @@ class SwitchesMinter(IGGPMinter):
         return ILPProblem((self.target, 1), pos, neg, bk_facts)
 
     def get_glossary(self):
-        lines = ["next_a(State)              [TARGET] switch A is on in the state that follows State."]
+        lines = [
+            "next_a(State)              [TARGET] switch A is on in the state that follows State."
+        ]
         for x in self.switches:
-            lines += [f"true_{x}(State) / false_{x}(State)",
-                      f"                           switch {x.upper()} is currently on / off in State."]
+            lines += [
+                f"true_{x}(State) / false_{x}(State)",
+                f"                           switch {x.upper()} is currently on / off in State.",
+            ]
         lines += [
             "does(State, Agent, Action) Agent performed Action in State (Agent is always robot).",
             "role(Agent)                Agent is a player (here: robot).",
             "my_input(Agent, Action)    Action is a legal move for Agent.",
         ]
-        lines += [f"{f'action_hit_{x}(Action)':<27}Action flips switch {x.upper()} only." for x in self.switches]
+        lines += [
+            f"{f'action_hit_{x}(Action)':<27}Action flips switch {x.upper()} only."
+            for x in self.switches
+        ]
         lines.append("action_wait(Action)        Action does nothing.")
         if "hit_all" in self.actions:
-            lines += ["action_hit_all(Action)     A joint move over all switches whose effect depends on their",
-                      "                           current values."]
+            lines += [
+                "action_hit_all(Action)     A joint move over all switches whose effect depends on their",
+                "                           current values.",
+            ]
         if "sync" in self.actions:
-            lines += ["action_sync(Action)        A joint move that sets all switches according to a fixed",
-                      "                           condition on their current values."]
+            lines += [
+                "action_sync(Action)        A joint move that sets all switches according to a fixed",
+                "                           condition on their current values.",
+            ]
         return "\n".join(lines)

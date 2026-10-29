@@ -1,5 +1,3 @@
-
-
 from abc import abstractmethod, ABC
 import os
 import random
@@ -9,6 +7,7 @@ from chebILP.ilp_problem import ILPProblem, _atom
 from chebILP.predicate_generation.auxiliary_generation import format_candidates
 from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
 
+
 class ILPProblemMinter(ABC):
     """
     Abstract base class for classes that mint ILP problems.
@@ -17,7 +16,7 @@ class ILPProblemMinter(ABC):
     # Names the predicate library; all minters of one problem type share it.
     problem_type: str
 
-    def __init__(self, out_root = None, library_root = None):
+    def __init__(self, out_root=None, library_root=None):
         """
         Initialize the ILPProblemMinter.
 
@@ -37,10 +36,14 @@ class ILPProblemMinter(ABC):
     def retriever(self) -> HybridPredicateRetriever:
         """Retriever over this problem type's library, built on first use."""
         if self._retriever is None:
-            self._retriever = HybridPredicateRetriever.from_rule_library(base_dir=self.library_dir)
+            self._retriever = HybridPredicateRetriever.from_rule_library(
+                base_dir=self.library_dir
+            )
         return self._retriever
 
-    def retrieve_candidates(self, ilp_problem: ILPProblem, top_k: int = 16) -> list[dict]:
+    def retrieve_candidates(
+        self, ilp_problem: ILPProblem, top_k: int = 16
+    ) -> list[dict]:
         """Library predicates most relevant to the problem's target and glossary."""
         if not len(self.retriever):
             return []
@@ -48,7 +51,9 @@ class ILPProblemMinter(ABC):
         return self.retriever.retrieve(f"{target} {self.get_glossary()}", top_k=top_k)
 
     @staticmethod
-    def sample_bk(ilp_problem: ILPProblem, per_predicate: int = 3, seed: int = 0) -> str:
+    def sample_bk(
+        ilp_problem: ILPProblem, per_predicate: int = 3, seed: int = 0
+    ) -> str:
         """Up to ``per_predicate`` random facts of every background predicate, one per line."""
         rng = random.Random(seed)
         lines = []
@@ -67,11 +72,20 @@ class ILPProblemMinter(ABC):
         """Predicates none of whose facts mention an example id. Only a sound
         :meth:`static_predicates` where every per-example fact carries the example id, as in
         the IGGP-style problems; a trains car fact, say, names the car but not the train."""
-        first = lambda s: s[0] if isinstance(s, tuple) else s
+
+        def first(s):
+            return s[0] if isinstance(s, tuple) else s
+
         ids = {str(first(s)) for s in ilp_problem.pos_samples + ilp_problem.neg_samples}
-        args = lambda f: f if isinstance(f, tuple) else (f,)
-        return frozenset(pred for pred, facts in ilp_problem.bk_facts.items()
-                         if facts and not any(str(a) in ids for f in facts for a in args(f)))
+
+        def args(f):
+            return f if isinstance(f, tuple) else (f,)
+
+        return frozenset(
+            pred
+            for pred, facts in ilp_problem.bk_facts.items()
+            if facts and not any(str(a) in ids for f in facts for a in args(f))
+        )
 
     def max_vars(self):
         """
@@ -142,7 +156,12 @@ class ILPProblemMinter(ABC):
         )
         return system_prompt
 
-    def get_user_prompt(self, ilp_problem: ILPProblem, candidates: list[dict] | None = None, seed: int = 0):
+    def get_user_prompt(
+        self,
+        ilp_problem: ILPProblem,
+        candidates: list[dict] | None = None,
+        seed: int = 0,
+    ):
         """
         Get the user prompt for the minting process. Includes a generic task description, a predicate glossary and samples from the background knowledge
         Args:

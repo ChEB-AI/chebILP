@@ -16,13 +16,14 @@ from chebILP.ilp_path_manager import get_bias_path, get_bk_path
 from chebILP.ilp_problem_builder import AVAILABLE_PREDICATE_SETS
 from chebi_utils import build_chebi_graph, download_chebi_obo
 
+
 def load_bias_predicates(bias_path: str) -> list[tuple[str, int]]:
     """
     Load body predicates and max_vars / max_body from a bias.pl file.
-    
+
     Args:
         bias_path: Path to the bias.pl file.
-        
+
     Returns:
         List of (predicate_name, arity) tuples.
     """
@@ -62,9 +63,10 @@ def ask_claude_for_predicates(
     top_k: int = 10,
 ) -> list[tuple[str, int]]:
     import anthropic
+
     """
     Ask Claude which predicates are useful for defining a ChEBI class.
-    
+
     Args:
         chebi_id: The ChEBI ID.
         chebi_name: Human-readable name of the ChEBI class.
@@ -72,24 +74,29 @@ def ask_claude_for_predicates(
         predicates: List of (predicate_name, arity) tuples available.
         model: Claude model to use.
         top_k: Number of predicates to select (used in prompt to guide selection).
-        
+
     Returns:
         List of selected (predicate_name, arity) tuples.
     """
     from dotenv import load_dotenv
+
     load_dotenv()  # Load environment variables from .env file, including ANTHROPIC_API_KEY
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY not found in environment variables. Please set it in your .env file.")
+        raise ValueError(
+            "ANTHROPIC_API_KEY not found in environment variables. Please set it in your .env file."
+        )
     client = anthropic.Anthropic(api_key=api_key)
-    
+
     # Format predicates for the prompt
-    predicates_str = "\n".join([f"- {pred}(arity={arity})" for pred, arity in predicates])
-    
+    predicates_str = "\n".join(
+        [f"- {pred}(arity={arity})" for pred, arity in predicates]
+    )
+
     definition_section = ""
     if chebi_definition:
         definition_section = f"\nDefinition from ChEBI: {chebi_definition}\n"
-    
+
     prompt = f"""You are helping to select predicates for Inductive Logic Programming (ILP) to learn a classification rule for a chemical class.
 
 ChEBI Class: CHEBI:{chebi_id} - {chebi_name}
@@ -121,59 +128,66 @@ bSINGLE
 """
 
     response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
+        model=model, max_tokens=1024, messages=[{"role": "user", "content": prompt}]
     )
-    
+
     # Parse response to extract selected predicates
     response_text = response.content[0].text
-    selected_names = set(line.strip() for line in response_text.strip().splitlines() if line.strip())
-    
+    selected_names = set(
+        line.strip() for line in response_text.strip().splitlines() if line.strip()
+    )
+
     # Filter predicates to only those selected by Claude
-    selected_predicates = [(pred, arity) for pred, arity in predicates if pred in selected_names]
-    
+    selected_predicates = [
+        (pred, arity) for pred, arity in predicates if pred in selected_names
+    ]
+
     return selected_predicates
 
 
-def select_most_common_predicates(bk_path, predicates, top_k: int) -> list[tuple[str, int]]:
+def select_most_common_predicates(
+    bk_path, predicates, top_k: int
+) -> list[tuple[str, int]]:
     """
     Select the most common predicates for a given ChEBI class based on training examples.
-    
+
     Args:
         bk_path: Path to the bk.pl file containing the background knowledge with predicates.
         predicates: List of (predicate_name, arity) tuples available.
         top_k: Number of top predicates to select.
-        
+
     Returns:
         List of selected (predicate_name, arity) tuples.
     """
     predicate_counts = {pred: 0 for pred, _ in predicates}
-    
+
     with open(bk_path, "r") as f:
         for line in f:
             line = line.strip()
             for pred, _ in predicates:
                 if line.startswith(f"{pred}("):
                     predicate_counts[pred] += 1
-    
+
     # Sort predicates by count and select top_k
     sorted_preds = sorted(predicate_counts.items(), key=lambda x: x[1], reverse=True)
-    selected_predicates = [(pred, arity) for pred, arity in predicates if pred in dict(sorted_preds[:top_k])]
-    
-    return selected_predicates
+    selected_predicates = [
+        (pred, arity)
+        for pred, arity in predicates
+        if pred in dict(sorted_preds[:top_k])
+    ]
 
+    return selected_predicates
 
 
 def write_bias_file(
     output_path: str,
     chebi_id: int,
     head_predicate: str,
-    body_predicates: list[tuple[str, int]]
+    body_predicates: list[tuple[str, int]],
 ):
     """
     Write a bias.pl file with the selected predicates.
-    
+
     Args:
         output_path: Path to write the bias file.
         chebi_id: ChEBI ID for the target class.
@@ -182,16 +196,16 @@ def write_bias_file(
     """
     lines = [
         f"%% CHEBI:{chebi_id} (bias file with pre-selected predicates)",
-        f"",
-        f"%% max_vars(TODO).",
-        f"%% max_body(TODO).",
-        f"",
+        "",
+        "%% max_vars(TODO).",
+        "%% max_body(TODO).",
+        "",
         f"head_pred({head_predicate}, 1).",
     ]
-    
+
     for pred, arity in body_predicates:
         lines.append(f"body_pred({pred},{arity}).")
-    
+
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -208,7 +222,7 @@ def select_predicates_for_class(
 ) -> str:
     """
     Select predicates for a single ChEBI class using Claude.
-    
+
     Args:
         chebi_id: ChEBI ID of the target class.
         chebi_graph: ChEBI ontology graph built by ``build_chebi_graph``.
@@ -219,27 +233,42 @@ def select_predicates_for_class(
     Returns:
         Path to the output bias file.
     """
-    bias_path_before = get_bias_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, predicate_dir=predicate_dir)
+    bias_path_before = get_bias_path(
+        chebi_id,
+        "train",
+        base_dir=problem_dir,
+        predicate_set=predicate_set,
+        predicate_dir=predicate_dir,
+    )
     if not os.path.exists(bias_path_before):
-        raise FileNotFoundError(f"Bias file not found: {bias_path_before}. Try to build the ILP problem for this class first to generate the bias file with all predicates.")
-    
+        raise FileNotFoundError(
+            f"Bias file not found: {bias_path_before}. Try to build the ILP problem for this class first to generate the bias file with all predicates."
+        )
+
     # Load predicates from bias.pl
     predicates = load_bias_predicates(bias_path_before)
     print(f"Loaded {len(predicates)} predicates from {bias_path_before}")
-    
+
     # Get ChEBI class info
     class_info = get_chebi_class_info(chebi_graph, chebi_id)
     chebi_name = class_info.get("name", f"CHEBI:{chebi_id}")
     chebi_definition = class_info.get("definition")
-    
+
     print(f"Processing CHEBI:{chebi_id} - {chebi_name}")
-    
+
     if selection_mode == "random":
         import random
+
         selected_predicates = random.sample(predicates, min(top_k, len(predicates)))
     elif selection_mode == "top_k":
-        bk_path = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, predicate_dir=predicate_dir)
-        selected_predicates =select_most_common_predicates(bk_path, predicates, top_k)
+        bk_path = get_bk_path(
+            chebi_id,
+            "train",
+            base_dir=problem_dir,
+            predicate_set=predicate_set,
+            predicate_dir=predicate_dir,
+        )
+        selected_predicates = select_most_common_predicates(bk_path, predicates, top_k)
     elif selection_mode == "claude":
         # Ask Claude for predicate selection
         selected_predicates = ask_claude_for_predicates(
@@ -249,11 +278,21 @@ def select_predicates_for_class(
             predicates=predicates,
             top_k=top_k,
         )
-    
-    print(f"{selection_mode} selected {len(selected_predicates)} predicates out of {len(predicates)}")
-    
+
+    print(
+        f"{selection_mode} selected {len(selected_predicates)} predicates out of {len(predicates)}"
+    )
+
     # Write output bias file
-    output_path = get_bias_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=top_k, predicate_dir=predicate_dir)
+    output_path = get_bias_path(
+        chebi_id,
+        "train",
+        base_dir=problem_dir,
+        predicate_set=predicate_set,
+        selection_mode=selection_mode,
+        selection_k=top_k,
+        predicate_dir=predicate_dir,
+    )
     write_bias_file(
         output_path=output_path,
         chebi_id=chebi_id,
@@ -262,14 +301,28 @@ def select_predicates_for_class(
     )
 
     # filter bk.pl file to only include selected predicates
-    bk_path_before = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, predicate_dir=predicate_dir)
-    bk_path_after = get_bk_path(chebi_id, "train", base_dir=problem_dir, predicate_set=predicate_set, selection_mode=selection_mode, selection_k=top_k, predicate_dir=predicate_dir)
+    bk_path_before = get_bk_path(
+        chebi_id,
+        "train",
+        base_dir=problem_dir,
+        predicate_set=predicate_set,
+        predicate_dir=predicate_dir,
+    )
+    bk_path_after = get_bk_path(
+        chebi_id,
+        "train",
+        base_dir=problem_dir,
+        predicate_set=predicate_set,
+        selection_mode=selection_mode,
+        selection_k=top_k,
+        predicate_dir=predicate_dir,
+    )
     with open(bk_path_before, "r") as f_in, open(bk_path_after, "w+") as f_out:
         for line in f_in:
             line = line.strip()
             if any(line.startswith(f"{pred}(") for pred, _ in selected_predicates):
                 f_out.write(line + "\n")
-    
+
     print(f"Wrote selected predicates to {output_path}")
     return output_path
 
@@ -285,7 +338,7 @@ def select_predicates_for_classes(
 ) -> dict[int, str]:
     """
     Select predicates for multiple ChEBI classes.
-    
+
     Args:
         chebi_ids: List of ChEBI IDs to process.
         chebi_version: ChEBI version to use.
@@ -298,7 +351,7 @@ def select_predicates_for_classes(
     """
     if problem_dir is None:
         problem_dir = os.path.join("data", "ilp_problems")
-    
+
     # Load ChEBI data
     print(f"Loading ChEBI data (version {chebi_version})...")
     data_dir = os.path.join("data", f"chebi_v{chebi_version}")
@@ -307,7 +360,7 @@ def select_predicates_for_classes(
     if not os.path.exists(obo_path):
         download_chebi_obo(chebi_version, dest_dir=data_dir)
     chebi_graph = build_chebi_graph(obo_path)
-    
+
     results = {}
     for chebi_id in chebi_ids:
         try:
@@ -324,5 +377,5 @@ def select_predicates_for_classes(
         except Exception as e:
             print(f"Error processing CHEBI:{chebi_id}: {e}")
             results[chebi_id] = None
-    
+
     return results

@@ -5,7 +5,7 @@
 # chebILP.predicate_generation.auxiliary_predicates for the contract, and chebILP.predicate_generation.auxiliary_generation for the
 # shared generate -> validate -> store loop).
 #
-# Predicates are kept in ONE shared library. For each class we first RETRIEVE the most 
+# Predicates are kept in ONE shared library. For each class we first RETRIEVE the most
 # relevant existing predicates (hybrid
 # BM25 + dense, see chebILP.predicate_generation.predicate_retrieval) and offer them to the LLM, which may
 # reuse any of them and/or invent new ones. Reused + new predicates are recorded for the
@@ -39,7 +39,10 @@ from chebILP.predicate_generation.auxiliary_generation import (
     format_parents,
     one_line,
 )
-from chebILP.predicate_generation.auxiliary_predicates import add_program_to_library, load_program_source
+from chebILP.predicate_generation.auxiliary_predicates import (
+    add_program_to_library,
+    load_program_source,
+)
 from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
 from chebILP.utils import add_class_arguments, resolve_classes
 
@@ -66,7 +69,7 @@ You are an expert in cheminformatics, RDKit, and Inductive Logic Programming (IL
 Your task is to select AUXILIARY PREDICATES that help an ILP system distinguish a
 ChEBI chemical class from other molecules.
 
-You will be shown some potentially relevant pre-existing auxiliary predicates for the target class. 
+You will be shown some potentially relevant pre-existing auxiliary predicates for the target class.
 Prefer to REUSE those that fit rather than writing new ones; only invent NEW predicates for
 properties the reuse candidates do not already cover.
 
@@ -194,16 +197,18 @@ class PredicateGenerator(AuxiliaryGenerator):
         return HybridPredicateRetriever.from_library(base_dir=self.library_dir)
 
     def build_user_prompt(self, chebi_id, info, candidates, ctx) -> str:
-        definition_str = f"Definition: {info['definition']}\n" if info["definition"] else ""
+        definition_str = (
+            f"Definition: {info['definition']}\n" if info["definition"] else ""
+        )
         return f"""\
-Target class: {info['name']} (CHEBI:{chebi_id})
+Target class: {info["name"]} (CHEBI:{chebi_id})
 {definition_str}{format_parents(info)}
 Predicates ALREADY available (do NOT duplicate these):
 {_EXISTING_PREDICATES}
 
 {format_candidates(candidates, with_kind=True)}
 Choose up to {self.n_predicates} auxiliary predicates that would help distinguish
-"{info['name']}" from other molecules. REUSE the candidates above wherever they fit;
+"{info["name"]}" from other molecules. REUSE the candidates above wherever they fit;
 only write NEW programs for properties they do not already cover. Favour a mix of
 shortcut substructures and hard-to-express global concepts grounded in the definition.
 
@@ -213,7 +218,9 @@ shortcut substructures and hard-to-express global concepts grounded in the defin
 """
 
     def to_source(self, item) -> str:
-        body = "\n".join(l for l in item.program.splitlines() if not _HEADER_RE.match(l)).strip()
+        body = "\n".join(
+            ln for ln in item.program.splitlines() if not _HEADER_RE.match(ln)
+        ).strip()
         body = _DOCSTRING_RE.sub("", body)
         description = one_line(item.description).replace('"""', "'''")
         return (
@@ -227,34 +234,62 @@ shortcut substructures and hard-to-express global concepts grounded in the defin
         return _validate(source, label)
 
     def add_to_library(self, source, chebi_id):
-        return add_program_to_library(source, problem_dir=self.library_dir, chebi_id=chebi_id)
+        return add_program_to_library(
+            source, problem_dir=self.library_dir, chebi_id=chebi_id
+        )
 
     def retriever_entry(self, stem, saved) -> dict:
-        return {"name": saved.name, "description": saved.description, "kind": saved.kind, "stem": stem}
+        return {
+            "name": saved.name,
+            "description": saved.description,
+            "kind": saved.kind,
+            "stem": stem,
+        }
 
     def describe(self, saved, stem, reason) -> str:
         return f"{saved.name} ({saved.kind}) -> library/{stem}.py: {saved.description}"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate LLM auxiliary predicates for ChEBI classes.")
+    parser = argparse.ArgumentParser(
+        description="Generate LLM auxiliary predicates for ChEBI classes."
+    )
     add_class_arguments(parser)
     parser.add_argument("--chebi_version", type=int, default=248)
-    parser.add_argument("--predicate_dir", default=os.path.join("data", "llm_generated_predicates"),
-                        help="Directory for storing generated predicates.")
-    parser.add_argument("--model", default="claude-haiku-4-5",
-                        help="A bare Claude id (claude-opus-5, claude-haiku-4-5) runs through the "
-                             "logged-in `claude` CLI and bills your Claude subscription (set "
-                             "CHEBILP_CLAUDE_CLI if it is not on PATH). A 'provider/name' id "
-                             "(openai/gpt-4o) runs through an OpenAI-compatible endpoint set by "
-                             "OPENAI_API_BASE and OPENAI_API_KEY.")
-    parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
-    parser.add_argument("--top_k", type=int, default=16,
-                        help="Reuse candidates retrieved from the shared library per class.")
-    parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], default=None,
-                        help="Effort level for the `claude` CLI backend. Default: the CLI's per-model "
-                             "default (medium for Opus 5.5, high for Sonnet 5.5 and Haiku 5.5). "
-                             "Ignored for 'provider/name' models.")
+    parser.add_argument(
+        "--predicate_dir",
+        default=os.path.join("data", "llm_generated_predicates"),
+        help="Directory for storing generated predicates.",
+    )
+    parser.add_argument(
+        "--model",
+        default="claude-haiku-4-5",
+        help="A bare Claude id (claude-opus-5, claude-haiku-4-5) runs through the "
+        "logged-in `claude` CLI and bills your Claude subscription (set "
+        "CHEBILP_CLAUDE_CLI if it is not on PATH). A 'provider/name' id "
+        "(openai/gpt-4o) runs through an OpenAI-compatible endpoint set by "
+        "OPENAI_API_BASE and OPENAI_API_KEY.",
+    )
+    parser.add_argument(
+        "--n_predicates",
+        type=int,
+        default=4,
+        help="Target number of predicates per class.",
+    )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=16,
+        help="Reuse candidates retrieved from the shared library per class.",
+    )
+    parser.add_argument(
+        "--effort",
+        choices=["low", "medium", "high", "xhigh", "max"],
+        default=None,
+        help="Effort level for the `claude` CLI backend. Default: the CLI's per-model "
+        "default (medium for Opus 5.5, high for Sonnet 5.5 and Haiku 5.5). "
+        "Ignored for 'provider/name' models.",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -268,7 +303,11 @@ def main():
     chebi_ids = resolve_classes(args)
 
     PredicateGenerator(
-        args.predicate_dir, args.model, args.n_predicates, args.top_k, effort=args.effort,
+        args.predicate_dir,
+        args.model,
+        args.n_predicates,
+        args.top_k,
+        effort=args.effort,
     ).run(chebi_graph, chebi_ids)
 
 

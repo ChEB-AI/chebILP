@@ -7,7 +7,7 @@
 #   python -m chebILP.predicate_generation.generate_auxiliary_rules \
 #       --labels_file labels.txt \
 #       --chebi_version 251 \
-#       --molecules_path data/chebi_v251/ChEBI25_3_STAR/molecules.pkl \
+#       --molecules_path data/chebi_v251/processed_25_3_STAR/molecules.pkl \
 #       --problem_dir data/ilp_problems \
 #       --n_predicates 4
 
@@ -26,7 +26,6 @@ from chebILP.predicate_generation.auxiliary_generation import (
     Selection,
     format_candidates,
     format_parents,
-    generate_one,
     one_line,
 )
 from chebILP.predicate_generation.auxiliary_predicates import sanitize_predicate_name
@@ -47,7 +46,7 @@ from chebILP.predicate_generation.auxiliary_rules import (
     save_class_hypothesis,
     static_rule_errors,
 )
-from chebILP.molecule_processing.fg_matching import (
+from chebILP.preprocessing.chebi.fg_matching import (
     FG_SEED_PREFIXES,
     FG_SEED_SOURCES,
     fg_fact_lines,
@@ -87,7 +86,7 @@ _COMPUTED_PREDICATES = """\
 _SYSTEM_PROMPT = """\
 You are an expert in cheminformatics, Answer Set Programming (clingo/ASP), and Inductive
 Logic Programming (ILP). Your task is to write AUXILIARY PREDICATES that help an ILP system
-distinguish a ChEBI chemical class from other molecules. 
+distinguish a ChEBI chemical class from other molecules.
 
 Each predicate has three parts. The program needs to be parsed by clingo.
 
@@ -122,8 +121,8 @@ sit and join them to other atom predicates. Prefer this when the location matter
     name:        aux_carboxyl_carbon
     description: carbons that are the carbon of a carboxyl group (C=O with an -OH or -O anion)
     program:     aux_carboxyl_carbon(C) :- c(C), bDOUBLE(C,O1), o(O1), bSINGLE(C,O2), o(O2), has_1_hs(O2), O1 != O2.
-                 aux_carboxyl_carbon(C) :- c(C), bDOUBLE(C,O1), o(O1), bSINGLE(C,O2), o(O2), charge_m1(O2), O1 != O2.   
-                
+                 aux_carboxyl_carbon(C) :- c(C), bDOUBLE(C,O1), o(O1), bSINGLE(C,O2), o(O2), charge_m1(O2), O1 != O2.
+
 
 An atom PAIR, when the property is a relationship between two atoms:
     name:        aux_amide_bond
@@ -140,7 +139,7 @@ carbons, N sugar units, one vs two carboxyls).
                      2 = #count{ O : has_atom(M,O), aux_ether_oxygen(O) }.
 
 An absence, via negation. Note it BUILDS ON aux_carboxyl_carbon above instead of restating
-it. 
+it.
     name:        aux_no_carboxyl
     description: has no carboxyl group
     program:     aux_has_carboxyl(M) :- has_atom(M,C), aux_carboxyl_carbon(C).
@@ -161,8 +160,8 @@ A property that needs computed facts (molecular weight, or rings larger than 8):
     (weight variant: aux_high_molecular_weight(M) :- mol_weight(M,W), W >= 500.)
 
 Guidance (learned from failure analysis):
-- Prefer small predicates identifying specific molecular features. The ILP system will later 
-  combine them into larger conjunctions. Favor predicates that can be reused across many 
+- Prefer small predicates identifying specific molecular features. The ILP system will later
+  combine them into larger conjunctions. Favor predicates that can be reused across many
   classes.
 - Counting and absence are the highest-value predicates: a close sibling often differs only in
   the NUMBER of a group (N carbons, N sugar units, one vs two carboxyls). Reach for #count / not.
@@ -210,6 +209,7 @@ def _apply_renames(text: str, renames: dict[str, str]) -> str:
         text = re.sub(rf"\b{re.escape(old)}\b", new, text)
     return text
 
+
 # Validate-and-reject grounds positives and negatives, which takes
 # well under a second; anything near this ceiling is pathological rather than merely slow.
 _VALIDATION_GROUNDING_TIMEOUT = 60.0
@@ -244,18 +244,28 @@ def _load_train_samples(chebi_id, problem_dir, molecules, max_pos=None, max_neg=
 
 def _mol_facts(mol_id, mol, computed_facts: bool) -> list[str]:
     """Atom (+ optional computed) facts for one molecule, matching build_background_chemlog."""
-    lines = [f"has_atom({mol_id},{get_atom_id(a.GetIdx(), mol_id)})." for a in mol.GetAtoms()]
+    lines = [
+        f"has_atom({mol_id},{get_atom_id(a.GetIdx(), mol_id)})." for a in mol.GetAtoms()
+    ]
     atom_extensions, mol_extensions = mol_to_fol_atoms(mol)
     for predicate, indices in atom_extensions.items():
         if predicate.startswith("cip_code_"):
             predicate = "cip_code_" + predicate[-1].upper()
-        if (predicate in {"EQ", "atom", "*", "r", "r#"}
-                or (predicate.startswith("r") and predicate[1:].isdigit() and int(predicate[1:]) > 0)
-                or not indices):
+        if (
+            predicate in {"EQ", "atom", "*", "r", "r#"}
+            or (
+                predicate.startswith("r")
+                and predicate[1:].isdigit()
+                and int(predicate[1:]) > 0
+            )
+            or not indices
+        ):
             continue
         if isinstance(indices[0], tuple):
             for args in indices:
-                lines.append(f"{predicate}({','.join(get_atom_id(a, mol_id) for a in args)}).")
+                lines.append(
+                    f"{predicate}({','.join(get_atom_id(a, mol_id) for a in args)})."
+                )
         else:
             for idx in indices:
                 lines.append(f"{predicate}({get_atom_id(idx, mol_id)}).")
@@ -304,8 +314,19 @@ class RuleGenerator(AuxiliaryGenerator):
     # Background predicates exempt from the cross-product check (see ``cross_product_errors``).
     static_predicates: frozenset = frozenset()
 
-    def __init__(self, library_dir, model, n_predicates, top_k, *, molecules,
-                 problem_dir, computed_facts, prompt_samples, effort=None):
+    def __init__(
+        self,
+        library_dir,
+        model,
+        n_predicates,
+        top_k,
+        *,
+        molecules,
+        problem_dir,
+        computed_facts,
+        prompt_samples,
+        effort=None,
+    ):
         super().__init__(library_dir, model, n_predicates, top_k, effort)
         self.molecules = molecules
         self.problem_dir = problem_dir
@@ -335,8 +356,16 @@ class RuleGenerator(AuxiliaryGenerator):
                 if mol is not None:
                     smiles_by_id[str(idx)] = Chem.MolToSmiles(mol)
         return {
-            "pos_smiles": [Chem.MolToSmiles(m) for m in pos_rows["mol"][:self.prompt_samples] if m is not None],
-            "neg_smiles": [Chem.MolToSmiles(m) for m in neg_rows["mol"][:self.prompt_samples] if m is not None],
+            "pos_smiles": [
+                Chem.MolToSmiles(m)
+                for m in pos_rows["mol"][: self.prompt_samples]
+                if m is not None
+            ],
+            "neg_smiles": [
+                Chem.MolToSmiles(m)
+                for m in neg_rows["mol"][: self.prompt_samples]
+                if m is not None
+            ],
             "smiles_by_id": smiles_by_id,
             "val_facts": val_facts,
             "val_ids": val_ids,
@@ -345,7 +374,9 @@ class RuleGenerator(AuxiliaryGenerator):
         }
 
     def build_user_prompt(self, chebi_id, info, candidates, ctx) -> str:
-        definition_str = f"Definition: {info['definition']}\n" if info["definition"] else ""
+        definition_str = (
+            f"Definition: {info['definition']}\n" if info["definition"] else ""
+        )
 
         sibling_str = ""
         if info["siblings"]:
@@ -354,7 +385,9 @@ class RuleGenerator(AuxiliaryGenerator):
                 for s in info["siblings"][:8]
             )
             sibling_str = (
-                "Sibling classes (look for the contrast, e.g. they may differ only by a count or chain length):\n" + parts + "\n"
+                "Sibling classes (look for the contrast, e.g. they may differ only by a count or chain length):\n"
+                + parts
+                + "\n"
             )
 
         mol_lines = []
@@ -367,14 +400,20 @@ class RuleGenerator(AuxiliaryGenerator):
         mol_str = ("\n".join(mol_lines) + "\n") if mol_lines else ""
 
         seed_usage = fg_seed_usage(c["name"] for c in candidates)
-        seed_str = f"Functional-group candidates are called as follows:\n{seed_usage}\n" if seed_usage else ""
+        seed_str = (
+            f"Functional-group candidates are called as follows:\n{seed_usage}\n"
+            if seed_usage
+            else ""
+        )
 
         computed_str = (
-            f"\nExtra facts available in this mode:\n{_COMPUTED_PREDICATES}\n" if self.computed_facts else ""
+            f"\nExtra facts available in this mode:\n{_COMPUTED_PREDICATES}\n"
+            if self.computed_facts
+            else ""
         )
 
         return f"""\
-Target class: {info['name']} (CHEBI:{chebi_id})
+Target class: {info["name"]} (CHEBI:{chebi_id})
 {definition_str}{format_parents(info)}{sibling_str}
 Background predicates ALREADY available:
 {_EXISTING_PREDICATES}
@@ -382,8 +421,8 @@ Background predicates ALREADY available:
 {mol_str}
 {format_candidates(candidates)}{seed_str}
 Choose up to {self.n_predicates} auxiliary predicates that would help distinguish
-"{info['name']}" from other molecules. REUSE the candidates above wherever they
-fit; only write NEW rules for properties they do not already cover. 
+"{info["name"]}" from other molecules. REUSE the candidates above wherever they
+fit; only write NEW rules for properties they do not already cover.
 
 {OUTPUT_CONTRACT}
   "program" is the clause text only — one molecule-level head plus any helper clauses.
@@ -395,11 +434,15 @@ fit; only write NEW rules for properties they do not already cover.
     def to_source(self, item) -> str:
         renames = _new_rule_renames([item])
         name = renames.get(sanitize_predicate_name(item.name), item.name)
-        return self._source_text(name, item.description, _apply_renames(item.program, renames))
+        return self._source_text(
+            name, item.description, _apply_renames(item.program, renames)
+        )
 
     def _source_text(self, name, description, program) -> str:
         """The library's on-disk program text for a predicate, header synthesized from name/desc."""
-        body = "\n".join(l for l in program.splitlines() if not _HEADER_RE.match(l)).strip()
+        body = "\n".join(
+            ln for ln in program.splitlines() if not _HEADER_RE.match(ln)
+        ).strip()
         return f"% PREDICATE_NAME: {name}\n% DESCRIPTION: {one_line(description)}\n{body}\n"
 
     def prepare(self, blocks, ctx) -> None:
@@ -445,20 +488,25 @@ fit; only write NEW rules for properties they do not already cover.
         # or cannot detect it (a cross product grounds "successfully", just wrongly and
         # enormously). Judged over the whole set, since a recursion cycle may close through a
         # sibling or a reused program.
-        static = static_rule_errors(context + list(ctx["progs"].values()), self.static_predicates)
+        static = static_rule_errors(
+            context + list(ctx["progs"].values()), self.static_predicates
+        )
         # A reused program blamed for non-terminating recursion means the NEW programs are what
         # closed the cycle — the library grounds without them — so they go as a group. A cross
         # product is local to one clause, so a reused program carrying one says nothing about
         # the new programs and must not take them down with it.
         via_reused = sorted(
-            name for name in {p.name for p in context} & set(static)
+            name
+            for name in {p.name for p in context} & set(static)
             if static[name][0] == ERROR_UNBOUNDED_RECURSION
         )
         for label, prog in list(ctx["progs"].items()):
             entry = static.get(prog.name)
             if entry is None and via_reused:
-                entry = (ERROR_UNBOUNDED_RECURSION,
-                         f"non-terminating recursion through reused {via_reused[0]}")
+                entry = (
+                    ERROR_UNBOUNDED_RECURSION,
+                    f"non-terminating recursion through reused {via_reused[0]}",
+                )
             if entry is not None:
                 ctx["error_codes"][label], ctx["errors"][label] = entry
                 del ctx["progs"][label]
@@ -475,7 +523,9 @@ fit; only write NEW rules for properties they do not already cover.
             # Nothing can be attributed, so every program is rejected with the shared cause.
             ctx["extensions"] = {}
             for label in ctx["progs"]:
-                ctx["errors"][label] = f"class rules do not ground together: {str(e).strip().splitlines()[0]}"
+                ctx["errors"][label] = (
+                    f"class rules do not ground together: {str(e).strip().splitlines()[0]}"
+                )
                 ctx["error_codes"][label] = ERROR_NO_GROUNDING
             ctx["progs"] = {}
 
@@ -486,7 +536,9 @@ fit; only write NEW rules for properties they do not already cover.
         not ChEBI molecules overrides this one method.
         """
         return derive_rule_extensions(
-            progs, self._augment_with_fg_seeds(progs, ctx), ctx["val_ids"],
+            progs,
+            self._augment_with_fg_seeds(progs, ctx),
+            ctx["val_ids"],
             timeout=_VALIDATION_GROUNDING_TIMEOUT,
         )
 
@@ -543,7 +595,9 @@ fit; only write NEW rules for properties they do not already cover.
         return ctx.get("error_codes", {}).get(label)
 
     def add_to_library(self, source, chebi_id):
-        return add_rule_to_library(source, library_dir=self.library_dir, chebi_id=chebi_id)
+        return add_rule_to_library(
+            source, library_dir=self.library_dir, chebi_id=chebi_id
+        )
 
     def describe(self, saved, stem, reason) -> str:
         return f"{saved.name} -> library/{stem}.pl ({reason}): {saved.description}"
@@ -559,8 +613,12 @@ fit; only write NEW rules for properties they do not already cover.
         head = class_head(chebi_id)
         if analyze_hypothesis(hypothesis) is None:
             return None
-        hyp_prog = RuleProgram(name=head, description="LLM class hypothesis",
-                               source=hypothesis, source_file="<hypothesis>")
+        hyp_prog = RuleProgram(
+            name=head,
+            description="LLM class hypothesis",
+            source=hypothesis,
+            source_file="<hypothesis>",
+        )
         all_progs = programs + dependencies + [hyp_prog]
         try:
             extensions = self.ground(all_progs, ctx)
@@ -572,7 +630,14 @@ fit; only write NEW rules for properties they do not already cover.
         tp, fp = len(fired & pos), len(fired & neg)
         fn, tn = len(pos - fired), len(neg - fired)
         f1 = (2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn) > 0 else 0.0
-        return {"train_f1": f1, "tp": tp, "fp": fp, "tn": tn, "fn": fn, "groundable": True}
+        return {
+            "train_f1": f1,
+            "tp": tp,
+            "fp": fp,
+            "tn": tn,
+            "fn": fn,
+            "groundable": True,
+        }
 
     def finalize(self, chebi_id, info, parsed, stems, ctx) -> dict | None:
         """Score the model's one-shot class hypothesis and store it (no feedback round).
@@ -598,18 +663,31 @@ fit; only write NEW rules for properties they do not already cover.
 
         final_hypothesis = prune_hypothesis(raw_hypothesis, available)
 
-        entry = {"hypothesis": final_hypothesis, "train_f1": None, "tp": None, "fp": None,
-                 "tn": None, "fn": None, "groundable": False}
+        entry = {
+            "hypothesis": final_hypothesis,
+            "train_f1": None,
+            "tp": None,
+            "fp": None,
+            "tn": None,
+            "fn": None,
+            "groundable": False,
+        }
         if final_hypothesis != raw_hypothesis:
             entry["pruned_from"] = raw_hypothesis
         if final_hypothesis is None:
-            print("    hypothesis unusable: unreadable, or it needs a predicate that was not accepted")
+            print(
+                "    hypothesis unusable: unreadable, or it needs a predicate that was not accepted"
+            )
         elif ctx["val_ids"]:
-            metrics = self._score_hypothesis(chebi_id, final_hypothesis, programs, dependencies, ctx)
+            metrics = self._score_hypothesis(
+                chebi_id, final_hypothesis, programs, dependencies, ctx
+            )
             if metrics is not None:
                 entry.update(metrics)
-                print(f"    hypothesis train-F1 {metrics['train_f1']:.3f} "
-                      f"(TP {metrics['tp']}, FP {metrics['fp']}, TN {metrics['tn']}, FN {metrics['fn']})")
+                print(
+                    f"    hypothesis train-F1 {metrics['train_f1']:.3f} "
+                    f"(TP {metrics['tp']}, FP {metrics['fp']}, TN {metrics['tn']}, FN {metrics['fn']})"
+                )
             else:
                 print("    hypothesis did not ground")
 
@@ -618,45 +696,88 @@ fit; only write NEW rules for properties they do not already cover.
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate LLM auxiliary predicates as ASP rules for ChEBI classes.")
+    parser = argparse.ArgumentParser(
+        description="Generate LLM auxiliary predicates as ASP rules for ChEBI classes."
+    )
     add_class_arguments(parser)
     parser.add_argument("--chebi_version", type=int, default=251)
-    parser.add_argument("--molecules_path", required=True, help="Path to molecules.pkl (mols + SMILES).")
-    parser.add_argument("--problem_dir", default=os.path.join("data", "ilp_problems"),
-                        help="ILP problem tree holding each class's train exs.pl (for samples/validation).")
-    parser.add_argument("--predicate_dir", default=DEFAULT_AUX_RULE_LIBRARY_DIR,
-                        help="Shared auxiliary-RULE library directory.")
-    parser.add_argument("--model", default="claude-haiku-4-5",
-                        help="A bare Claude id (claude-opus-5, claude-haiku-4-5) runs through the "
-                             "logged-in `claude` CLI and bills your Claude subscription (set "
-                             "CHEBILP_CLAUDE_CLI if it is not on PATH). A 'provider/name' id "
-                             "(openai/gpt-4o) runs through an OpenAI-compatible endpoint set by "
-                             "OPENAI_API_BASE and OPENAI_API_KEY.")
-    parser.add_argument("--n_predicates", type=int, default=4, help="Target number of predicates per class.")
-    parser.add_argument("--top_k", type=int, default=16, help="Reuse candidates retrieved per class.")
-    parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"], default=None,
-                        help="Effort level for the `claude` CLI backend. Default: the CLI's per-model "
-                             "default (medium for Opus 5.5, high for Sonnet 5.5 and Haiku 5.5). "
-                             "Ignored for 'provider/name' models.")
-    parser.add_argument("--computed_facts", dest="computed_facts", action="store_true", default=True,
-                        help="Offer mol_weight/ring_size facts to the model (default: on).")
-    parser.add_argument("--no_computed_facts", dest="computed_facts", action="store_false",
-                        help="Do not offer the computed facts (Tier D predicates unavailable).")
-    parser.add_argument("--prompt_samples", type=int, default=6,
-                        help="Number of pos and neg example SMILES shown in the prompt.")
-    parser.add_argument("--seed_predicates", choices=["none", *FG_SEED_SOURCES], default="none",
-                        help="Before generating, seed the library with a functional-group set the "
-                             "model can reuse: 'chembl_fgs' (RDKit ChEMBL alerts) or 'efg' (Extended "
-                             "Functional Groups). Default 'none'. Idempotent — existing seed files are "
-                             "kept, so it is safe to resume a run with the same flag.")
+    parser.add_argument(
+        "--molecules_path", required=True, help="Path to molecules.pkl (mols + SMILES)."
+    )
+    parser.add_argument(
+        "--problem_dir",
+        default=os.path.join("data", "ilp_problems"),
+        help="ILP problem tree holding each class's train exs.pl (for samples/validation).",
+    )
+    parser.add_argument(
+        "--predicate_dir",
+        default=DEFAULT_AUX_RULE_LIBRARY_DIR,
+        help="Shared auxiliary-RULE library directory.",
+    )
+    parser.add_argument(
+        "--model",
+        default="claude-haiku-4-5",
+        help="A bare Claude id (claude-opus-5, claude-haiku-4-5) runs through the "
+        "logged-in `claude` CLI and bills your Claude subscription (set "
+        "CHEBILP_CLAUDE_CLI if it is not on PATH). A 'provider/name' id "
+        "(openai/gpt-4o) runs through an OpenAI-compatible endpoint set by "
+        "OPENAI_API_BASE and OPENAI_API_KEY.",
+    )
+    parser.add_argument(
+        "--n_predicates",
+        type=int,
+        default=4,
+        help="Target number of predicates per class.",
+    )
+    parser.add_argument(
+        "--top_k", type=int, default=16, help="Reuse candidates retrieved per class."
+    )
+    parser.add_argument(
+        "--effort",
+        choices=["low", "medium", "high", "xhigh", "max"],
+        default=None,
+        help="Effort level for the `claude` CLI backend. Default: the CLI's per-model "
+        "default (medium for Opus 5.5, high for Sonnet 5.5 and Haiku 5.5). "
+        "Ignored for 'provider/name' models.",
+    )
+    parser.add_argument(
+        "--computed_facts",
+        dest="computed_facts",
+        action="store_true",
+        default=True,
+        help="Offer mol_weight/ring_size facts to the model (default: on).",
+    )
+    parser.add_argument(
+        "--no_computed_facts",
+        dest="computed_facts",
+        action="store_false",
+        help="Do not offer the computed facts (Tier D predicates unavailable).",
+    )
+    parser.add_argument(
+        "--prompt_samples",
+        type=int,
+        default=6,
+        help="Number of pos and neg example SMILES shown in the prompt.",
+    )
+    parser.add_argument(
+        "--seed_predicates",
+        choices=["none", *FG_SEED_SOURCES],
+        default="none",
+        help="Before generating, seed the library with a functional-group set the "
+        "model can reuse: 'chembl_fgs' (RDKit ChEMBL alerts) or 'efg' (Extended "
+        "Functional Groups). Default 'none'. Idempotent — existing seed files are "
+        "kept, so it is safe to resume a run with the same flag.",
+    )
     args = parser.parse_args()
 
     load_dotenv()
 
     if args.seed_predicates != "none":
         written = seed_fg_library(args.predicate_dir, args.seed_predicates)
-        print(f"Seeded {written} new '{args.seed_predicates}' functional-group predicate(s) "
-              f"into {args.predicate_dir}")
+        print(
+            f"Seeded {written} new '{args.seed_predicates}' functional-group predicate(s) "
+            f"into {args.predicate_dir}"
+        )
 
     import pickle as _pickle
 
@@ -670,9 +791,15 @@ def main():
     chebi_ids = resolve_classes(args)
 
     RuleGenerator(
-        args.predicate_dir, args.model, args.n_predicates, args.top_k,
-        molecules=molecules, problem_dir=args.problem_dir, computed_facts=args.computed_facts,
-        prompt_samples=args.prompt_samples, effort=args.effort,
+        args.predicate_dir,
+        args.model,
+        args.n_predicates,
+        args.top_k,
+        molecules=molecules,
+        problem_dir=args.problem_dir,
+        computed_facts=args.computed_facts,
+        prompt_samples=args.prompt_samples,
+        effort=args.effort,
     ).run(chebi_graph, chebi_ids)
 
 

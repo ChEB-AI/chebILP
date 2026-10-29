@@ -22,7 +22,10 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict
 
-from chebILP.predicate_generation.auxiliary_predicates import load_class_map, set_class_predicates
+from chebILP.predicate_generation.auxiliary_predicates import (
+    load_class_map,
+    set_class_predicates,
+)
 from chebILP.ilp_path_manager import get_aux_generation_log_path
 from chebILP.predicate_generation.llm_client import LLMCallFailed, structured_completion
 from chebILP.utils import sort_labels_by_hierarchy
@@ -59,12 +62,22 @@ def get_class_info(chebi_graph, chebi_id: str) -> dict:
     siblings: dict[str, dict] = {}
     for pid in chebi_graph.successors(chebi_id):
         pdata = dict(chebi_graph.nodes.get(pid, {}))
-        parents.append({"id": pid, "name": pdata.get("name", f"CHEBI:{pid}"), "definition": pdata.get("definition")})
+        parents.append(
+            {
+                "id": pid,
+                "name": pdata.get("name", f"CHEBI:{pid}"),
+                "definition": pdata.get("definition"),
+            }
+        )
         for sid in chebi_graph.predecessors(pid):
             if sid == chebi_id or sid in siblings:
                 continue
             sdata = dict(chebi_graph.nodes.get(sid, {}))
-            siblings[sid] = {"id": sid, "name": sdata.get("name", f"CHEBI:{sid}"), "definition": sdata.get("definition")}
+            siblings[sid] = {
+                "id": sid,
+                "name": sdata.get("name", f"CHEBI:{sid}"),
+                "definition": sdata.get("definition"),
+            }
     return {
         "name": node_data.get("name", f"CHEBI:{chebi_id}"),
         "definition": node_data.get("definition"),
@@ -82,7 +95,8 @@ def format_parents(info: dict) -> str:
     if not info["parents"]:
         return ""
     parts = "\n".join(
-        f"  - {p['name']} (CHEBI:{p['id']}): {p['definition'] or 'no definition'}" for p in info["parents"]
+        f"  - {p['name']} (CHEBI:{p['id']}): {p['definition'] or 'no definition'}"
+        for p in info["parents"]
     )
     return f"Superclass(es):\n{parts}\n"
 
@@ -94,7 +108,11 @@ def format_candidates(candidates: list[dict], with_kind: bool = False) -> str:
     for i, c in enumerate(candidates, 1):
         label = f"{c['name']} ({c['kind']})" if with_kind else c["name"]
         lines.append(f"[{i}] {label}: {c['description'] or 'no description'}")
-    return "Reuse candidates from the shared library (most relevant first):\n" + "\n".join(lines) + "\n"
+    return (
+        "Reuse candidates from the shared library (most relevant first):\n"
+        + "\n".join(lines)
+        + "\n"
+    )
 
 
 OUTPUT_CONTRACT = """\
@@ -107,7 +125,9 @@ Answer with a single JSON object:
 """
 
 
-def generate_one(prompt: str, system: str, model: str, selection_model, effort: str | None = None):
+def generate_one(
+    prompt: str, system: str, model: str, selection_model, effort: str | None = None
+):
     """Ask the model for one class's selection. Returns ``(parsed, raw_json_text, attempts)``."""
     return structured_completion(model, system, prompt, selection_model, effort=effort)
 
@@ -199,7 +219,12 @@ class AuxiliaryGenerator(ABC):
         return None
 
     def retriever_entry(self, stem, saved) -> dict:
-        return {"name": saved.name, "description": saved.description, "kind": "rule", "stem": stem}
+        return {
+            "name": saved.name,
+            "description": saved.description,
+            "kind": "rule",
+            "stem": stem,
+        }
 
     def rejection_code(self, label, ctx) -> str | None:
         """Stable identifier for *why* ``label`` was rejected, or ``None`` if uncategorised.
@@ -219,31 +244,47 @@ class AuxiliaryGenerator(ABC):
         """Select auxiliary predicates for one class; returns how many were recorded."""
         ctx = self.class_context(chebi_id)
         query = f"{info['name']} {info['definition'] or ''}"
-        candidates = self.retriever.retrieve(query, top_k=self.top_k) if len(self.retriever) else []
+        candidates = (
+            self.retriever.retrieve(query, top_k=self.top_k)
+            if len(self.retriever)
+            else []
+        )
         prompt = self.build_user_prompt(chebi_id, info, candidates, ctx)
 
         parsed, raw, attempts = None, None, []
         try:
             parsed, raw, attempts = generate_one(
-                prompt, self.system_prompt, self.model, self.selection_model, self.effort
+                prompt,
+                self.system_prompt,
+                self.model,
+                self.selection_model,
+                self.effort,
             )
         except Exception as e:
             attempts = getattr(e, "_chebilp_attempts", [])
             raise
         finally:
             # Log the exchange even if the request failed; rewritten below once resolved.
-            log_path = self._write_log(chebi_id, info, prompt, parsed, raw, None, attempts)
+            log_path = self._write_log(
+                chebi_id, info, prompt, parsed, raw, None, attempts
+            )
             print(f"    logged full exchange to {log_path}")
 
         reused_stems: list[str] = []
         for i in parsed.reuse:
-            if not 1 <= i <= len(candidates) or candidates[i - 1]["stem"] in reused_stems:
+            if (
+                not 1 <= i <= len(candidates)
+                or candidates[i - 1]["stem"] in reused_stems
+            ):
                 continue
             reused_stems.append(candidates[i - 1]["stem"])
             print(f"    reused [{i}] {candidates[i - 1]['name']}")
         ctx["reused_stems"] = reused_stems
 
-        blocks = [(f"chebi_{chebi_id}_block_{i}", self.to_source(item)) for i, item in enumerate(parsed.new)]
+        blocks = [
+            (f"chebi_{chebi_id}_block_{i}", self.to_source(item))
+            for i, item in enumerate(parsed.new)
+        ]
         self.prepare(blocks, ctx)
         # One targeted feedback round per failing item (no-op for pipelines that skip it). It
         # rewrites blocks with repaired sources and marks any predicate it excluded, so the
@@ -260,7 +301,11 @@ class AuxiliaryGenerator(ABC):
             ok, reason = self.accept_reused(stem, ctx)
             if not ok:
                 code = self.rejection_code(stem, ctx)
-                print(f"    rejected reused {stem}" + (f" [{code}]" if code else "") + f": {reason}")
+                print(
+                    f"    rejected reused {stem}"
+                    + (f" [{code}]" if code else "")
+                    + f": {reason}"
+                )
                 record = {"name": stem, "reason": reason, "reused": True}
                 if code is not None:
                     record["code"] = code
@@ -275,7 +320,11 @@ class AuxiliaryGenerator(ABC):
             ok, reason = self.accept(source, label, ctx)
             if not ok:
                 code = self.rejection_code(label, ctx)
-                print(f"    rejected {item.name}" + (f" [{code}]" if code else "") + f": {reason}")
+                print(
+                    f"    rejected {item.name}"
+                    + (f" [{code}]" if code else "")
+                    + f": {reason}"
+                )
                 record = {"name": item.name, "reason": reason}
                 if code is not None:
                     record["code"] = code
@@ -316,7 +365,9 @@ class AuxiliaryGenerator(ABC):
 
         done = set(load_class_map(self.library_dir))
         if done:
-            print(f"  Resuming: {len(done)} class(es) already in class_map.json will be skipped.")
+            print(
+                f"  Resuming: {len(done)} class(es) already in class_map.json will be skipped."
+            )
 
         total = 0
         for chebi_id in sort_labels_by_hierarchy(chebi_ids, chebi_graph):
@@ -331,11 +382,15 @@ class AuxiliaryGenerator(ABC):
             except LLMCallFailed as e:
                 # Every class needs an answer; rerunning the same command resumes at this class.
                 print(f"  -> LLM call failed: {e}")
-                print(f"Aborting run at CHEBI:{chebi_id}. Rerun the same command to resume.")
+                print(
+                    f"Aborting run at CHEBI:{chebi_id}. Rerun the same command to resume."
+                )
                 raise
             except Exception as e:
                 print(f"  -> Failed: {e}")
-        print(f"Done. Recorded {total} auxiliary {self.noun} selection(s) across {len(chebi_ids)} class(es).")
+        print(
+            f"Done. Recorded {total} auxiliary {self.noun} selection(s) across {len(chebi_ids)} class(es)."
+        )
         return total
 
     # --- logging -----------------------------------------------------------------
@@ -347,18 +402,26 @@ class AuxiliaryGenerator(ABC):
         total_cost = sum(costs) if costs else None
         log_path = get_aux_generation_log_path(chebi_id, base_dir=self.library_dir)
         with open(log_path, "w", encoding="utf-8") as f:
-            f.write(f"# Auxiliary-{self.noun} generation log — CHEBI:{chebi_id} ({info['name']})\n\n")
-            f.write(f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n- Model: {self.model}\n")
+            f.write(
+                f"# Auxiliary-{self.noun} generation log — CHEBI:{chebi_id} ({info['name']})\n\n"
+            )
+            f.write(
+                f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n- Model: {self.model}\n"
+            )
             f.write(f"- Effort: {self.effort or 'default'}\n")
             if attempts:
                 cost_str = f"${total_cost:.4f}" if total_cost is not None else "unknown"
-                f.write(f"- Cost: {cost_str} across {len(attempts)} call(s), {len(failed)} reasked\n")
+                f.write(
+                    f"- Cost: {cost_str} across {len(attempts)} call(s), {len(failed)} reasked\n"
+                )
                 usages = [a["tokens"] for a in attempts if a.get("tokens")]
                 if usages:
                     tok = {k: sum(u.get(k) or 0 for u in usages) for k in usages[0]}
-                    f.write(f"- Tokens: {tok['output']} output ({tok['thinking']} thinking), "
-                            f"{tok['input']} input, {tok['cache_write']} cache write, "
-                            f"{tok['cache_read']} cache read\n")
+                    f.write(
+                        f"- Tokens: {tok['output']} output ({tok['thinking']} thinking), "
+                        f"{tok['input']} input, {tok['cache_write']} cache write, "
+                        f"{tok['cache_read']} cache read\n"
+                    )
             f.write("\n")
             if selection is not None:
                 f.write(self._format_selection(selection))
@@ -383,7 +446,10 @@ class AuxiliaryGenerator(ABC):
         if selection["reused"]:
             parts.append("- Reused from library:\n")
             for r in selection["reused"]:
-                parts.append(f"    - `{r['name']}`" + (f" — {r['reason']}\n" if r.get("reason") else "\n"))
+                parts.append(
+                    f"    - `{r['name']}`"
+                    + (f" — {r['reason']}\n" if r.get("reason") else "\n")
+                )
         else:
             parts.append("- Reused from library: (none)\n")
         if selection["new"]:
@@ -405,7 +471,9 @@ class AuxiliaryGenerator(ABC):
         h = selection.get("hypothesis_eval")
         if h is not None:
             f1 = h.get("train_f1")
-            f1_str = f"{f1:.3f}" if isinstance(f1, (int, float)) else "n/a (did not ground)"
+            f1_str = (
+                f"{f1:.3f}" if isinstance(f1, (int, float)) else "n/a (did not ground)"
+            )
             parts.append(
                 f"- Class hypothesis train-F1: {f1_str}"
                 f" (TP {h.get('tp')}, FP {h.get('fp')}, TN {h.get('tn')}, FN {h.get('fn')})\n"
@@ -441,13 +509,18 @@ class AuxiliaryGenerator(ABC):
                     parts.append(f"    - after:  {after_cm}\n")
             bf, af = r.get("before_fire"), r.get("after_fire")
             if bf is not None or af is not None:
-                line = f"    - fires: {bf:.0%}" if bf is not None else "    - fires: n/a"
+                line = (
+                    f"    - fires: {bf:.0%}" if bf is not None else "    - fires: n/a"
+                )
                 if af is not None:
                     line += f" → {af:.0%}"
                 parts.append(line + "\n")
             if r.get("after"):
-                parts.append("    - repaired to:\n\n      ```\n      "
-                             + r["after"].strip().replace("\n", "\n      ") + "\n      ```\n")
+                parts.append(
+                    "    - repaired to:\n\n      ```\n      "
+                    + r["after"].strip().replace("\n", "\n      ")
+                    + "\n      ```\n"
+                )
         return "".join(parts)
 
     def _format_failed_attempts(self, failed) -> str:
@@ -459,7 +532,11 @@ class AuxiliaryGenerator(ABC):
             parts.append(f"### Attempt {i}{cost_str}\n\n")
             parts.append(f"- Error: {a['error']}\n\n")
             raw = a.get("raw")
-            parts.append("```json\n" + (raw if raw else "(no raw response captured)") + "\n```\n\n")
+            parts.append(
+                "```json\n"
+                + (raw if raw else "(no raw response captured)")
+                + "\n```\n\n"
+            )
         return "".join(parts)
 
     def _format_output(self, parsed) -> str:
@@ -476,5 +553,7 @@ class AuxiliaryGenerator(ABC):
             parts.append("```\n" + item.program.strip("\n") + "\n```\n\n")
         hypothesis = getattr(parsed, "hypothesis", None)
         if hypothesis:
-            parts.append("### Class hypothesis\n\n```\n" + hypothesis.strip("\n") + "\n```\n\n")
+            parts.append(
+                "### Class hypothesis\n\n```\n" + hypothesis.strip("\n") + "\n```\n\n"
+            )
         return "".join(parts)

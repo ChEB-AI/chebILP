@@ -43,7 +43,7 @@ from typing import Callable, Literal
 
 from rdkit import Chem
 
-from chebILP.molecule_processing.fg_matching import FG_SEED_PREFIXES
+from chebILP.preprocessing.chebi.fg_matching import FG_SEED_PREFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,9 @@ def sanitize_predicate_name(raw_name: str) -> str:
     return name
 
 
-def load_program_source(source: str, source_file: str = "<string>") -> AuxiliaryPredicate | None:
+def load_program_source(
+    source: str, source_file: str = "<string>"
+) -> AuxiliaryPredicate | None:
     """Compile one auxiliary-predicate program string into an ``AuxiliaryPredicate``.
 
     Returns ``None`` (and logs a warning) if the program does not satisfy the
@@ -134,7 +136,9 @@ def load_program_source(source: str, source_file: str = "<string>") -> Auxiliary
     try:
         from rdkit.Chem import rdMolDescriptors, Descriptors  # noqa: F401
 
-        namespace.update({"rdMolDescriptors": rdMolDescriptors, "Descriptors": Descriptors})
+        namespace.update(
+            {"rdMolDescriptors": rdMolDescriptors, "Descriptors": Descriptors}
+        )
     except Exception:  # pragma: no cover - rdkit submodule import guard
         pass
 
@@ -149,13 +153,17 @@ def load_program_source(source: str, source_file: str = "<string>") -> Auxiliary
     fn = namespace.get("extension")
 
     if not isinstance(raw_name, str) or not raw_name.strip():
-        logger.warning("Auxiliary predicate %s is missing a PREDICATE_NAME.", source_file)
+        logger.warning(
+            "Auxiliary predicate %s is missing a PREDICATE_NAME.", source_file
+        )
         return None
     if kind not in VALID_KINDS:
         logger.warning("Auxiliary predicate %s has invalid KIND %r.", source_file, kind)
         return None
     if not callable(fn):
-        logger.warning("Auxiliary predicate %s is missing an extension() function.", source_file)
+        logger.warning(
+            "Auxiliary predicate %s is missing an extension() function.", source_file
+        )
         return None
 
     doc = (fn.__doc__ or namespace.get("__doc__") or "").strip().splitlines()
@@ -174,7 +182,10 @@ def aux_program_path(name: str, problem_dir: str) -> str:
     """Path of a predicate's canonical program in the shared library."""
     from chebILP.ilp_path_manager import get_aux_programs_dir
 
-    return os.path.join(get_aux_programs_dir(base_dir=problem_dir), f"{sanitize_predicate_name(name)}.py")
+    return os.path.join(
+        get_aux_programs_dir(base_dir=problem_dir),
+        f"{sanitize_predicate_name(name)}.py",
+    )
 
 
 def load_class_map(problem_dir) -> dict[str, list[str]]:
@@ -293,7 +304,9 @@ def load_library_predicates(base_dir: str) -> list[AuxiliaryPredicate]:
     return predicates
 
 
-def load_auxiliary_predicates(chebi_id, library_dir: str | None = None) -> list[AuxiliaryPredicate]:
+def load_auxiliary_predicates(
+    chebi_id, library_dir: str | None = None
+) -> list[AuxiliaryPredicate]:
     """Load the auxiliary-predicate programs a ChEBI class uses.
 
     Looks up the class's predicate names in ``class_map.json`` and loads each one's
@@ -332,7 +345,9 @@ def load_auxiliary_predicates(chebi_id, library_dir: str | None = None) -> list[
         if not os.path.exists(path):
             logger.warning(
                 "Auxiliary predicate %s used by CHEBI:%s is missing from the library (%s).",
-                name, chebi_id, path,
+                name,
+                chebi_id,
+                path,
             )
             continue
         with open(path, "r", encoding="utf-8") as f:
@@ -426,7 +441,9 @@ def compute_auxiliary_extensions(
                 if failures is not None:
                     failures.setdefault(pred.name, "error")
                 logger.debug(
-                    "Auxiliary predicate %s crashed on a molecule, skipping: %s", pred.name, e
+                    "Auxiliary predicate %s crashed on a molecule, skipping: %s",
+                    pred.name,
+                    e,
                 )
                 continue
 
@@ -445,4 +462,6 @@ def compute_auxiliary_extensions(
         for mol_id in pending_mol:
             mol_ext_by_mol[mol_id].add(pred.name)
 
-    return {mol_id: (atom_ext_by_mol[mol_id], mol_ext_by_mol[mol_id]) for mol_id, _ in mols}
+    return {
+        mol_id: (atom_ext_by_mol[mol_id], mol_ext_by_mol[mol_id]) for mol_id, _ in mols
+    }

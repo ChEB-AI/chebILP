@@ -12,8 +12,11 @@ import argparse
 import os
 
 from chebILP.ilp_problem_builder import ILPProblemBuilder
-from chebILP.reaction_processing.reaction_to_fol import build_background_reaction, build_computed_facts_reaction
-from chebILP.reaction_processing.rhea_data import RheaDataset
+from chebILP.preprocessing.reaction_processing.reaction_to_fol import (
+    build_background_reaction,
+    build_computed_facts_reaction,
+)
+from chebILP.preprocessing.reaction_processing.rhea_data import RheaDataset
 from chebILP.utils import add_class_arguments, resolve_classes
 
 DEFAULT_PROBLEM_DIR = os.path.join("data", "rhea_v142", "ilp_problems")
@@ -22,11 +25,27 @@ DEFAULT_PROBLEM_DIR = os.path.join("data", "rhea_v142", "ilp_problems")
 class RheaILPProblemBuilder(ILPProblemBuilder):
     """``ILPProblemBuilder`` whose examples are reactions; ``_atom_counts`` sums over all participants."""
 
-    def __init__(self, rhea_version: int = 142, base_dir: str = "data", min_pos_samples: int = 25,
-                 problem_dir: str | None = None, **kwargs):
-        dataset = RheaDataset(rhea_version=rhea_version, base_dir=base_dir, min_pos_samples=min_pos_samples)
-        super().__init__(chebi_version=None, base_dir=base_dir, min_pos_samples=min_pos_samples,
-                         problem_dir=problem_dir or DEFAULT_PROBLEM_DIR, dataset=dataset, **kwargs)
+    def __init__(
+        self,
+        rhea_version: int = 142,
+        base_dir: str = "data",
+        min_pos_samples: int = 25,
+        problem_dir: str | None = None,
+        **kwargs,
+    ):
+        dataset = RheaDataset(
+            rhea_version=rhea_version,
+            base_dir=base_dir,
+            min_pos_samples=min_pos_samples,
+        )
+        super().__init__(
+            chebi_version=None,
+            base_dir=base_dir,
+            min_pos_samples=min_pos_samples,
+            problem_dir=problem_dir or DEFAULT_PROBLEM_DIR,
+            dataset=dataset,
+            **kwargs,
+        )
 
     def _atom_background(self, rows, **kwargs):
         return build_background_reaction(rows, **kwargs)
@@ -36,7 +55,9 @@ class RheaILPProblemBuilder(ILPProblemBuilder):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     add_class_arguments(parser)
     parser.add_argument("--rhea_version", type=int, default=142)
     parser.add_argument("--base_dir", default="data")
@@ -48,11 +69,21 @@ def main():
     parser.add_argument("--predicate_dir", default=None)
     args = parser.parse_args()
 
-    builder = RheaILPProblemBuilder(args.rhea_version, args.base_dir, args.min_pos_samples, args.problem_dir,
-                                    predicate_set=args.predicate_set, aux_library_dir=args.predicate_dir)
+    builder = RheaILPProblemBuilder(
+        args.rhea_version,
+        args.base_dir,
+        args.min_pos_samples,
+        args.problem_dir,
+        predicate_set=args.predicate_set,
+        aux_library_dir=args.predicate_dir,
+    )
     classes = resolve_classes(args)
-    builder.build_examples(classes, min_pos_samples=args.min_pos_samples,
-                           max_pos_samples=args.max_pos_samples, max_neg_samples=args.max_neg_samples)
+    builder.build_examples(
+        classes,
+        min_pos_samples=args.min_pos_samples,
+        max_pos_samples=args.max_pos_samples,
+        max_neg_samples=args.max_neg_samples,
+    )
     builder.build_bk(classes)
 
 

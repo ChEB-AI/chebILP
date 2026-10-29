@@ -35,13 +35,25 @@ def filter_impossible_rules(rules: list[str], predicates_in_bk: list[str]):
     for rule in rules:
         body = rule.split(":-")[1] if ":-" in rule else ""
         literals = split_prolog_literals(body)
-        if any(literal.split("(")[0].strip() not in predicates_in_bk for literal in literals):
+        if any(
+            literal.split("(")[0].strip() not in predicates_in_bk
+            for literal in literals
+        ):
             continue
         rules_filtered.append(rule)
-    print(f"Filtered out {len(rules) - len(rules_filtered)} impossible rules. Remaining rules: {len(rules_filtered)}")
+    print(
+        f"Filtered out {len(rules) - len(rules_filtered)} impossible rules. Remaining rules: {len(rules_filtered)}"
+    )
     return rules_filtered
 
-def ground_extensions(rules: list[str], background_facts: list[str], target_labels: list[str], timeout: float|None=None, message_sink: list|None=None) -> dict[str, list[tuple[str, ...]]]:
+
+def ground_extensions(
+    rules: list[str],
+    background_facts: list[str],
+    target_labels: list[str],
+    timeout: float | None = None,
+    message_sink: list | None = None,
+) -> dict[str, list[tuple[str, ...]]]:
     """Ground ``rules`` over ``background_facts``; return each target's derived argument tuples.
 
     The target predicates may have any arity — the arguments are returned as they were
@@ -54,7 +66,11 @@ def ground_extensions(rules: list[str], background_facts: list[str], target_labe
     import clingo
 
     _patch_clingo_logger_decode()
-    ctl = clingo.Control(logger=(lambda code, msg: message_sink.append(msg)) if message_sink is not None else None)
+    ctl = clingo.Control(
+        logger=(lambda code, msg: message_sink.append(msg))
+        if message_sink is not None
+        else None
+    )
     ctl.add("base", [], "\n".join(background_facts))
     try:
         ctl.add("base", [], "\n".join(rules))
@@ -122,7 +138,8 @@ def _address_space_limit(budget: int) -> int | None:
 
 # "atom does not occur in any rule head" spans two lines, the atom on the second.
 _UNDEFINED_ATOM_RE = re.compile(
-    r"atom does not occur in any rule head:\s*([a-z_][A-Za-z0-9_]*)\s*(\(([^)]*)\))?", re.IGNORECASE
+    r"atom does not occur in any rule head:\s*([a-z_][A-Za-z0-9_]*)\s*(\(([^)]*)\))?",
+    re.IGNORECASE,
 )
 
 # "<block>:5093:17-18: info: <what>" — clingo's severity, as it spells it in the message.
@@ -160,18 +177,24 @@ def _summarize_clingo_messages(per_group: list[list[str]]) -> None:
                 if not _INFO_MESSAGE_RE.search(message):
                     other.add(message.strip())
                 continue
-            arity = len(m.group(3).split(",")) if m.group(3) and m.group(3).strip() else 0
+            arity = (
+                len(m.group(3).split(",")) if m.group(3) and m.group(3).strip() else 0
+            )
             seen_in.setdefault(f"{m.group(1)}/{arity}", set()).add(index)
 
     undefined = sorted(
-        name for name, groups in seen_in.items()
-        if len(groups) == len(per_group) and (name.startswith("aux_") or len(per_group) > 1)
+        name
+        for name, groups in seen_in.items()
+        if len(groups) == len(per_group)
+        and (name.startswith("aux_") or len(per_group) > 1)
     )
     # tqdm.write instead of print: callers run this inside a progress bar, and a plain
     # print leaves the bar's line behind. Without a bar it behaves like print.
     if undefined:
-        tqdm.write(f"  clingo: {len(undefined)} predicate(s) referenced but never defined "
-                   f"(their rule bodies are empty): {', '.join(undefined)}")
+        tqdm.write(
+            f"  clingo: {len(undefined)} predicate(s) referenced but never defined "
+            f"(their rule bodies are empty): {', '.join(undefined)}"
+        )
     for message in sorted(other):
         tqdm.write(f"  clingo: {message}")
 
@@ -183,14 +206,18 @@ def _ground_groups(rules, fact_groups, target_labels, timeout):
     for group in fact_groups:
         messages: list = []
         per_group.append(messages)
-        derived = ground_extensions(rules, group, target_labels, timeout=timeout, message_sink=messages)
+        derived = ground_extensions(
+            rules, group, target_labels, timeout=timeout, message_sink=messages
+        )
         for name, tuples in derived.items():
             merged.setdefault(name, []).extend(tuples)
     _summarize_clingo_messages(per_group)
     return merged
 
 
-def _ground_extensions_child(queue, rules, fact_groups, target_labels, timeout, memory_budget):
+def _ground_extensions_child(
+    queue, rules, fact_groups, target_labels, timeout, memory_budget
+):
     """Child-process body: cap address space, then ground and return the result via ``queue``."""
     try:
         import resource
@@ -274,7 +301,9 @@ def ground_extensions_isolated(
         except queue_mod.Empty:
             if not proc.is_alive():
                 proc.join()
-                raise RuntimeError(f"grounding died before returning (exit code {proc.exitcode})")
+                raise RuntimeError(
+                    f"grounding died before returning (exit code {proc.exitcode})"
+                )
             if deadline is not None and time.monotonic() > deadline:
                 proc.terminate()
                 proc.join()
@@ -286,7 +315,14 @@ def ground_extensions_isolated(
     raise RuntimeError(payload)
 
 
-def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_labels: list[str], examples: list, predicates_in_bk: list[str]|None=None, timeout: float|None=None):
+def evaluate_with_clingo(
+    rules: list[str],
+    background_facts: list[str],
+    target_labels: list[str],
+    examples: list,
+    predicates_in_bk: list[str] | None = None,
+    timeout: float | None = None,
+):
     """Which of ``examples`` each target predicate holds for, matching ``label(example)``.
 
     Only unary extensions are considered; for predicates of other arities use
@@ -294,11 +330,15 @@ def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_l
     """
     if predicates_in_bk is not None:
         rules = filter_impossible_rules(rules, predicates_in_bk)
-    extensions = ground_extensions(rules, background_facts, target_labels, timeout=timeout)
+    extensions = ground_extensions(
+        rules, background_facts, target_labels, timeout=timeout
+    )
 
     positives = dict()
     for target_label in target_labels:
-        derived = {args[0] for args in extensions.get(target_label, []) if len(args) == 1}
+        derived = {
+            args[0] for args in extensions.get(target_label, []) if len(args) == 1
+        }
         hits = [example for example in examples if str(example) in derived]
         if hits:
             positives[target_label] = hits
@@ -306,18 +346,39 @@ def evaluate_with_clingo(rules: list[str], background_facts: list[str], target_l
     return positives
 
 
-def run_ilp_validation_clingo(head_predicate: str, prog_str: str, exs_file: str, bk_file: str, return_details: bool = False):
+def run_ilp_validation_clingo(
+    head_predicate: str,
+    prog_str: str,
+    exs_file: str,
+    bk_file: str,
+    return_details: bool = False,
+):
     """Confusion matrix of ``prog_str`` over the ``pos(...)``/``neg(...)`` examples of ``head_predicate``
     (any arity). An example's ``id`` in the details is its comma-joined arguments."""
     with open(exs_file, "r") as f:
         # each line is of the form "pos(head(a1, ..., an))." or "neg(head(a1, ..., an))."
-        examples = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("%")]
+        examples = [
+            line.strip()
+            for line in f.readlines()
+            if line.strip() and not line.startswith("%")
+        ]
         examples_posneg = [line.split("(")[0].strip() for line in examples]
-        examples_args = [tuple(a.strip() for a in line.split("(", 2)[2].rsplit(")", 2)[0].split(",")) for line in examples]
+        examples_args = [
+            tuple(a.strip() for a in line.split("(", 2)[2].rsplit(")", 2)[0].split(","))
+            for line in examples
+        ]
     with open(bk_file, "r") as f:
-        background_facts = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("%")]
+        background_facts = [
+            line.strip()
+            for line in f.readlines()
+            if line.strip() and not line.startswith("%")
+        ]
 
-    positives = set(ground_extensions(prog_str.split("\n"), background_facts, [head_predicate]).get(head_predicate, []))
+    positives = set(
+        ground_extensions(prog_str.split("\n"), background_facts, [head_predicate]).get(
+            head_predicate, []
+        )
+    )
     tps, fps, tns, fns = 0, 0, 0, 0
     details = []
     for args, posneg in zip(examples_args, examples_posneg):
@@ -338,12 +399,19 @@ def run_ilp_validation_clingo(head_predicate: str, prog_str: str, exs_file: str,
             else:
                 tns += 1
                 outcome = "TN"
-        details.append({"id": ex_id, "true_label": "pos" if true_pos else "neg", "outcome": outcome})
+        details.append(
+            {
+                "id": ex_id,
+                "true_label": "pos" if true_pos else "neg",
+                "outcome": outcome,
+            }
+        )
 
     conf_matrix = {"TP": tps, "FP": fps, "TN": tns, "FN": fns}
     if return_details:
         return conf_matrix, details
     return conf_matrix
+
 
 if __name__ == "__main__":
     # Example usage

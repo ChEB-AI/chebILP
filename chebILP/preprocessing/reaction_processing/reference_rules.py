@@ -24,14 +24,16 @@ water(M) :- has_atom(M,O), o(O), not bonded(O), has_2_hs(O).
 
 REFERENCE_PROGRAMS = {
     # Carboxylic ester + H2O -> carboxylate + alcohol.
-    "ec_3_1_1": _COMMON + """
+    "ec_3_1_1": _COMMON
+    + """
 carboxylic_ester(M) :- has_atom(M,C), carbonyl_c(C), bSINGLE(C,O), o(O), bSINGLE(O,C2), c(C2), C2 != C.
 carboxylic_acid(M) :- has_atom(M,C), carbonyl_c(C), bSINGLE(C,O), o(O), degree(O,1).
 ec_3_1_1(R) :- has_reactant(R,W), water(W), has_reactant(R,E), carboxylic_ester(E),
                has_product(R,P), carboxylic_acid(P).
 """,
     # A phosphate monoester on a non-carbonyl carbon is formed: more of them on the right than on the left.
-    "ec_2_7_1": _COMMON + """
+    "ec_2_7_1": _COMMON
+    + """
 terminal_o(O) :- o(O), degree(O,1).
 monoester_p(P) :- p(P), 3 = #count{ O : has_bond_to(P,O), terminal_o(O) }.
 alkyl_phosphate(M,P) :- has_atom(M,P), monoester_p(P), bSINGLE(P,O), o(O), bSINGLE(O,C), c(C), not carbonyl_c(C).
@@ -40,7 +42,8 @@ n_right(R,N) :- has_product(R,_), N = #count{ M,P : has_product(R,M), alkyl_phos
 ec_2_7_1(R) :- n_left(R,L), n_right(R,N), N > L.
 """,
     # CO2 or hydrogencarbonate is released.
-    "ec_4_1_1": _COMMON + """
+    "ec_4_1_1": _COMMON
+    + """
 co2(M) :- has_atom(M,C), c(C), 2 = #count{ O : bDOUBLE(C,O), o(O) }, degree(C,2).
 co2(M) :- has_atom(M,C), c(C), 3 = #count{ O : has_bond_to(C,O), o(O) }, 4 = #count{ A : has_atom(M,A) }.
 ec_4_1_1(R) :- has_product(R,M), co2(M).
@@ -54,7 +57,9 @@ def read_examples(exs_path: str) -> tuple[set[str], set[str]]:
         for line in f:
             line = line.strip()
             if line.startswith(("pos(", "neg(")):
-                (pos if line.startswith("pos(") else neg).add(line.split("(")[-1].split(")")[0])
+                (pos if line.startswith("pos(") else neg).add(
+                    line.split("(")[-1].split(")")[0]
+                )
     return pos, neg
 
 
@@ -75,30 +80,53 @@ def score(pos: set[str], neg: set[str], derived: set[str]) -> dict:
     fn = len(pos - derived)
     prec = tp / (tp + fp) if tp + fp else 0.0
     rec = tp / (tp + fn) if tp + fn else 0.0
-    return {"tp": tp, "fp": fp, "fn": fn, "tn": len(neg - derived), "precision": prec, "recall": rec,
-            "f1": 2 * prec * rec / (prec + rec) if prec + rec else 0.0}
+    return {
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": len(neg - derived),
+        "precision": prec,
+        "recall": rec,
+        "f1": 2 * prec * rec / (prec + rec) if prec + rec else 0.0,
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--problem_dir", default=os.path.join("data", "rhea_v142", "ilp_problems"))
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--problem_dir", default=os.path.join("data", "rhea_v142", "ilp_problems")
+    )
     add_class_arguments(parser, required=False)
     parser.add_argument("--predicate_set", default="atoms")
-    parser.add_argument("--show_errors", type=int, default=0, help="List this many FPs/FNs per split")
+    parser.add_argument(
+        "--show_errors", type=int, default=0, help="List this many FPs/FNs per split"
+    )
     args = parser.parse_args()
 
-    classes = resolve_classes(args) if (args.classes or args.labels_file) else list(REFERENCE_PROGRAMS)
+    classes = (
+        resolve_classes(args)
+        if (args.classes or args.labels_file)
+        else list(REFERENCE_PROGRAMS)
+    )
     for cls in classes:
         for split in ("train", "validation", "test"):
             split_dir = os.path.join(args.problem_dir, cls, split)
             pos, neg = read_examples(os.path.join(split_dir, "exs.pl"))
-            derived = derive(REFERENCE_PROGRAMS[cls], os.path.join(split_dir, args.predicate_set, "bk.pl"), cls)
+            derived = derive(
+                REFERENCE_PROGRAMS[cls],
+                os.path.join(split_dir, args.predicate_set, "bk.pl"),
+                cls,
+            )
             s = score(pos, neg, derived)
-            print(f"{cls:10s} {split:10s} P={s['precision']:.3f} R={s['recall']:.3f} F1={s['f1']:.3f} "
-                  f"(tp={s['tp']} fp={s['fp']} fn={s['fn']} tn={s['tn']})")
+            print(
+                f"{cls:10s} {split:10s} P={s['precision']:.3f} R={s['recall']:.3f} F1={s['f1']:.3f} "
+                f"(tp={s['tp']} fp={s['fp']} fn={s['fn']} tn={s['tn']})"
+            )
             if args.show_errors:
-                print(f"    FP: {sorted(neg & derived)[:args.show_errors]}")
-                print(f"    FN: {sorted(pos - derived)[:args.show_errors]}")
+                print(f"    FP: {sorted(neg & derived)[: args.show_errors]}")
+                print(f"    FN: {sorted(pos - derived)[: args.show_errors]}")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,11 @@ from xclingo import XclingoControl
 from chebILP.ilp_problem_builder import build_background_chemlog
 from chebILP.utils import split_prolog_literals
 from chebILP.explainability.rule_to_nl import (
-    _ELEMENT_NAMES, _num_word, _sort_clause_literals, _get_a_an, _format_aux_name,
+    _ELEMENT_NAMES,
+    _num_word,
+    _sort_clause_literals,
+    _get_a_an,
+    _format_aux_name,
 )
 
 
@@ -66,7 +70,7 @@ def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
         if pred_name == "net_charge_neutral":
             return f'%!trace {{"% has no net charge", {A}}} {call}.'
         if pred_name.startswith("aux_"):
-            return f'%!trace {{"% satisfies the property \'{_format_aux_name(pred_name)}\'", {A}}} {call}.'
+            return f"%!trace {{\"% satisfies the property '{_format_aux_name(pred_name)}'\", {A}}} {call}."
         return f'%!trace {{"% satisfies {pred_name}", {A}}} {call}.'
 
     if arity == 2:
@@ -111,7 +115,7 @@ def _parse_rule(rule: str) -> tuple[Optional[str], set[tuple[str, int]]]:
             if not lit or "(" not in lit:
                 continue
             pname = lit.split("(")[0].strip()
-            args_str = lit[lit.index("(") + 1: lit.rindex(")")]
+            args_str = lit[lit.index("(") + 1 : lit.rindex(")")]
             n_args = len(split_prolog_literals(args_str)) if args_str.strip() else 0
             body_predicates.add((pname, n_args))
 
@@ -131,7 +135,7 @@ def _sort_rule_literals(rule: str) -> str:
         head_str = head_str.strip()
         mol_var = "V0"
         if "(" in head_str:
-            args_str = head_str[head_str.index("(") + 1: head_str.rindex(")")]
+            args_str = head_str[head_str.index("(") + 1 : head_str.rindex(")")]
             mol_var = args_str.strip().split(",")[0].strip()
         literals = split_prolog_literals(body_str.strip())
         sorted_lits = _sort_clause_literals(literals, mol_var)
@@ -154,18 +158,20 @@ def _build_xclingo_program(
             trace_lines.append(ann)
     trace_lines.append(f'%!trace {{"% satisfies {head_pred}", M}} {head_pred}(M).')
 
-    return "\n".join([
-        "% Background knowledge",
-        *bk_lines,
-        "",
-        "% Rule(s)",
-        *[l for l in _sort_rule_literals(rule).split("\n") if l.strip()],
-        "",
-        "% Trace annotations",
-        *trace_lines,
-        "",
-        f"%!show_trace {head_pred}(M).",
-    ])
+    return "\n".join(
+        [
+            "% Background knowledge",
+            *bk_lines,
+            "",
+            "% Rule(s)",
+            *[line for line in _sort_rule_literals(rule).split("\n") if line.strip()],
+            "",
+            "% Trace annotations",
+            *trace_lines,
+            "",
+            f"%!show_trace {head_pred}(M).",
+        ]
+    )
 
 
 def _run_xclingo(program: str) -> list:
@@ -261,7 +267,7 @@ def explain_molecule(
     mol_id: str = "mol1",
     output_path: Optional[str] = None,
     verbose: bool = False,
-) -> tuple[bool, str, "PIL.Image.Image"]:
+) -> tuple[bool, str, "PIL.Image.Image"]:  # noqa: F821
     """
     Explain why a molecule satisfies (or fails to satisfy) a learned ILP rule.
 
@@ -314,7 +320,9 @@ def explain_molecule(
             pdata = dict(chebi_graph.nodes.get(pid, {}))
             pname = pdata.get("name", f"CHEBI:{pid}")
             article = _get_a_an(pname)
-            p_conditions.append(f"the molecule is {article} {pname} (CHEBI:{pid}, not verified)")
+            p_conditions.append(
+                f"the molecule is {article} {pname} (CHEBI:{pid}, not verified)"
+            )
 
     conditions = p_conditions + conditions
 
@@ -322,5 +330,8 @@ def explain_molecule(
     if not satisfies:
         full_text = f"The molecule is not {article} {class_name} (CHEBI:{chebi_id})"
     else:
-        full_text = f"The molecule is {article} {class_name} (CHEBI:{chebi_id}) because it satisfies the following conditions:\n" + "\n".join(f"- {c}" for c in conditions)
+        full_text = (
+            f"The molecule is {article} {class_name} (CHEBI:{chebi_id}) because it satisfies the following conditions:\n"
+            + "\n".join(f"- {c}" for c in conditions)
+        )
     return satisfies, full_text, image

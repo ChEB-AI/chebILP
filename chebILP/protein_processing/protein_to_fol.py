@@ -22,7 +22,13 @@ def sse_id(domain: str, k: int) -> str:
 
 def _length_bin(sse: dict) -> str:
     short, medium = LENGTH_BINS[sse["type"]]
-    return "short_sse" if sse["length"] <= short else "medium_sse" if sse["length"] <= medium else "long_sse"
+    return (
+        "short_sse"
+        if sse["length"] <= short
+        else "medium_sse"
+        if sse["length"] <= medium
+        else "long_sse"
+    )
 
 
 def loop_length(a: dict, b: dict) -> int:
@@ -55,15 +61,23 @@ def domain_facts(domain: str, structure: dict) -> list[str]:
         partners[b] = partners.get(b, 0) + 1
     facts += [f"edge_strand({ids[k]})." for k, n in sorted(partners.items()) if n == 1]
     for sheet in structure["sheets"]:
-        facts += [f"same_sheet({ids[a]},{ids[b]})." for a in sheet for b in sheet if a != b]
+        facts += [
+            f"same_sheet({ids[a]},{ids[b]})." for a in sheet for b in sheet if a != b
+        ]
     for a, b in structure["contacts"]:
         facts += [f"contact({ids[a]},{ids[b]}).", f"contact({ids[b]},{ids[a]})."]
     return facts
 
 
-def build_background_protein(domains: pd.DataFrame, **_) -> tuple[list[str], list[tuple[str, int]]]:
+def build_background_protein(
+    domains: pd.DataFrame, **_
+) -> tuple[list[str], list[tuple[str, int]]]:
     """BK facts and their body predicates for ``domains`` (index = domain id, ``mol`` = structure)."""
-    lines = [fact for did, structure in domains["mol"].items() for fact in domain_facts(did, structure)]
+    lines = [
+        fact
+        for did, structure in domains["mol"].items()
+        for fact in domain_facts(did, structure)
+    ]
     arities = {}
     for line in lines:
         name, args = line.split("(", 1)
@@ -74,10 +88,18 @@ def build_background_protein(domains: pd.DataFrame, **_) -> tuple[list[str], lis
 def topology_string(structure: dict) -> str:
     """Compact text form of a domain for prompts: ``α1(16) β2(5) ... | β2-β4 par, β4-β6 anti``."""
     sses = structure["sses"]
-    label = lambda k: f"{'α' if sses[k]['type'] == 'H' else 'β'}{k + 1}"
+
+    def label(k):
+        return f"{'α' if sses[k]['type'] == 'H' else 'β'}{k + 1}"
+
     elements = " ".join(f"{label(k)}({sse['length']})" for k, sse in enumerate(sses))
-    pairs = ", ".join(f"{label(a)}-{label(b)} {'par' if kind == 'P' else 'anti'}" for a, b, kind in structure["pairs"])
-    return f"{structure['n_residues']} res: {elements}" + (f" | pairs: {pairs}" if pairs else "")
+    pairs = ", ".join(
+        f"{label(a)}-{label(b)} {'par' if kind == 'P' else 'anti'}"
+        for a, b, kind in structure["pairs"]
+    )
+    return f"{structure['n_residues']} res: {elements}" + (
+        f" | pairs: {pairs}" if pairs else ""
+    )
 
 
 def build_computed_facts_protein(domains: pd.DataFrame) -> list[str]:
@@ -90,5 +112,7 @@ def build_computed_facts_protein(domains: pd.DataFrame) -> list[str]:
             s = sse_id(did, k)
             lines += [f"sse_length({s},{sse['length']}).", f"sse_index({s},{k + 1})."]
             if k + 1 < len(sses):
-                lines.append(f"loop_length({s},{sse_id(did, k + 1)},{loop_length(sse, sses[k + 1])}).")
+                lines.append(
+                    f"loop_length({s},{sse_id(did, k + 1)},{loop_length(sse, sses[k + 1])})."
+                )
     return lines

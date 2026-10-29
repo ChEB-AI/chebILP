@@ -3,21 +3,53 @@ from typing import Literal
 import networkx as nx
 
 import tqdm
-from chebILP.molecule_processing.data_preparation import ChEBIDataset
-from chebILP.molecule_processing.mol_to_abrc import build_background_abrc, mol_to_abrc_core
-from chebILP.molecule_processing.mol_to_fol import mol_to_fol_fgs
+from chebILP.preprocessing.molecule_processing.data_preparation import ChEBIDataset
+from chebILP.preprocessing.molecule_processing.mol_to_abrc import build_background_abrc
+from chebILP.preprocessing.molecule_processing.mol_to_fol import mol_to_fol_fgs
 from chebi_utils.extract_properties import mol_to_fol_atoms, get_numerical_facts
-from chebILP.predicate_generation.auxiliary_predicates import load_auxiliary_predicates, compute_auxiliary_extensions, load_class_map, DEFAULT_AUX_TIMEOUT
-from chebILP.predicate_generation.auxiliary_rules import derive_rule_extensions, load_class_rules, load_library_rules, load_created_rules, dependent_rules, resolve_rule_dependencies, referenced_fact_predicates
-from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
-from chebILP.molecule_processing.fg_matching import (
-    get_chembl_fgs, get_chebi_fgs, get_efg_fgs, get_efg_atom_fgs, EFG_ATOM_CACHE,
-    FG_SEED_SOURCES, FG_SEED_PREFIXES, is_fg_seed_name, fg_fact_lines, fg_atom_fact_lines,
+from chebILP.predicate_generation.auxiliary_predicates import (
+    load_auxiliary_predicates,
+    compute_auxiliary_extensions,
+    load_class_map,
+    DEFAULT_AUX_TIMEOUT,
 )
-from chebILP.molecule_processing.fowl_predicates import build_fowl_predicate, calculate_fowl_predicate
+from chebILP.predicate_generation.auxiliary_rules import (
+    derive_rule_extensions,
+    load_class_rules,
+    load_library_rules,
+    load_created_rules,
+    dependent_rules,
+    resolve_rule_dependencies,
+    referenced_fact_predicates,
+)
+from chebILP.predicate_generation.predicate_retrieval import HybridPredicateRetriever
+from chebILP.preprocessing.molecule_processing.fg_matching import (
+    get_chembl_fgs,
+    get_chebi_fgs,
+    get_efg_fgs,
+    get_efg_atom_fgs,
+    EFG_ATOM_CACHE,
+    FG_SEED_SOURCES,
+    FG_SEED_PREFIXES,
+    is_fg_seed_name,
+    fg_fact_lines,
+    fg_atom_fact_lines,
+)
+from chebILP.preprocessing.molecule_processing.fowl_predicates import (
+    build_fowl_predicate,
+    calculate_fowl_predicate,
+)
 import pandas as pd
 from chebILP.utils import AVAILABLE_PREDICATE_SETS, get_atom_id
-from chebILP.ilp_path_manager import class_head, get_bk_path, get_bias_path, get_exs_path, get_aleph_stem, get_retrieval_record_path, RULE_PREDICATE_SETS, RETRIEVED_RULE_PREDICATE_SETS
+from chebILP.ilp_path_manager import (
+    class_head,
+    get_bk_path,
+    get_exs_path,
+    get_aleph_stem,
+    get_retrieval_record_path,
+    RULE_PREDICATE_SETS,
+    RETRIEVED_RULE_PREDICATE_SETS,
+)
 from chebILP.evaluation.clingo_eval import evaluate_with_clingo
 from chebILP.ilp_problem import ILPProblem, build_aleph_background  # noqa: F401 (re-exported for scripts)
 
@@ -49,6 +81,7 @@ def load_fowl_smarts(path=FOWL_SMARTS_PATH) -> dict[str, str]:
             mapping[chebi_id.strip()] = smarts.strip()
     return mapping
 
+
 def _facts_by_predicate(lines) -> dict[str, list[tuple | str]]:
     """Ground fact lines (``p(a,b).``) grouped by predicate, as ``ILPProblem.bk_facts``."""
     facts = {}
@@ -60,12 +93,28 @@ def _facts_by_predicate(lines) -> dict[str, list[tuple | str]]:
 
 
 class ILPProblemBuilder:
-
-    def __init__(self, chebi_version: int, three_star_only: bool = True, base_dir: str = "data", min_pos_samples: int = 25, predicate_set: AVAILABLE_PREDICATE_SETS = "atoms", aux_timeout: float = DEFAULT_AUX_TIMEOUT, aux_library_dir: str | None = None, computed_facts: bool = True, write_aleph: bool = True, retrieval_k: int = 16, problem_dir: str | None = None, dataset=None):
+    def __init__(
+        self,
+        chebi_version: int,
+        three_star_only: bool = True,
+        base_dir: str = "data",
+        min_pos_samples: int = 25,
+        predicate_set: AVAILABLE_PREDICATE_SETS = "atoms",
+        aux_timeout: float = DEFAULT_AUX_TIMEOUT,
+        aux_library_dir: str | None = None,
+        computed_facts: bool = True,
+        write_aleph: bool = True,
+        retrieval_k: int = 16,
+        problem_dir: str | None = None,
+        dataset=None,
+    ):
         self.predicate_set = predicate_set
         self.problem_dir = problem_dir or os.path.join(base_dir, "ilp_problems")
         os.makedirs(self.problem_dir, exist_ok=True)
-        self.write_aleph = write_aleph and predicate_set not in ("chebi_fg_rules", "chebi_fg_learned_rules")
+        self.write_aleph = write_aleph and predicate_set not in (
+            "chebi_fg_rules",
+            "chebi_fg_learned_rules",
+        )
         # Per-call wall-clock budget for LLM-generated auxiliary predicates.
         self.aux_timeout = aux_timeout
         self.aux_library_dir = aux_library_dir
@@ -78,33 +127,61 @@ class ILPProblemBuilder:
         self._rule_retriever = None
 
         # --- Load pre-built ChEBI data -------------------------------------
-        self.dataset = dataset if dataset is not None else ChEBIDataset(chebi_version=chebi_version, three_star_only=three_star_only, base_dir=base_dir, min_pos_samples=min_pos_samples)
+        self.dataset = (
+            dataset
+            if dataset is not None
+            else ChEBIDataset(
+                chebi_version=chebi_version,
+                three_star_only=three_star_only,
+                base_dir=base_dir,
+                min_pos_samples=min_pos_samples,
+            )
+        )
         self.hierarchy_graph = nx.transitive_closure_dag(self.dataset.chebi_graph)
         self.splits = self.dataset.load_splits_from_csv()
 
         # Invariant across target classes, so built once rather than per class.
         self._mol_index = set(self.dataset.molecules.index)
-        self._split_ids = {split: set(self.splits[self.splits["split"] == split]["id"].astype(str))
-                           for split in ["train", "validation", "test"]}
+        self._split_ids = {
+            split: set(self.splits[self.splits["split"] == split]["id"].astype(str))
+            for split in ["train", "validation", "test"]
+        }
         # Size of the molecule graph, used to prefer small molecules when a split is
         # capped. This is the same count that drives the has_atom facts in bk.pl, so it
         # includes explicit hydrogens where a molecule carries them.
         self._atom_counts = self._example_sizes()
-            
-            
-    def build_examples(self, target_ids: list[str], min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
+
+    def build_examples(
+        self,
+        target_ids: list[str],
+        min_pos_samples=25,
+        max_pos_samples=200,
+        min_neg_samples=25,
+        max_neg_samples=200,
+    ):
         # Counts are summed over the three splits, so they are not comparable against the
         # per-split max_*_samples caps; take the minimum over what was actually written.
         counts = {}
-        for target_id in tqdm.tqdm(target_ids, desc="Building examples for ChEBI classes"):
-            counts[target_id] = self.gather_samples_for_chebi_cls(target_id, min_pos_samples, max_pos_samples, min_neg_samples, max_neg_samples)
+        for target_id in tqdm.tqdm(
+            target_ids, desc="Building examples for ChEBI classes"
+        ):
+            counts[target_id] = self.gather_samples_for_chebi_cls(
+                target_id,
+                min_pos_samples,
+                max_pos_samples,
+                min_neg_samples,
+                max_neg_samples,
+            )
         if not counts:
             return
         min_n_pos_id = min(counts, key=lambda c: counts[c][0])
         min_n_neg_id = min(counts, key=lambda c: counts[c][1])
-        print(f"Label with least positive samples: ChEBI:{min_n_pos_id} with {counts[min_n_pos_id][0]} samples across all splits")
-        print(f"Label with least negative samples: ChEBI:{min_n_neg_id} with {counts[min_n_neg_id][1]} samples across all splits")
-
+        print(
+            f"Label with least positive samples: ChEBI:{min_n_pos_id} with {counts[min_n_pos_id][0]} samples across all splits"
+        )
+        print(
+            f"Label with least negative samples: ChEBI:{min_n_neg_id} with {counts[min_n_neg_id][1]} samples across all splits"
+        )
 
     def _get_fg_matches(self, source_key: str) -> dict:
         """Dataset-wide functional-group matches for a seed source, computed once and cached.
@@ -153,10 +230,17 @@ class ILPProblemBuilder:
                 os.path.splitext(os.path.basename(p.source_file))[0]: p
                 for p in load_library_rules(self.aux_library_dir)
             }
-            self._rule_retriever = HybridPredicateRetriever([
-                {"name": p.name, "description": p.description, "kind": "rule", "stem": stem}
-                for stem, p in self._library_rules.items()
-            ])
+            self._rule_retriever = HybridPredicateRetriever(
+                [
+                    {
+                        "name": p.name,
+                        "description": p.description,
+                        "kind": "rule",
+                        "stem": stem,
+                    }
+                    for stem, p in self._library_rules.items()
+                ]
+            )
             self._created_rules = load_created_rules(self.aux_library_dir)
             self._class_map = load_class_map(self.aux_library_dir)
 
@@ -166,22 +250,40 @@ class ILPProblemBuilder:
             if own is None:
                 # Without a generation log, provenance is unknown: exclude all the class selected.
                 own = set(self._class_map.get(str(target_id), []))
-                tqdm.tqdm.write(f"  No generation log for ChEBI:{target_id}; excluding its whole "
-                                f"class_map.json selection ({len(own)} program(s)).")
+                tqdm.tqdm.write(
+                    f"  No generation log for ChEBI:{target_id}; excluding its whole "
+                    f"class_map.json selection ({len(own)} program(s))."
+                )
             excluded = dependent_rules(self._library_rules, own)
 
         node = self.dataset.chebi_graph.nodes.get(target_id, {})
-        query = f"{node.get('name', f'CHEBI:{target_id}')} {node.get('definition') or ''}"
-        hits = self._rule_retriever.retrieve(query, top_k=self.retrieval_k, exclude=excluded)
+        query = (
+            f"{node.get('name', f'CHEBI:{target_id}')} {node.get('definition') or ''}"
+        )
+        hits = self._rule_retriever.retrieve(
+            query, top_k=self.retrieval_k, exclude=excluded
+        )
 
-        record_path = get_retrieval_record_path(target_id, self.predicate_set, base_dir=self.problem_dir, predicate_dir=self.aux_library_dir)
+        record_path = get_retrieval_record_path(
+            target_id,
+            self.predicate_set,
+            base_dir=self.problem_dir,
+            predicate_dir=self.aux_library_dir,
+        )
         with open(record_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "query": query,
-                "k": self.retrieval_k,
-                "excluded": sorted(excluded),
-                "retrieved": [{k: h[k] for k in ("stem", "rrf", "bm25_rank", "dense_rank")} for h in hits],
-            }, f, indent=2)
+            json.dump(
+                {
+                    "query": query,
+                    "k": self.retrieval_k,
+                    "excluded": sorted(excluded),
+                    "retrieved": [
+                        {k: h[k] for k in ("stem", "rrf", "bm25_rank", "dense_rank")}
+                        for h in hits
+                    ],
+                },
+                f,
+                indent=2,
+            )
         return [self._library_rules[h["stem"]] for h in hits]
 
     def build_bk(self, target_ids):
@@ -189,15 +291,19 @@ class ILPProblemBuilder:
         Build ILP background knowledge.
 
         Args:
-            """
+        """
 
         rules, rule_predicates = [], []
         failed_rule_classes: list[str] = []
         if self.predicate_set in ["chebi_fg_rules", "chebi_fg_learned_rules"]:
-            prolog_lines_rules, body_predicates_rules = build_background_chebi_fg_rules(CHEBI_FG_RULES_PATH if self.predicate_set == "chebi_fg_rules" else CHEBI_FG_LEARNED_RULES_PATH)
+            prolog_lines_rules, body_predicates_rules = build_background_chebi_fg_rules(
+                CHEBI_FG_RULES_PATH
+                if self.predicate_set == "chebi_fg_rules"
+                else CHEBI_FG_LEARNED_RULES_PATH
+            )
             rules = prolog_lines_rules
             rule_predicates = body_predicates_rules
-        
+
         pbar = tqdm.tqdm(target_ids, desc="Building background knowledge")
         for target_id in pbar:
             pbar.set_description(f"Building background knowledge for ChEBI:{target_id}")
@@ -206,7 +312,9 @@ class ILPProblemBuilder:
             # so they are loaded once per target and merged into the atom-level BK.
             aux_predicates = None
             if self.predicate_set == "llm_generated_fgs":
-                aux_predicates = load_auxiliary_predicates(target_id, library_dir=self.aux_library_dir)
+                aux_predicates = load_auxiliary_predicates(
+                    target_id, library_dir=self.aux_library_dir
+                )
 
             # llm_generated_rules: evaluate aux_* rules against BK (atom-level, extended)
             rule_programs, dependency_programs, fg_seed_programs = None, [], []
@@ -214,13 +322,21 @@ class ILPProblemBuilder:
                 if self.predicate_set in RETRIEVED_RULE_PREDICATE_SETS:
                     selected_programs = self._retrieve_class_rules(target_id)
                 else:
-                    selected_programs = load_class_rules(target_id, library_dir=self.aux_library_dir)
+                    selected_programs = load_class_rules(
+                        target_id, library_dir=self.aux_library_dir
+                    )
                 # A seeded chembl_fg_*/efg_* predicate is not an ASP rule: its extension is the
                 # RDKit functional-group match, emitted directly below rather than ground by clingo.
-                fg_seed_programs = [p for p in selected_programs if is_fg_seed_name(p.name)]
-                rule_programs = [p for p in selected_programs if not is_fg_seed_name(p.name)]
+                fg_seed_programs = [
+                    p for p in selected_programs if is_fg_seed_name(p.name)
+                ]
+                rule_programs = [
+                    p for p in selected_programs if not is_fg_seed_name(p.name)
+                ]
                 # get transitive dependencies of selected rules
-                dependency_programs = resolve_rule_dependencies(rule_programs, self.aux_library_dir)
+                dependency_programs = resolve_rule_dependencies(
+                    rule_programs, self.aux_library_dir
+                )
 
             # The fowl set adds a single class-specific predicate, fowl_<target_id>,
             # derived from a SMARTS pattern, on top of the atom predicates. Not every
@@ -239,21 +355,41 @@ class ILPProblemBuilder:
             computed_lines_by_split = dict()
             body_predicates = set()
             for split in ["train", "validation", "test"]:
-                exs_path = get_exs_path(target_id, base_dir=self.problem_dir, split=split)
+                exs_path = get_exs_path(
+                    target_id, base_dir=self.problem_dir, split=split
+                )
                 with open(exs_path, "r") as f:
                     # for each line get id between inner parentheses (e.g. pos(chebi_123(456)). -> 456) and select corresponding rows from samples_df
-                    ex_lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("%")]
+                    ex_lines = [
+                        line.strip()
+                        for line in f.readlines()
+                        if line.strip() and not line.startswith("%")
+                    ]
                 selected_ids = [line.split("(")[-1].split(")")[0] for line in ex_lines]
-                selected_rows = self.dataset.molecules[[id in selected_ids for id in self.dataset.molecules.index]]
+                selected_rows = self.dataset.molecules[
+                    [id in selected_ids for id in self.dataset.molecules.index]
+                ]
                 selected_ids_by_split[split] = selected_ids
-                pos_ids_by_split[split] = {id for id, line in zip(selected_ids, ex_lines) if line.startswith("pos(")}
+                pos_ids_by_split[split] = {
+                    id
+                    for id, line in zip(selected_ids, ex_lines)
+                    if line.startswith("pos(")
+                }
 
                 # standard bk is always added
                 prolog_lines = []
                 if self.predicate_set == "abrc":
-                    prolog_lines_atoms, body_predicates_atoms = build_background_abrc(selected_rows)
+                    prolog_lines_atoms, body_predicates_atoms = build_background_abrc(
+                        selected_rows
+                    )
                 else:
-                    prolog_lines_atoms, body_predicates_atoms = self._atom_background(selected_rows, aux_predicates=aux_predicates, aux_timeout=self.aux_timeout, predicate_set=self.predicate_set, fowl_smarts=fowl_smarts)
+                    prolog_lines_atoms, body_predicates_atoms = self._atom_background(
+                        selected_rows,
+                        aux_predicates=aux_predicates,
+                        aux_timeout=self.aux_timeout,
+                        predicate_set=self.predicate_set,
+                        fowl_smarts=fowl_smarts,
+                    )
                 prolog_lines += prolog_lines_atoms
                 body_predicates.update(body_predicates_atoms)
                 if self.predicate_set in ["chembl_fgs", "chebi_fgs", "efg"]:
@@ -264,11 +400,15 @@ class ILPProblemBuilder:
                         elif self.predicate_set == "efg":
                             self._fg_data = get_efg_fgs(
                                 self.dataset.molecules,
-                                cache_path=os.path.join(self.dataset.processed_dir, "efg_fgs.pkl"),
+                                cache_path=os.path.join(
+                                    self.dataset.processed_dir, "efg_fgs.pkl"
+                                ),
                             )
                         else:
                             self._fg_data = get_chebi_fgs(self.dataset.molecules)
-                    prolog_lines_fgs, body_predicates_fgs = build_background_fg_data(self._fg_data, selected_rows, source=self.predicate_set)
+                    prolog_lines_fgs, body_predicates_fgs = build_background_fg_data(
+                        self._fg_data, selected_rows, source=self.predicate_set
+                    )
                     prolog_lines += prolog_lines_fgs
                     body_predicates.update(body_predicates_fgs)
                 elif self.predicate_set == "efg_atoms":
@@ -277,9 +417,13 @@ class ILPProblemBuilder:
                     if not hasattr(self, "_fg_data"):
                         self._fg_data = get_efg_atom_fgs(
                             self.dataset.molecules,
-                            cache_path=os.path.join(self.dataset.processed_dir, EFG_ATOM_CACHE),
+                            cache_path=os.path.join(
+                                self.dataset.processed_dir, EFG_ATOM_CACHE
+                            ),
                         )
-                    prolog_lines_fgs, body_predicates_fgs = build_background_fg_atom_data(self._fg_data, selected_rows)
+                    prolog_lines_fgs, body_predicates_fgs = (
+                        build_background_fg_atom_data(self._fg_data, selected_rows)
+                    )
                     prolog_lines += prolog_lines_fgs
                     body_predicates.update(body_predicates_fgs)
                 prolog_lines_by_split[split] = prolog_lines
@@ -291,9 +435,23 @@ class ILPProblemBuilder:
 
             # for evaluating rules, merge alls splits, separate results afterwards
             if self.predicate_set in ["chebi_fg_rules", "chebi_fg_learned_rules"]:
-                all_selected_ids = [id for split in ["train", "validation", "test"] for id in selected_ids_by_split[split]]
-                all_prolog_lines = [line for split in ["train", "validation", "test"] for line in prolog_lines_by_split[split]]
-                positives = evaluate_with_clingo(rules, all_prolog_lines, rule_predicates, all_selected_ids, list(body_predicates))
+                all_selected_ids = [
+                    id
+                    for split in ["train", "validation", "test"]
+                    for id in selected_ids_by_split[split]
+                ]
+                all_prolog_lines = [
+                    line
+                    for split in ["train", "validation", "test"]
+                    for line in prolog_lines_by_split[split]
+                ]
+                positives = evaluate_with_clingo(
+                    rules,
+                    all_prolog_lines,
+                    rule_predicates,
+                    all_selected_ids,
+                    list(body_predicates),
+                )
                 for positive_extension in positives:
                     pred = positive_extension
                     in_split = {"train": False, "validation": False, "test": False}
@@ -303,36 +461,60 @@ class ILPProblemBuilder:
                                 if not in_split[split]:
                                     body_predicates.add((pred, 1))
                                     in_split[split] = True
-                                prolog_lines_by_split[split].append(f"{pred}({example}).")
+                                prolog_lines_by_split[split].append(
+                                    f"{pred}({example})."
+                                )
 
             # llm_generated_rules: ground each class rule against the atom facts plus
             # computed facts (all splits merged), then write only the derived aux_*
             # extensions back into each split. The computed facts are never written.
             if self.predicate_set in RULE_PREDICATE_SETS and rule_programs:
-                all_selected_ids = [id for split in ["train", "validation", "test"] for id in selected_ids_by_split[split]]
-                eval_facts = [line for split in ["train", "validation", "test"] for line in prolog_lines_by_split[split]]
+                all_selected_ids = [
+                    id
+                    for split in ["train", "validation", "test"]
+                    for id in selected_ids_by_split[split]
+                ]
+                eval_facts = [
+                    line
+                    for split in ["train", "validation", "test"]
+                    for line in prolog_lines_by_split[split]
+                ]
                 if self.computed_facts:
-                    eval_facts += [line for split in ["train", "validation", "test"] for line in computed_lines_by_split.get(split, [])]
+                    eval_facts += [
+                        line
+                        for split in ["train", "validation", "test"]
+                        for line in computed_lines_by_split.get(split, [])
+                    ]
                 # A rule body may reference a seeded chembl_fg_*/efg_* predicate; supply exactly
                 # those FG facts so the rule fires. Like computed facts, they feed grounding only.
-                referenced_fg = referenced_fact_predicates(rule_programs + dependency_programs, FG_SEED_PREFIXES)
+                referenced_fg = referenced_fact_predicates(
+                    rule_programs + dependency_programs, FG_SEED_PREFIXES
+                )
                 if referenced_fg:
-                    eval_facts += self._fg_seed_fact_lines(referenced_fg, all_selected_ids)
+                    eval_facts += self._fg_seed_fact_lines(
+                        referenced_fg, all_selected_ids
+                    )
                 # The class's rules are grounded as one program
                 try:
                     extensions = derive_rule_extensions(
-                        rule_programs + dependency_programs, eval_facts, all_selected_ids
+                        rule_programs + dependency_programs,
+                        eval_facts,
+                        all_selected_ids,
                     )
                 except (RuntimeError, MemoryError) as e:
                     # One class's rules must not end a run that is hours long. The class keeps
                     # its atom-level bk.pl and simply goes without its aux_* extensions.
-                    pbar.write(f"  Grounding failed for ChEBI:{target_id} ({e}); "
-                               f"continuing without its auxiliary extensions. "
-                               f"Rules: {', '.join(rp.name for rp in rule_programs)}")
+                    pbar.write(
+                        f"  Grounding failed for ChEBI:{target_id} ({e}); "
+                        f"continuing without its auxiliary extensions. "
+                        f"Rules: {', '.join(rp.name for rp in rule_programs)}"
+                    )
                     failed_rule_classes.append(target_id)
                     extensions = {}
                 for rp in rule_programs:
-                    emitted = {split: set() for split in ["train", "validation", "test"]}
+                    emitted = {
+                        split: set() for split in ["train", "validation", "test"]
+                    }
                     for example, arg_tuples in extensions.get(rp.name, {}).items():
                         for split in ["train", "validation", "test"]:
                             if example not in selected_ids_by_split[split]:
@@ -352,7 +534,9 @@ class ILPProblemBuilder:
             if self.predicate_set in RULE_PREDICATE_SETS and fg_seed_programs:
                 selected_names = {p.name for p in fg_seed_programs}
                 for split in ["train", "validation", "test"]:
-                    for line in self._fg_seed_fact_lines(selected_names, selected_ids_by_split[split]):
+                    for line in self._fg_seed_fact_lines(
+                        selected_names, selected_ids_by_split[split]
+                    ):
                         prolog_lines_by_split[split].append(line)
                         head, args = line.split("(", 1)
                         body_predicates.add((head, args.count(",") + 1))
@@ -366,16 +550,35 @@ class ILPProblemBuilder:
                     [i for i in ids if i not in pos_ids_by_split[split]],
                     _facts_by_predicate(prolog_lines_by_split[split]),
                 )
-                bk_path = get_bk_path(target_id, base_dir=self.problem_dir, predicate_set=self.predicate_set, split=split, predicate_dir=self.aux_library_dir)
-                problem.write_popper(os.path.dirname(bk_path), exs_folder=os.path.dirname(get_exs_path(target_id, split, base_dir=self.problem_dir)))
+                bk_path = get_bk_path(
+                    target_id,
+                    base_dir=self.problem_dir,
+                    predicate_set=self.predicate_set,
+                    split=split,
+                    predicate_dir=self.aux_library_dir,
+                )
+                problem.write_popper(
+                    os.path.dirname(bk_path),
+                    exs_folder=os.path.dirname(
+                        get_exs_path(target_id, split, base_dir=self.problem_dir)
+                    ),
+                )
                 if split == "train" and self.write_aleph:
-                    aleph_stem = get_aleph_stem(target_id, predicate_set=self.predicate_set, base_dir=self.problem_dir, predicate_dir=self.aux_library_dir)
-                    problem.write_aleph(os.path.dirname(aleph_stem), stem=os.path.basename(aleph_stem))
+                    aleph_stem = get_aleph_stem(
+                        target_id,
+                        predicate_set=self.predicate_set,
+                        base_dir=self.problem_dir,
+                        predicate_dir=self.aux_library_dir,
+                    )
+                    problem.write_aleph(
+                        os.path.dirname(aleph_stem), stem=os.path.basename(aleph_stem)
+                    )
 
         if failed_rule_classes:
-            print(f"\n{len(failed_rule_classes)} class(es) built without their auxiliary rule "
-                  f"extensions because grounding failed: {', '.join(failed_rule_classes)}")
-
+            print(
+                f"\n{len(failed_rule_classes)} class(es) built without their auxiliary rule "
+                f"extensions because grounding failed: {', '.join(failed_rule_classes)}"
+            )
 
     def _example_sizes(self) -> pd.Series:
         """Size of each example, by which a capped train split keeps the smallest."""
@@ -395,7 +598,9 @@ class ILPProblemBuilder:
         """
         if len(df) <= max_samples:
             return df
-        return df.loc[self._atom_counts[df.index].nsmallest(max_samples, keep="first").index]
+        return df.loc[
+            self._atom_counts[df.index].nsmallest(max_samples, keep="first").index
+        ]
 
     def _direct_neighbors(self, target_id: str) -> tuple[set[str], set[str]]:
         """Molecule ids at or below ``target_id``, and those shared by all its direct parents.
@@ -409,16 +614,27 @@ class ILPProblemBuilder:
         ``pos_ids`` would make it a negative of itself (364 of the 1763 v251 labels are
         molecules).
         """
-        pos_ids = ({str(d) for d in self.hierarchy_graph.predecessors(target_id)} | {str(target_id)}) & self._mol_index
+        pos_ids = (
+            {str(d) for d in self.hierarchy_graph.predecessors(target_id)}
+            | {str(target_id)}
+        ) & self._mol_index
         parent_spaces = [
-            {str(d) for d in self.hierarchy_graph.predecessors(parent)} & self._mol_index
+            {str(d) for d in self.hierarchy_graph.predecessors(parent)}
+            & self._mol_index
             for parent in self.dataset.chebi_graph.successors(target_id)
         ]
         if not parent_spaces:
             return pos_ids, set()
         return pos_ids, set.intersection(*parent_spaces) - pos_ids
 
-    def gather_samples_for_chebi_cls(self, target_id: str, min_pos_samples=25, max_pos_samples=200, min_neg_samples=25, max_neg_samples=200):
+    def gather_samples_for_chebi_cls(
+        self,
+        target_id: str,
+        min_pos_samples=25,
+        max_pos_samples=200,
+        min_neg_samples=25,
+        max_neg_samples=200,
+    ):
         # Positives are the molecules at or below the target; negatives are only its direct
         # siblings -- the molecules shared by all of its direct parents. Nothing outside the
         # parents' subtrees enters any split, so train, validation and test pose the same
@@ -429,9 +645,13 @@ class ILPProblemBuilder:
         df_pos = self.dataset.molecules.loc[sorted(pos_ids)]
         df_neg = self.dataset.molecules.loc[sorted(sibling_neg_ids)]
         if len(df_pos) < min_pos_samples:
-            print(f"ChEBI class {target_id} does not have enough positive samples (found {len(df_pos)}, required are at least {min_pos_samples}). Got samples {df_pos.index.tolist()}")
+            print(
+                f"ChEBI class {target_id} does not have enough positive samples (found {len(df_pos)}, required are at least {min_pos_samples}). Got samples {df_pos.index.tolist()}"
+            )
         if len(df_neg) < min_neg_samples:
-            print(f"ChEBI class {target_id} does not have enough direct-sibling negatives (found {len(df_neg)}, required are at least {min_neg_samples}). Got samples {df_neg.index.tolist()}")
+            print(
+                f"ChEBI class {target_id} does not have enough direct-sibling negatives (found {len(df_neg)}, required are at least {min_neg_samples}). Got samples {df_neg.index.tolist()}"
+            )
 
         split_ids = self._split_ids
 
@@ -455,11 +675,19 @@ class ILPProblemBuilder:
                     f.write(f"{posneg}({class_head(target_id)}({sample})).\n")
 
         # sum up all positive and negative samples across splits
-        return sum(len(v) for k, v in samples_by_split.items() if k[0] == "pos"), sum(len(v) for k, v in samples_by_split.items() if k[0] == "neg")
+        return sum(len(v) for k, v in samples_by_split.items() if k[0] == "pos"), sum(
+            len(v) for k, v in samples_by_split.items() if k[0] == "neg"
+        )
 
 
-
-def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_TIMEOUT, aux_failures=None, predicate_set="atoms", fowl_smarts=None):
+def build_background_chemlog(
+    rows,
+    aux_predicates=None,
+    aux_timeout=DEFAULT_AUX_TIMEOUT,
+    aux_failures=None,
+    predicate_set="atoms",
+    fowl_smarts=None,
+):
     comments = []
     lines_by_predicate, arities = {}, {}
     if "farm_fgs" in predicate_set:
@@ -467,7 +695,7 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
         arities["has_fg"] = 2
     if "atoms" in predicate_set or "farm_fgs" not in predicate_set:
         lines_by_predicate["has_atom"] = []
-        arities["has_atom"] = 2 
+        arities["has_atom"] = 2
 
     aux_ext_by_mol = {}
     if aux_predicates:
@@ -483,17 +711,27 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
         if "farm_fgs" in predicate_set:
             # Functional-group level model: entities are FARM functional-group
             # nodes rather than atoms. has_fg links the molecule to its FG nodes.
-            fg_extensions = mol_to_fol_fgs(row.mol, add_fg_atom_predicates="atoms" in predicate_set)
-            node_ids = sorted({id for ids in fg_extensions.values()  for nid in ids for id in (nid if isinstance(nid, tuple) else (nid,))})  # flatten tuples
+            fg_extensions = mol_to_fol_fgs(
+                row.mol, add_fg_atom_predicates="atoms" in predicate_set
+            )
+            node_ids = sorted(
+                {
+                    id
+                    for ids in fg_extensions.values()
+                    for nid in ids
+                    for id in (nid if isinstance(nid, tuple) else (nid,))
+                }
+            )  # flatten tuples
             for node_id in node_ids:
-                 if node_id >= row.mol.GetNumAtoms():
+                if node_id >= row.mol.GetNumAtoms():
                     fg_id = get_atom_id(node_id, row.Index)
-                    lines_by_predicate["has_fg"].append(
-                        f"has_fg({row.Index},{fg_id}).")
+                    lines_by_predicate["has_fg"].append(f"has_fg({row.Index},{fg_id}).")
         if "atoms" in predicate_set or "farm_fgs" not in predicate_set:
             for atom in row.mol.GetAtoms():
                 atom_id = get_atom_id(atom.GetIdx(), row.Index)
-                lines_by_predicate["has_atom"].append(f"has_atom({row.Index},{atom_id}).")
+                lines_by_predicate["has_atom"].append(
+                    f"has_atom({row.Index},{atom_id})."
+                )
 
             atom_extensions, mol_extensions = mol_to_fol_atoms(row.mol)
 
@@ -514,7 +752,9 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
                 try:
                     matches = calculate_fowl_predicate(smarts, row.mol)
                 except Exception as e:
-                    print(f"Warning: failed to compute {predicate_name} for CHEBI:{row.Index}: {e}")
+                    print(
+                        f"Warning: failed to compute {predicate_name} for CHEBI:{row.Index}: {e}"
+                    )
                     continue
                 if matches:
                     atom_extensions.setdefault(predicate_name, []).extend(matches)
@@ -522,9 +762,17 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
         for predicate, indices in {**atom_extensions, **fg_extensions}.items():
             if predicate.startswith("cip_code_"):
                 predicate = "cip_code_" + predicate[-1].upper()
-            if (predicate in {"EQ", "atom", "*", "r", "r#"} or (predicate.startswith("r") and predicate[1:].isdigit() and int(predicate[1:]) > 0) or not indices):
+            if (
+                predicate in {"EQ", "atom", "*", "r", "r#"}
+                or (
+                    predicate.startswith("r")
+                    and predicate[1:].isdigit()
+                    and int(predicate[1:]) > 0
+                )
+                or not indices
+            ):
                 continue
-        
+
             is_tuple = isinstance(indices[0], tuple)
             if predicate not in lines_by_predicate:
                 lines_by_predicate[predicate] = []
@@ -536,7 +784,9 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
                     lines_by_predicate[predicate].append(f"{predicate}({arg_str}).")
             else:
                 for idx in indices:
-                    lines_by_predicate[predicate].append(f"{predicate}({get_atom_id(idx, row.Index)}).")
+                    lines_by_predicate[predicate].append(
+                        f"{predicate}({get_atom_id(idx, row.Index)})."
+                    )
 
         for predicate in mol_extensions:
             if predicate not in lines_by_predicate:
@@ -545,7 +795,9 @@ def build_background_chemlog(rows, aux_predicates=None, aux_timeout=DEFAULT_AUX_
                 arities[predicate] = 1
             lines_by_predicate[predicate].append(f"{predicate}({row.Index}).")
 
-    return comments + [line for lines in lines_by_predicate.values() for line in lines], [(pred, arities[pred]) for pred in arities.keys()]
+    return comments + [
+        line for lines in lines_by_predicate.values() for line in lines
+    ], [(pred, arities[pred]) for pred in arities.keys()]
 
 
 def build_computed_facts(rows):
@@ -595,8 +847,12 @@ def build_full_background(
     library per call, and needs ``aux_library_dir`` to point at the right one.
     """
     prolog_lines, _ = build_background_chemlog(
-        rows, aux_predicates=aux_predicates, aux_timeout=aux_timeout, aux_failures=aux_failures,
-        predicate_set=predicate_set, fowl_smarts=fowl_smarts,
+        rows,
+        aux_predicates=aux_predicates,
+        aux_timeout=aux_timeout,
+        aux_failures=aux_failures,
+        predicate_set=predicate_set,
+        fowl_smarts=fowl_smarts,
     )
     prolog_lines = list(prolog_lines)
 
@@ -616,7 +872,9 @@ def build_full_background(
 
     if predicate_set in ("chebi_fg_rules", "chebi_fg_learned_rules"):
         rule_lines, _ = build_background_chebi_fg_rules(
-            CHEBI_FG_RULES_PATH if predicate_set == "chebi_fg_rules" else CHEBI_FG_LEARNED_RULES_PATH
+            CHEBI_FG_RULES_PATH
+            if predicate_set == "chebi_fg_rules"
+            else CHEBI_FG_LEARNED_RULES_PATH
         )
         prolog_lines += rule_lines
 
@@ -634,7 +892,9 @@ def build_full_background(
             rule_dependencies = resolve_rule_dependencies(asp_programs, aux_library_dir)
 
         selected_fg = {p.name for p in fg_seed_programs}
-        referenced_fg = referenced_fact_predicates(asp_programs + rule_dependencies, FG_SEED_PREFIXES)
+        referenced_fg = referenced_fact_predicates(
+            asp_programs + rule_dependencies, FG_SEED_PREFIXES
+        )
         # Match each involved seed source once, then filter per use (feature vs grounding-only).
         matches_by_source = {}
         for key, src in FG_SEED_SOURCES.items():
@@ -650,20 +910,28 @@ def build_full_background(
                     out += emit(m, mol_ids, needed=sub)
             return out
 
-        prolog_lines += _fg_lines(selected_fg)  # selected FG predicates -> features in the BK
+        prolog_lines += _fg_lines(
+            selected_fg
+        )  # selected FG predicates -> features in the BK
 
         eval_facts = list(prolog_lines)
         if computed_facts:
             eval_facts += build_computed_facts(rows)
-        eval_facts += _fg_lines(referenced_fg - selected_fg)  # referenced-only -> grounding
+        eval_facts += _fg_lines(
+            referenced_fg - selected_fg
+        )  # referenced-only -> grounding
 
         if asp_programs:
             try:
                 extensions = derive_rule_extensions(
-                    asp_programs + rule_dependencies, eval_facts, mol_ids,
+                    asp_programs + rule_dependencies,
+                    eval_facts,
+                    mol_ids,
                 )
             except (RuntimeError, MemoryError) as e:
-                print(f"Grounding failed ({e}); returning background knowledge without aux_* facts.")
+                print(
+                    f"Grounding failed ({e}); returning background knowledge without aux_* facts."
+                )
                 extensions = {}
             for rp in asp_programs:
                 emitted = set()
@@ -679,17 +947,17 @@ def build_full_background(
 
 def build_background_chebi_fg_rules(rules_path=None):
     """Load ChEBI functional group rules from a Prolog file and return them as BK lines and body predicates.
-    
+
     Each rule defines a chebi_XXXXX(M) predicate in terms of atom-level predicates.
     These are added as Prolog rules to the BK and as body_pred entries (arity 1) in the bias.
     """
     if rules_path is None:
         rules_path = CHEBI_FG_RULES_PATH
-    
+
     prolog_lines = [f"% ChEBI FG rules from {os.path.basename(rules_path)}"]
     body_predicates = []
     seen_predicates = set()
-    
+
     with open(rules_path, "r") as f:
         for line in f:
             line = line.strip()
@@ -701,17 +969,23 @@ def build_background_chebi_fg_rules(rules_path=None):
             if pred_name and pred_name not in seen_predicates:
                 seen_predicates.add(pred_name)
                 body_predicates.append(pred_name)
-    
+
     print(f"Loaded {len(body_predicates)} ChEBI FG rule predicates from {rules_path}")
     return prolog_lines, body_predicates
 
 
-def build_background_fg_data(fg_data: dict[int, list[str]], rows, source: Literal["chembl_fgs", "chebi_fgs", "efg"]):
+def build_background_fg_data(
+    fg_data: dict[int, list[str]],
+    rows,
+    source: Literal["chembl_fgs", "chebi_fgs", "efg"],
+):
     lines_by_predicate = dict()
 
     for row in rows.itertuples():
         if row.Index not in fg_data:
-            print(f"Warning: No functional group data found for CHEBI:{row.Index} in source {source}. This molecule will only have atom and bond predicates in the background knowledge.")
+            print(
+                f"Warning: No functional group data found for CHEBI:{row.Index} in source {source}. This molecule will only have atom and bond predicates in the background knowledge."
+            )
             continue
         for fg in fg_data[row.Index]:
             if fg not in lines_by_predicate:

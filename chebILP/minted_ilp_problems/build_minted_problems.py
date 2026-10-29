@@ -3,15 +3,26 @@
 Usage (from repo root):
     wsl -e bash -lc '.wslvenv/bin/python -m chebILP.minted_ilp_problems.build_minted_problems'
 """
+
 import argparse
 import os
 
 from chebILP.minted_ilp_problems.gdl_minter import gdl_minter, gdl_targets, iggp_games
 from chebILP.minted_ilp_problems.iggp import DialMinter, SwitchesMinter
 from chebILP.minted_ilp_problems.tictactoe import TicTacToeMinter
-from chebILP.minted_ilp_problems.trains import AheadMinter, ChainedTrainsMinter, ShapeRunMinter
-from chebILP.minted_ilp_problems.zendo import (Ascend4Minter, ChainMinter, MonoChainMinter, RedChainMinter,
-                                               RedTiltedTopMinter, TiltedChainMinter)
+from chebILP.minted_ilp_problems.trains import (
+    AheadMinter,
+    ChainedTrainsMinter,
+    ShapeRunMinter,
+)
+from chebILP.minted_ilp_problems.zendo import (
+    Ascend4Minter,
+    ChainMinter,
+    MonoChainMinter,
+    RedChainMinter,
+    RedTiltedTopMinter,
+    TiltedChainMinter,
+)
 
 MINTERS = {
     "iggp_mint1a": (DialMinter, {"n_positions": 6, "spin_steps": 3}),
@@ -44,7 +55,13 @@ MINTERS = {
 
 # GDL games from the IGGP repository (data/iggp), one problem per target, named gdl_<game>_<target>.
 GDL_GAMES = iggp_games()
-MINTERS.update({f"gdl_{g}_{t}": (gdl_minter(g), {"target": t}) for g in GDL_GAMES for t in gdl_targets(g)})
+MINTERS.update(
+    {
+        f"gdl_{g}_{t}": (gdl_minter(g), {"target": t})
+        for g in GDL_GAMES
+        for t in gdl_targets(g)
+    }
+)
 
 
 def selected(problem_type: str | None, minter_cls) -> bool:
@@ -67,7 +84,9 @@ def main():
         out_dir = os.path.join(minter.out_root, name)
         problem.write_popper(out_dir)
         problem.write_aleph(out_dir)
-        print(f"{name}: {len(problem.pos_samples)} pos / {len(problem.neg_samples)} neg -> {out_dir}")
+        print(
+            f"{name}: {len(problem.pos_samples)} pos / {len(problem.neg_samples)} neg -> {out_dir}"
+        )
 
 
 if __name__ == "__main__":
