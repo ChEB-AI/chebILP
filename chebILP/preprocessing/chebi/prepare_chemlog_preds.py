@@ -150,21 +150,20 @@ def prepare_chemlog_preds(
 ):
     import tqdm
 
-    from chebILP.preprocessing.molecule_processing.data_preparation import ChEBIDataset
+    from chebILP.preprocessing.registry import load_dataset
 
-    dataset = ChEBIDataset(
-        chebi_version=chebi_version,
-        three_star_only=three_star_only,
+    dataset = load_dataset(
+        "chebi",
+        chebi_version,
         base_dir=base_dir,
         min_pos_samples=min_pos_samples,
+        three_star_only=three_star_only,
     )
     molecules = dataset.molecules
     splits_df = dataset.load_splits_from_csv()
     splits_df["id"] = splits_df["id"].astype(str)
 
-    predictor = ChemLogPredictor(
-        chebi_graph=dataset.chebi_graph, chebi_version=chebi_version
-    )
+    predictor = ChemLogPredictor(chebi_graph=dataset.graph, chebi_version=chebi_version)
 
     class_labels = predictor.classes
     print(f"ChemLog decides {len(class_labels)} classes")

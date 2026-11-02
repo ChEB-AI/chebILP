@@ -1,7 +1,7 @@
 """Run Aleph on a chebILP training problem, plain or seeded, as a Popper alternative.
 
 The problem's structural Aleph ``.b`` (modes + determinations + train bk) and its ``.f``/``.n``
-example files are produced at build time (``ilp_problem_builder``). Here they are turned into a
+example files are produced at build time (``ILPProblemBuilder``). Here they are turned into a
 runnable program by injecting the learn-time search settings (and, when seeding, a user
 refinement graph built from the LLM's class hypothesis), then handed to the vendored engine
 ``chebILP/aleph/aleph.pl`` via ``run_aleph.pl`` under ``swipl``.

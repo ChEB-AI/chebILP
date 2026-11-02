@@ -60,7 +60,7 @@ class MintedRuleGenerator(RuleGenerator):
             model,
             n_predicates,
             top_k,
-            molecules=None,
+            dataset=None,
             problem_dir=None,
             computed_facts=False,
             prompt_samples=0,

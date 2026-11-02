@@ -5,7 +5,7 @@ import pandas as pd
 from rdkit import Chem
 from xclingo import XclingoControl
 
-from chebILP.ilp_problem_builder import build_background_chemlog
+from chebILP.preprocessing.chebi.mol_to_fol import build_background_chemlog
 from chebILP.utils import split_prolog_literals
 from chebILP.explainability.rule_to_nl import (
     _ELEMENT_NAMES,

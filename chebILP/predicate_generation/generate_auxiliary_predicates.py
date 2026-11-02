@@ -294,12 +294,9 @@ def main():
 
     load_dotenv()
 
-    import pickle as _pickle
+    from chebILP.preprocessing.registry import load_dataset
 
-    data_dir = os.path.join("data", f"chebi_v{args.chebi_version}")
-    with open(os.path.join(data_dir, "chebi_graph.pkl"), "rb") as _f:
-        chebi_graph = _pickle.load(_f)
-
+    dataset = load_dataset("chebi", args.chebi_version)
     chebi_ids = resolve_classes(args)
 
     PredicateGenerator(
@@ -308,7 +305,7 @@ def main():
         args.n_predicates,
         args.top_k,
         effort=args.effort,
-    ).run(chebi_graph, chebi_ids)
+    ).run(dataset, chebi_ids)
 
 
 if __name__ == "__main__":

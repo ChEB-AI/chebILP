@@ -6,13 +6,15 @@ Each program turns the fold's SCOPe description into the ``bk.pl`` facts and der
 ceiling to compare learned programs with.
 
 Example usage:
-    python -m chebILP.protein_processing.reference_rules --problem_dir data/scope_208/ilp_problems
+    python -m chebILP.preprocessing.protein_processing.reference_rules --problem_dir data/scope_208/ilp_problems
 """
 
 import argparse
 import os
 
-from chebILP.reaction_processing.reference_rules import derive, read_examples, score
+from chebILP.ilp_path_manager import bk_dirname
+from chebILP.preprocessing.base_problem_builder import read_examples
+from chebILP.preprocessing.reaction_processing.reference_rules import derive, score
 from chebILP.utils import add_class_arguments, resolve_classes
 
 _COMMON = """
@@ -68,10 +70,9 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--problem_dir", default=os.path.join("data", "scope_208", "ilp_problems")
+        "--problem_dir", default=os.path.join("data", "scope_v2.08", "ilp_problems")
     )
     add_class_arguments(parser, required=False)
-    parser.add_argument("--predicate_set", default="atoms")
     parser.add_argument(
         "--show_errors", type=int, default=0, help="List this many FPs/FNs per split"
     )
@@ -85,10 +86,10 @@ def main():
     for cls in classes:
         for split in ("train", "validation", "test"):
             split_dir = os.path.join(args.problem_dir, cls, split)
-            pos, neg = read_examples(os.path.join(split_dir, "exs.pl"))
+            pos, neg = map(set, read_examples(cls, args.problem_dir, split))
             derived = derive(
                 REFERENCE_PROGRAMS[cls],
-                os.path.join(split_dir, args.predicate_set, "bk.pl"),
+                os.path.join(split_dir, bk_dirname(), "bk.pl"),
                 cls,
             )
             s = score(pos, neg, derived)

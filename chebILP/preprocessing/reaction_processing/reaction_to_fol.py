@@ -10,7 +10,10 @@ keeps every fact owned by exactly one example.
 
 import pandas as pd
 
-from chebILP.ilp_problem_builder import build_background_chemlog, build_computed_facts
+from chebILP.preprocessing.chebi.mol_to_fol import (
+    build_background_chemlog,
+    build_computed_facts,
+)
 
 LINK_PREDICATES = [("has_reactant", 2), ("has_product", 2)]
 
@@ -36,11 +39,11 @@ def participant_rows(reactions: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 
 
 def build_background_reaction(
-    reactions: pd.DataFrame, **kwargs
+    reactions: pd.DataFrame,
 ) -> tuple[list[str], list[tuple[str, int]]]:
-    """BK facts and body predicates for ``reactions``; ``kwargs`` go to ``build_background_chemlog``."""
+    """BK facts and body predicates for ``reactions``."""
     participants, links = participant_rows(reactions)
-    lines, predicates = build_background_chemlog(participants, **kwargs)
+    lines, predicates = build_background_chemlog(participants)
     return links + list(lines), LINK_PREDICATES + list(predicates)
 
 

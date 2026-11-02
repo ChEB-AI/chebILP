@@ -23,8 +23,14 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 
+import networkx as nx
 import pandas as pd
-from chebILP.preprocessing.base_dataset import BaseDataset
+from chebILP.preprocessing.base_dataset import BaseDataset, PromptSpec
+from chebILP.preprocessing.reaction_processing import llm_prompt
+from chebILP.preprocessing.reaction_processing.reaction_to_fol import (
+    build_background_reaction,
+    build_computed_facts_reaction,
+)
 from rdkit import Chem, RDLogger
 from chebi_utils.read_molecule import parse_molblock
 from chebi_utils.sdf_extractor import _iter_sdf_records, _parse_sdf_record
@@ -35,6 +41,7 @@ RAW_FILES = {
     "rhea.sdf.gz": f"{RHEA_FTP}/ctfiles/rhea.sdf.gz",
     "enzyme-data.xml.gz": "https://www.enzyme-database.org/downloads/enzyme-data.xml.gz",
 }
+EC_ROOT = "ec"
 
 
 def ec_node_id(ec_number: str, depth: int = 3) -> str:
@@ -188,6 +195,45 @@ class RheaDataset(BaseDataset):
     def process_data(self) -> None:
         self.molecules = self._load_or_build_reactions()
         self.classes = self._load_or_build_classes()
+        self.graph = self._build_graph()
+
+    def _build_graph(self) -> nx.DiGraph:
+        """Reaction ``r<id>`` -> ``ec_a_b_c`` -> ``ec_a_b`` -> ``ec_a`` -> root ``ec``."""
+        graph = nx.DiGraph()
+        graph.add_node(EC_ROOT, name="enzyme-catalysed reaction", definition=None)
+        for node, row in self.classes.iterrows():
+            graph.add_node(node, name=row["name"], definition=row["definition"])
+            parent = node.rsplit("_", 1)[0] if node.count("_") > 1 else EC_ROOT
+            graph.add_edge(node, parent)
+        for rid, ec_numbers in self.molecules["ec_numbers"].items():
+            graph.add_node(rid, name=f"RHEA:{rid[1:]}", definition=None)
+            for ec in ec_numbers:
+                levels = [x for x in ec.split(".")[:3] if x != "-"]
+                if levels:
+                    graph.add_edge(rid, "ec_" + "_".join(levels))
+        return graph
+
+    def build_background(self, rows):
+        return build_background_reaction(rows)
+
+    def build_computed_facts(self, rows) -> list[str]:
+        return build_computed_facts_reaction(rows)
+
+    def class_label(self, class_id: str) -> str:
+        return ec_label(class_id) if class_id.startswith("ec_") else class_id
+
+    def describe_example(self, example_id: str) -> str:
+        return self.molecules.at[example_id, "smiles"]
+
+    @property
+    def prompt_spec(self) -> PromptSpec:
+        return PromptSpec(
+            system_prompt=llm_prompt.SYSTEM_PROMPT,
+            existing_predicates=llm_prompt.EXISTING_PREDICATES,
+            computed_predicates=llm_prompt.COMPUTED_PREDICATES,
+            example_noun="reaction",
+            example_format="reaction SMILES, reactants>>products",
+        )
 
     def _load_or_build_reactions(self) -> pd.DataFrame:
         if os.path.exists(self.reactions_path):
@@ -259,7 +305,7 @@ class RheaDataset(BaseDataset):
         counts = pd.Series(
             [c for classes in reaction_classes for c in classes]
         ).value_counts()
-        labels = sorted(counts.index[counts >= self.min_pos_samples])
+        labels = self.sort_labels(sorted(counts.index[counts >= self.min_pos_samples]))
 
         self._labeled_df = pd.concat(
             [

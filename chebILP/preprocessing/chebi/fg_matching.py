@@ -646,7 +646,7 @@ def efg_descriptions(path: str = DEFAULT_EFG_DESCRIPTIONS_PATH) -> dict[str, str
 # A seed source turns a functional-group set into reusable library predicates. Each predicate
 # carries the group as a molecule-level presence fact under a reserved prefix; its extension is
 # the RDKit match, supplied at grounding rather than derived from a clause. Both consumers
-# (ilp_problem_builder, generate_auxiliary_rules) react to the prefix, so a library can be
+# (base_problem_builder, generate_auxiliary_rules) react to the prefix, so a library can be
 # seeded with either set (or neither) without any flag at build time.
 # ---------------------------------------------------------------------------
 

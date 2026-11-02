@@ -70,7 +70,7 @@ def domain_facts(domain: str, structure: dict) -> list[str]:
 
 
 def build_background_protein(
-    domains: pd.DataFrame, **_
+    domains: pd.DataFrame,
 ) -> tuple[list[str], list[tuple[str, int]]]:
     """BK facts and their body predicates for ``domains`` (index = domain id, ``mol`` = structure)."""
     lines = [

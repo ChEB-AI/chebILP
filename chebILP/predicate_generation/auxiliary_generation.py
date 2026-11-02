@@ -26,9 +26,8 @@ from chebILP.predicate_generation.auxiliary_predicates import (
     load_class_map,
     set_class_predicates,
 )
-from chebILP.ilp_path_manager import get_aux_generation_log_path
+from chebILP.ilp_path_manager import class_head, get_aux_generation_log_path
 from chebILP.predicate_generation.llm_client import LLMCallFailed, structured_completion
-from chebILP.utils import sort_labels_by_hierarchy
 
 
 class NewItem(BaseModel):
@@ -55,47 +54,18 @@ class Selection(BaseModel):
     new: list[NewItem]
 
 
-def get_class_info(chebi_graph, chebi_id: str) -> dict:
-    """Name, definition, parents and sibling classes (the parent's other children)."""
-    node_data = dict(chebi_graph.nodes.get(chebi_id, {}))
-    parents = []
-    siblings: dict[str, dict] = {}
-    for pid in chebi_graph.successors(chebi_id):
-        pdata = dict(chebi_graph.nodes.get(pid, {}))
-        parents.append(
-            {
-                "id": pid,
-                "name": pdata.get("name", f"CHEBI:{pid}"),
-                "definition": pdata.get("definition"),
-            }
-        )
-        for sid in chebi_graph.predecessors(pid):
-            if sid == chebi_id or sid in siblings:
-                continue
-            sdata = dict(chebi_graph.nodes.get(sid, {}))
-            siblings[sid] = {
-                "id": sid,
-                "name": sdata.get("name", f"CHEBI:{sid}"),
-                "definition": sdata.get("definition"),
-            }
-    return {
-        "name": node_data.get("name", f"CHEBI:{chebi_id}"),
-        "definition": node_data.get("definition"),
-        "parents": parents,
-        "siblings": list(siblings.values()),
-    }
-
-
 def one_line(text: str) -> str:
     """Collapse text to a single line — both libraries' headers are line-oriented."""
     return " ".join(text.split())
 
 
-def format_parents(info: dict) -> str:
+def format_parents(info: dict, with_definitions: bool = True) -> str:
+    """Parents of a class info dict (see ``BaseDataset.class_info``) as a prompt section."""
     if not info["parents"]:
         return ""
     parts = "\n".join(
-        f"  - {p['name']} (CHEBI:{p['id']}): {p['definition'] or 'no definition'}"
+        f"  - {p['name']} ({p['label']})"
+        + (f": {p['definition'] or 'no definition'}" if with_definitions else "")
         for p in info["parents"]
     )
     return f"Superclass(es):\n{parts}\n"
@@ -158,7 +128,7 @@ class AuxiliaryGenerator(ABC):
         """The contract the model writes programs against."""
 
     @abstractmethod
-    def build_user_prompt(self, chebi_id, info, candidates, ctx) -> str:
+    def build_user_prompt(self, class_id, info, candidates, ctx) -> str:
         """Render the per-class user prompt."""
 
     @abstractmethod
@@ -180,14 +150,14 @@ class AuxiliaryGenerator(ABC):
         return True, ""
 
     @abstractmethod
-    def add_to_library(self, source, chebi_id):
+    def add_to_library(self, source, class_id):
         """Store the program. Returns ``(stem, saved)`` or ``None``."""
 
     @abstractmethod
     def build_retriever(self):
         """Hybrid retriever over this pipeline's shared library."""
 
-    def class_context(self, chebi_id) -> dict:
+    def class_context(self, class_id) -> dict:
         """Per-class data the prompt and/or validation need (example molecules, facts...)."""
         return {}
 
@@ -200,7 +170,7 @@ class AuxiliaryGenerator(ABC):
         work here and leaves the result in ``ctx`` for :meth:`accept` to read back.
         """
 
-    def repair(self, parsed, blocks, ctx, chebi_id, info) -> None:
+    def repair(self, parsed, blocks, ctx, class_id, info) -> None:
         """One targeted feedback round per failing item, run right after :meth:`prepare`.
 
         A pipeline that re-prompts the model to fix a failing program does so here: it mutates
@@ -209,7 +179,7 @@ class AuxiliaryGenerator(ABC):
         gave up on (``ctx["excluded_labels"]`` / ``ctx["excluded_names"]``). Default: no round.
         """
 
-    def finalize(self, chebi_id, info, parsed, stems, ctx) -> dict | None:
+    def finalize(self, class_id, info, parsed, stems, ctx) -> dict | None:
         """Post-selection hook, after the class's predicates are fixed and stored.
 
         Runs once ``stems`` (the kept reused + new predicates) is known. Returns an optional
@@ -240,16 +210,16 @@ class AuxiliaryGenerator(ABC):
 
     # --- template ----------------------------------------------------------------
 
-    def generate_for_class(self, chebi_id, info) -> int:
+    def generate_for_class(self, class_id, info) -> int:
         """Select auxiliary predicates for one class; returns how many were recorded."""
-        ctx = self.class_context(chebi_id)
+        ctx = self.class_context(class_id)
         query = f"{info['name']} {info['definition'] or ''}"
         candidates = (
             self.retriever.retrieve(query, top_k=self.top_k)
             if len(self.retriever)
             else []
         )
-        prompt = self.build_user_prompt(chebi_id, info, candidates, ctx)
+        prompt = self.build_user_prompt(class_id, info, candidates, ctx)
 
         parsed, raw, attempts = None, None, []
         try:
@@ -266,7 +236,7 @@ class AuxiliaryGenerator(ABC):
         finally:
             # Log the exchange even if the request failed; rewritten below once resolved.
             log_path = self._write_log(
-                chebi_id, info, prompt, parsed, raw, None, attempts
+                class_id, info, prompt, parsed, raw, None, attempts
             )
             print(f"    logged full exchange to {log_path}")
 
@@ -282,14 +252,14 @@ class AuxiliaryGenerator(ABC):
         ctx["reused_stems"] = reused_stems
 
         blocks = [
-            (f"chebi_{chebi_id}_block_{i}", self.to_source(item))
+            (f"{class_head(class_id)}_block_{i}", self.to_source(item))
             for i, item in enumerate(parsed.new)
         ]
         self.prepare(blocks, ctx)
         # One targeted feedback round per failing item (no-op for pipelines that skip it). It
         # rewrites blocks with repaired sources and marks any predicate it excluded, so the
         # gate loops below store the repaired programs and drop only what stayed broken.
-        self.repair(parsed, blocks, ctx, chebi_id, info)
+        self.repair(parsed, blocks, ctx, class_id, info)
 
         rejected: list[dict] = []
 
@@ -330,7 +300,7 @@ class AuxiliaryGenerator(ABC):
                     record["code"] = code
                 rejected.append(record)
                 continue
-            added = self.add_to_library(source, chebi_id)
+            added = self.add_to_library(source, class_id)
             if added is None:
                 rejected.append({"name": item.name, "reason": "invalid program"})
                 continue
@@ -344,21 +314,21 @@ class AuxiliaryGenerator(ABC):
             print(f"    new {self.describe(saved, stem, reason)}")
 
         stems = [r["name"] for r in kept_reused] + new_stems
-        set_class_predicates(chebi_id, stems, problem_dir=self.library_dir)
+        set_class_predicates(class_id, stems, problem_dir=self.library_dir)
 
         selection = {"reused": kept_reused, "new": new_records, "rejected": rejected}
-        hypothesis_eval = self.finalize(chebi_id, info, parsed, stems, ctx)
+        hypothesis_eval = self.finalize(class_id, info, parsed, stems, ctx)
         if hypothesis_eval is not None:
             selection["hypothesis_eval"] = hypothesis_eval
         if ctx.get("repairs"):
             selection["repairs"] = ctx["repairs"]
         # Fold the feedback-round calls into the cost/reask totals the log reports.
         attempts = list(attempts) + ctx.get("extra_attempts", [])
-        self._write_log(chebi_id, info, prompt, parsed, raw, selection, attempts)
+        self._write_log(class_id, info, prompt, parsed, raw, selection, attempts)
         return len(stems)
 
-    def run(self, chebi_graph, chebi_ids) -> int:
-        print(f"Generating auxiliary {self.noun}s for {len(chebi_ids)} class(es).")
+    def run(self, dataset, class_ids) -> int:
+        print(f"Generating auxiliary {self.noun}s for {len(class_ids)} class(es).")
         print(f"Building retrieval index over the shared {self.noun} library...")
         self.retriever = self.build_retriever()
         print(f"  {len(self.retriever)} {self.noun}(s) in the library.")
@@ -370,40 +340,40 @@ class AuxiliaryGenerator(ABC):
             )
 
         total = 0
-        for chebi_id in sort_labels_by_hierarchy(chebi_ids, chebi_graph):
-            if str(chebi_id) in done:
+        for class_id in dataset.sort_labels(class_ids):
+            if str(class_id) in done:
                 continue
-            info = get_class_info(chebi_graph, chebi_id)
-            print(f"CHEBI:{chebi_id} ({info['name']})...")
+            info = dataset.class_info(class_id)
+            print(f"{info['label']} ({info['name']})...")
             try:
-                n = self.generate_for_class(chebi_id, info)
+                n = self.generate_for_class(class_id, info)
                 total += n
                 print(f"  -> {n} auxiliary {self.noun}(s) recorded")
             except LLMCallFailed as e:
                 # Every class needs an answer; rerunning the same command resumes at this class.
                 print(f"  -> LLM call failed: {e}")
                 print(
-                    f"Aborting run at CHEBI:{chebi_id}. Rerun the same command to resume."
+                    f"Aborting run at {info['label']}. Rerun the same command to resume."
                 )
                 raise
             except Exception as e:
                 print(f"  -> Failed: {e}")
         print(
-            f"Done. Recorded {total} auxiliary {self.noun} selection(s) across {len(chebi_ids)} class(es)."
+            f"Done. Recorded {total} auxiliary {self.noun} selection(s) across {len(class_ids)} class(es)."
         )
         return total
 
     # --- logging -----------------------------------------------------------------
 
-    def _write_log(self, chebi_id, info, prompt, parsed, raw, selection, attempts=None):
+    def _write_log(self, class_id, info, prompt, parsed, raw, selection, attempts=None):
         attempts = attempts or []
         failed = [a for a in attempts if a.get("error")]
         costs = [a["cost"] for a in attempts if a.get("cost") is not None]
         total_cost = sum(costs) if costs else None
-        log_path = get_aux_generation_log_path(chebi_id, base_dir=self.library_dir)
+        log_path = get_aux_generation_log_path(class_id, base_dir=self.library_dir)
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(
-                f"# Auxiliary-{self.noun} generation log — CHEBI:{chebi_id} ({info['name']})\n\n"
+                f"# Auxiliary-{self.noun} generation log — {info.get('label', class_id)} ({info['name']})\n\n"
             )
             f.write(
                 f"- Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n- Model: {self.model}\n"

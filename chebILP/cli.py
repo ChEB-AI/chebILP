@@ -1,11 +1,9 @@
 import os
-import typing
 import time
 import argparse
 
 from chebILP.utils import (
     tee_output,
-    AVAILABLE_PREDICATE_SETS,
     add_class_arguments,
     resolve_classes,
 )
@@ -18,69 +16,57 @@ from chebILP.ilp_classifier import learn_chebi_classes
 
 
 def _make_ilp_builder(args):
-    from chebILP.preprocessing.chebi.learn_fgs import FGILPProblemBuilder
-    from chebILP.ilp_problem_builder import ILPProblemBuilder
-    from chebILP.predicate_generation.auxiliary_predicates import DEFAULT_AUX_TIMEOUT
+    from chebILP.preprocessing.base_problem_builder import ILPProblemBuilder
+    from chebILP.preprocessing.registry import dataset_from_args
 
-    if isinstance(args, dict):
-        fg_mode = args["fg_mode"]
-        chebi_version = args["chebi_version"]
-        three_star_only = not args.get("include_two_star", False)
-        base_dir = args.get("base_dir", "data")
-        min_pos_samples = args.get("min_pos_samples", 25)
-        predicate_set = args["predicate_set"]
-        aux_timeout = args.get("aux_timeout", DEFAULT_AUX_TIMEOUT)
-        aux_library_dir = args.get("predicate_dir")
-        computed_facts = args.get("computed_facts", False)
-        write_aleph = not args.get("no_aleph", False)
-        retrieval_k = args.get("retrieval_k", 16)
-        problem_dir = args.get("problem_dir", os.path.join("data", "ilp_problems"))
-    else:
-        fg_mode = args.fg_mode
-        chebi_version = args.chebi_version
-        three_star_only = not getattr(args, "include_two_star", False)
-        base_dir = getattr(args, "base_dir", "data")
-        min_pos_samples = getattr(args, "min_pos_samples", 25)
-        predicate_set = args.predicate_set
-        aux_timeout = getattr(args, "aux_timeout", DEFAULT_AUX_TIMEOUT)
-        aux_library_dir = getattr(args, "predicate_dir", None)
-        computed_facts = getattr(args, "computed_facts", False)
-        write_aleph = not getattr(args, "no_aleph", False)
-        retrieval_k = getattr(args, "retrieval_k", 16)
-        problem_dir = getattr(args, "problem_dir", os.path.join("data", "ilp_problems"))
-
-    if fg_mode:
-        return FGILPProblemBuilder(
-            chebi_version=chebi_version,
-            three_star_only=three_star_only,
-            base_dir=base_dir,
-            min_pos_samples=min_pos_samples,
-            predicate_set=predicate_set,
-        )
     return ILPProblemBuilder(
-        chebi_version=chebi_version,
-        three_star_only=three_star_only,
-        base_dir=base_dir,
-        min_pos_samples=min_pos_samples,
-        predicate_set=predicate_set,
-        aux_timeout=aux_timeout,
-        aux_library_dir=aux_library_dir,
-        computed_facts=computed_facts,
-        write_aleph=write_aleph,
-        retrieval_k=retrieval_k,
-        problem_dir=problem_dir,
+        dataset_from_args(args),
+        problem_dir=args.problem_dir,
+        aux_library_dir=getattr(args, "predicate_dir", None),
+        computed_facts=getattr(args, "computed_facts", False),
+        write_aleph=not getattr(args, "no_aleph", False),
     )
 
 
-def _make_results_dir(fg_mode: bool) -> str:
+def _make_results_dir() -> str:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join(
-        "data", "results", f"run_fgs_{timestamp}" if fg_mode else f"run_{timestamp}"
-    )
+    results_dir = os.path.join("data", "results", f"run_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, "results.json"), "w+") as f:
         f.write("")
     return results_dir
+
+
+def _read_run_config(run_dir: str) -> dict[str, str]:
+    """``key: value`` lines of a run's config.yml (nested keys flattened)."""
+    config = {}
+    config_path = os.path.join(run_dir, "config.yml")
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            for line in f:
+                if ": " in line:
+                    key, value = line.strip().split(": ", 1)
+                    config[key] = value
+    return config
+
+
+def _library_from_config(config: dict[str, str]) -> str | None:
+    """The LLM rule library a run was learned with, or None.
+
+    Runs from before predicate sets were removed record ``predicate_set``: ``atoms`` had no
+    library, ``llm_generated_rules`` used ``predicate_dir``. Other sets are no longer built.
+    """
+    library = config.get("predicate_dir")
+    library = None if library in (None, "None") else library
+    predicate_set = config.get("predicate_set")
+    if predicate_set is None or predicate_set == "llm_generated_rules":
+        return library
+    if predicate_set == "atoms":
+        return None
+    raise SystemExit(
+        f"Run uses predicate_set '{predicate_set}', which is no longer supported "
+        "(only atoms and llm_generated_rules)."
+    )
 
 
 # ── Subcommand handlers ─────────────────────────────────────────────────────
@@ -91,10 +77,10 @@ def _handle_build_samples(args):
     ilp_builder = _make_ilp_builder(args)
     ilp_builder.build_examples(
         classes,
-        min_pos_samples=args.min_pos_samples,
-        max_pos_samples=args.max_pos_samples,
-        min_neg_samples=args.min_neg_samples,
-        max_neg_samples=args.max_neg_samples,
+        max_pos_train=args.max_pos_samples,
+        max_neg_train=args.max_neg_samples,
+        min_pos=args.min_pos_samples,
+        min_neg=args.min_neg_samples,
     )
 
 
@@ -106,7 +92,7 @@ def _handle_build_bk(args):
 
 def _handle_learn(args):
     classes = resolve_classes(args)
-    results_dir = _make_results_dir(args.fg_mode)
+    results_dir = _make_results_dir()
     log_path = os.path.join(results_dir, "run.log")
 
     # write config file
@@ -118,12 +104,9 @@ def _handle_learn(args):
     with tee_output(log_path):
         learn_chebi_classes(
             classes,
-            getattr(args, "problem_dir", None),
-            args.predicate_set,
+            args.problem_dir,
             results_dir,
             timeout=args.timeout,
-            selection_mode=args.selection_mode,
-            selection_k=args.selection_k,
             max_vars=args.max_vars,
             max_body=args.max_body,
             mdl_weight_fn=args.mdl_weight_fn,
@@ -140,34 +123,6 @@ def _handle_learn(args):
         )
 
 
-def _handle_select_predicates(args):
-    from chebILP.predicate_generation.select_predicates import (
-        select_predicates_for_classes,
-    )
-
-    classes = resolve_classes(args)
-    non_chebi = [c for c in classes if not c.isdigit()]
-    if non_chebi:
-        raise SystemExit(
-            f"select_predicates supports ChEBI classes only (it reads the ChEBI graph); "
-            f"got: {', '.join(non_chebi)}"
-        )
-    chebi_ids = [int(c) for c in classes]
-
-    print(f"Processing {len(chebi_ids)} ChEBI classes...")
-    results = select_predicates_for_classes(
-        chebi_ids=chebi_ids,
-        chebi_version=args.chebi_version,
-        problem_dir=args.problem_dir,
-        predicate_set=args.predicate_set,
-        selection_mode=args.selection_mode,
-        selection_k=args.selection_k,
-        predicate_dir=args.predicate_dir,
-    )
-    successful = sum(1 for v in results.values() if v is not None)
-    print(f"\nCompleted: {successful}/{len(chebi_ids)} classes processed successfully")
-
-
 def _load_label_stats(path: str) -> list[str]:
     with open(path) as f:
         lines = [line.strip() for line in f if line.strip()]
@@ -179,9 +134,9 @@ def _load_label_stats(path: str) -> list[str]:
 
 def _handle_build_ilp_preds_for_ensemble(args):
     """Build a full ILP predictions tensor for a given split from a run's results.json."""
-    import pandas as pd
     from chebILP.evaluation.test import build_ilp_preds_tensor
     from chebILP.evaluation.ensemble_eval import load_ilp_results
+    from chebILP.preprocessing.registry import dataset_from_args
 
     results = load_ilp_results(args.run_dir)
     programs = {
@@ -189,26 +144,11 @@ def _handle_build_ilp_preds_for_ensemble(args):
     }
     print(f"Loaded {len(programs)} ILP programs from {args.run_dir}")
 
-    # Recover which predicate set / problem dir the run used so the background knowledge
-    # matches what the programs were learned on. Explicit CLI flags override the config.
-    run_config = {}
-    config_path = os.path.join(args.run_dir, "config.yml")
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            for line in f:
-                if ": " in line:
-                    key, value = line.strip().split(": ", 1)
-                    run_config[key] = value
-    predicate_set = args.predicate_set or run_config.get("predicate_set", "atoms")
-    aux_library_dir = args.predicate_dir or run_config.get("predicate_dir")
-    print(
-        f"Using predicate_set='{predicate_set}'"
-        + (
-            f", predicate_dir='{aux_library_dir}'"
-            if predicate_set == "llm_generated_fgs"
-            else ""
-        )
-    )
+    # Recover which rule library the run used so the background knowledge matches what the
+    # programs were learned on. An explicit --predicate_dir overrides the config.
+    run_config = _read_run_config(args.run_dir)
+    aux_library_dir = args.predicate_dir or _library_from_config(run_config)
+    print(f"Using rule library: {aux_library_dir}")
 
     mol_ids = []
     with open(args.chebi_split) as f:
@@ -216,13 +156,7 @@ def _handle_build_ilp_preds_for_ensemble(args):
             mol_id, split = line.strip().split(",")
             if split == args.predict_on:
                 mol_ids.append(mol_id)
-    print(f"Building predictions for {len(mol_ids)} '{args.predict_on}' molecules")
-
-    molecules_pkl = getattr(args, "molecules_path", None) or os.path.join(
-        "data", f"chebi_v{args.chebi_version}", "processed_25_3_STAR", "molecules.pkl"
-    )
-    print(f"Loading molecules from {molecules_pkl}...")
-    molecules_df = pd.read_pickle(molecules_pkl)
+    print(f"Building predictions for {len(mol_ids)} '{args.predict_on}' examples")
 
     prefix = "val" if args.predict_on == "validation" else args.predict_on
     output_npy = os.path.join(args.run_dir, f"full_{prefix}_preds.npy")
@@ -235,12 +169,10 @@ def _handle_build_ilp_preds_for_ensemble(args):
 
     build_ilp_preds_tensor(
         programs,
-        molecules_df,
+        dataset_from_args(args),
         mol_ids,
         output_npy,
         output_meta,
-        predicate_set=predicate_set,
-        aux_timeout=args.aux_timeout,
         aux_library_dir=aux_library_dir,
         label_timeout=args.label_timeout,
         n_jobs=args.n_jobs,
@@ -396,35 +328,12 @@ def _handle_test(args):
     from chebILP.evaluation.test import test_chebi_classes
 
     # load config from the run to evaluate
-    with open(os.path.join(args.run_to_evaluate, "config.yml"), "r") as f:
-        config = {}
-        for line in f:
-            if ": " in line:
-                key, value = line.strip().split(": ", 1)
-                config[key] = value
-    assert (
-        "predicate_set" in config
-        and "selection_mode" in config
-        and "selection_k" in config
-        and "problem_dir" in config
-        and "fg_mode" in config
-    ), (
-        "Config file must contain predicate_set, selection_mode, selection_k, problem_dir, and fg_mode"
-    )
+    config = _read_run_config(args.run_to_evaluate)
+    assert "problem_dir" in config, "Config file must contain problem_dir"
+    predicate_dir = _library_from_config(config)
 
-    config["fg_mode"] = config["fg_mode"] == "True"
-    config["selection_mode"] = (
-        config["selection_mode"] if config["selection_mode"] != "None" else None
-    )
-    config["selection_k"] = (
-        int(config["selection_k"]) if config["selection_k"] != "None" else None
-    )
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join(
-        "data",
-        f"results_{args.test_on}",
-        f"run_fgs_{timestamp}" if config["fg_mode"] else f"run_{timestamp}",
-    )
+    results_dir = os.path.join("data", f"results_{args.test_on}", f"run_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, "results.json"), "w+") as f:
         f.write("")
@@ -435,6 +344,7 @@ def _handle_test(args):
         f.write("args:\n")
         for arg in vars(args):
             f.write(f"  {arg}: {getattr(args, arg)}\n")
+        f.write(f"predicate_dir: {predicate_dir}\n")
 
     print(f"Config for test run saved to {os.path.join(results_dir, 'config.yml')}")
 
@@ -442,19 +352,17 @@ def _handle_test(args):
         test_chebi_classes(
             args.run_to_evaluate,
             config["problem_dir"],
-            config["predicate_set"],
             results_dir,
-            selection_mode=config["selection_mode"],
-            selection_k=config["selection_k"],
             test_on=args.test_on,
             verbose=args.verbose,
-            predicate_dir=config.get("predicate_dir"),
+            predicate_dir=predicate_dir,
         )
 
 
 def _handle_predict(args):
     import json
     from chebILP.evaluation.test import predict_smiles
+    from chebILP.preprocessing.registry import dataset_class
 
     smiles_list = args.smiles
     if smiles_list is None:
@@ -466,14 +374,15 @@ def _handle_predict(args):
         with open(args.targets_file, "r") as f:
             target_predicates = [line.strip() for line in f if line.strip()]
 
+    # Only the ChEBI molecule encoding is used, so no dataset files are loaded.
+    dataset = dataset_class("chebi")(version="predict")
     results = predict_smiles(
         smiles_list=smiles_list,
         rules_file=args.rules_file,
         target_predicates=target_predicates,
+        dataset=dataset,
         verbose=args.verbose,
-        predicate_set=args.predicate_set,
         aux_library_dir=args.predicate_dir,
-        aux_timeout=args.aux_timeout,
         computed_facts=getattr(args, "computed_facts", False),
     )
 
@@ -491,48 +400,15 @@ def _handle_predict(args):
 
 def _add_common_args(parser: argparse.ArgumentParser):
     """Add arguments shared by all subcommands that build an ILPProblemBuilder."""
+    from chebILP.preprocessing.registry import add_dataset_arguments
+
     add_class_arguments(parser)
-    parser.add_argument(
-        "--chebi_version",
-        "-v",
-        type=int,
-        required=True,
-        help="ChEBI ontology version (e.g. 251); selects the prepared dataset.",
-    )
-    parser.add_argument(
-        "--include_two_star",
-        "-2",
-        action="store_true",
-        help="Include 2-star classes as well as 3-star (default: 3-star only).",
-    )
-    parser.add_argument(
-        "--base_dir",
-        type=str,
-        default="data",
-        help="Root directory for the dataset (default: data).",
-    )
+    add_dataset_arguments(parser)
     parser.add_argument(
         "--problem_dir",
-        default=os.path.join("data", "ilp_problems"),
-        help="ILP problem tree holding each class's examples / BK.",
-    )
-    parser.add_argument(
-        "--min_pos_samples",
-        type=int,
-        default=25,
-        help="Minimum descendant molecules per label class; selects the dataset subset (default: 25).",
-    )
-    parser.add_argument(
-        "--fg_mode",
-        action="store_true",
-        help="Learn functional groups instead of ChEBI classes.",
-    )
-    parser.add_argument(
-        "--predicate_set",
-        type=str,
-        default="atoms",
-        choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
-        help="Which predicate set to use for background knowledge.",
+        default=None,
+        help="ILP problem tree holding each class's examples / BK "
+        "(default: <dataset dir>/ilp_problems, e.g. data/chebi_v251/ilp_problems).",
     )
     parser.add_argument(
         "--no_aleph",
@@ -542,20 +418,16 @@ def _add_common_args(parser: argparse.ArgumentParser):
 
 
 def _handle_prepare_dataset(args):
-    from chebILP.preprocessing.chebi.chebi_dataset import ChEBIDataset
-    from chebILP.preprocessing.reaction_processing.rhea_data import RheaDataset
-    from chebILP.protein_processing.scope_data import ScopeDataset
+    from chebILP.preprocessing.registry import dataset_class
 
-    for dataset_cls in [ChEBIDataset, RheaDataset, ScopeDataset]:
-        if dataset_cls.DATASET_NAME == args.dataset.lower():
-            dataset_cls.prepare(
-                version=args.version,
-                base_dir=args.base_dir,
-                min_pos_samples=args.min_pos_samples,
-                val_ratio=args.val_ratio,
-                test_ratio=args.test_ratio,
-                seed=args.seed,
-            )
+    dataset_class(args.dataset.lower()).prepare(
+        version=args.version,
+        base_dir=args.base_dir,
+        min_pos_samples=args.min_pos_samples,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
+        seed=args.seed,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -644,32 +516,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_args(sp_bk)
     sp_bk.add_argument(
-        "--aux_timeout",
-        type=float,
-        default=1.0,
-        help="Timeout (seconds) for each auxiliary predicate's extension call (default: 1.0).",
-    )
-    sp_bk.add_argument(
         "--predicate_dir",
         type=str,
         default=None,
-        help="Shared auxiliary-predicate library directory (llm_generated_fgs: "
-        "data/llm_generated_predicates; llm_generated_rules, llm_retrieved_rules*: "
-        "data/llm_generated_rules). "
-        "The BK is written to <predicate_set>_<library name>/, so libraries can coexist.",
-    )
-    sp_bk.add_argument(
-        "--retrieval_k",
-        type=int,
-        default=16,
-        help="For llm_retrieved_rules / llm_retrieved_rules_holdout: number of library "
-        "programs retrieval picks per class (default: 16). Not part of the BK folder "
-        "name, so a rebuild with another k overwrites the previous BK.",
+        help="LLM rule library whose class rules are ground into the BK (default: none, "
+        "base encoding only). The BK is written to llm_generated_rules_<library name>/, "
+        "so libraries can coexist.",
     )
     sp_bk.add_argument(
         "--computed_facts",
         action="store_true",
-        help="For llm_generated_rules: compute mol_weight/ring_size facts to evaluate "
+        help="Compute the dataset's numeric facts (e.g. mol_weight/ring_size) to ground "
         "the rules against (kept out of bk.pl; only aux_* extensions are saved).",
     )
     sp_bk.set_defaults(func=_handle_build_bk)
@@ -683,8 +540,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp_learn.add_argument(
         "--problem_dir",
         type=str,
-        default=None,
-        help="Base directory of the ILP problems (default: data/ilp_problems).",
+        required=True,
+        help="Base directory of the ILP problems (as given to build_samples / build_bk).",
     )
     sp_learn.add_argument(
         "--tool",
@@ -695,31 +552,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_learn.add_argument(
         "--timeout", type=int, default=20, help="Timeout for ILP solver in seconds."
-    )
-    sp_learn.add_argument(
-        "--predicate_set",
-        type=str,
-        default="atoms",
-        choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
-        help="Which predicate set to use.",
-    )
-    sp_learn.add_argument(
-        "--fg_mode",
-        action="store_true",
-        help="Learn functional groups instead of ChEBI classes.",
-    )
-    sp_learn.add_argument(
-        "--selection_mode",
-        type=str,
-        default=None,
-        choices=["claude", "random", "top_k"],
-        help="Mode for selecting body predicates in bias file.",
-    )
-    sp_learn.add_argument(
-        "--selection_k",
-        type=int,
-        default=10,
-        help="Number of predicates selection with selection_mode (required if selection_mode is set).",
     )
     sp_learn.add_argument(
         "--max_vars",
@@ -784,60 +616,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--predicate_dir",
         type=str,
         default=None,
-        help="Auxiliary-rule library directory (LLM predicate sets). Selects the BK folder "
+        help="LLM rule library the BK was built with (default: none). Selects the BK folder "
         "build_bk wrote for that library, and is read by --seed_hypothesis / --heuristic_guidance.",
     )
     sp_learn.add_argument(
         "--seed_hypothesis",
         action="store_true",
         help="Seed Aleph's search with the LLM's saved class hypothesis, when it grounds "
-        "and fits the bias (--tool aleph and llm_generated_rules only).",
+        "and fits the bias (--tool aleph with --predicate_dir only).",
     )
     sp_learn.add_argument(
         "--heuristic_guidance",
         action="store_true",
         help="Steer generation toward the predicates in the LLM's class hypothesis via "
-        "prefer_body_pred directives in the bias file (llm_generated_rules only)."
+        "prefer_body_pred directives in the bias file (with --predicate_dir only)."
         + _mdl_note,
     )
     sp_learn.set_defaults(func=_handle_learn)
-
-    # ── select_predicates ────────────────────────────────────────────────
-    sp_select = subparsers.add_parser(
-        "select_predicates",
-        help="Select predicates for ChEBI classes (via Claude, random, or top-k frequency).",
-    )
-    add_class_arguments(sp_select)
-    sp_select.add_argument(
-        "--chebi_version", type=int, default=248, help="ChEBI version to use."
-    )
-    sp_select.add_argument(
-        "--problem_dir", type=str, default=None, help="Base directory for ILP problems."
-    )
-    sp_select.add_argument(
-        "--predicate_set",
-        type=str,
-        default="atoms",
-        choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
-        help="Which predicate set to use.",
-    )
-    sp_select.add_argument(
-        "--selection_mode",
-        type=str,
-        default="claude",
-        choices=["claude", "random", "top_k"],
-        help="How to select predicates.",
-    )
-    sp_select.add_argument(
-        "--selection_k", type=int, default=10, help="Number of predicates to select."
-    )
-    sp_select.add_argument(
-        "--predicate_dir",
-        type=str,
-        default=None,
-        help="Auxiliary-rule library the BK was built from (LLM predicate sets); selects its BK folder.",
-    )
-    sp_select.set_defaults(func=_handle_select_predicates)
 
     # ── test ─────────────────────────────────────────────────────────────
     sp_test = subparsers.add_parser(
@@ -905,32 +700,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print satisfied predicates per molecule.",
     )
     sp_predict.add_argument(
-        "--predicate_set",
-        type=str,
-        default="atoms",
-        choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
-        help="Background-knowledge predicate set (must match the set the rules "
-        "were learned on). Default: atoms.",
-    )
-    sp_predict.add_argument(
         "--predicate_dir",
         type=str,
         default=None,
-        help="Shared auxiliary-predicate library directory (only needed for the "
-        "llm_generated_fgs predicate set). Default: data/llm_generated_predicates.",
-    )
-    sp_predict.add_argument(
-        "--aux_timeout",
-        type=float,
-        default=None,
-        help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
-        "(llm_generated_fgs only). Default: library default.",
+        help="LLM rule library the rules were learned with (default: none).",
     )
     sp_predict.add_argument(
         "--computed_facts",
         action="store_true",
-        help="For llm_generated_rules: recompute mol_weight/ring_size facts when "
-        "grounding the rules (must match how the rules were built).",
+        help="Recompute mol_weight/ring_size facts when grounding the library rules "
+        "(must match how the BK was built).",
     )
     sp_predict.set_defaults(func=_handle_predict)
 
@@ -960,18 +739,9 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Path to the splits CSV (mol_id,split).",
     )
-    sp_bipe.add_argument(
-        "--chebi_version",
-        type=int,
-        default=248,
-        help="ChEBI version; used to derive default molecules_path.",
-    )
-    sp_bipe.add_argument(
-        "--molecules_path",
-        type=str,
-        default=None,
-        help="Path to molecules.pkl (default: data/chebi_v{version}/processed_25_3_STAR/molecules.pkl).",
-    )
+    from chebILP.preprocessing.registry import add_dataset_arguments
+
+    add_dataset_arguments(sp_bipe)
     sp_bipe.add_argument(
         "--label_timeout",
         type=float,
@@ -979,27 +749,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-label Clingo solving timeout in seconds (default: 60).",
     )
     sp_bipe.add_argument(
-        "--predicate_set",
-        type=str,
-        default=None,
-        choices=typing.get_args(AVAILABLE_PREDICATE_SETS),
-        help="Background-knowledge predicate set. Default: read from the run's config.yml "
-        "(falling back to 'atoms'). Must match the set the programs were learned on.",
-    )
-    sp_bipe.add_argument(
         "--predicate_dir",
         type=str,
         default=None,
-        help="Shared auxiliary-predicate library directory (only needed for the "
-        "llm_generated_fgs predicate set). Default: read from the run's config.yml, "
-        "falling back to data/llm_generated_predicates.",
-    )
-    sp_bipe.add_argument(
-        "--aux_timeout",
-        type=float,
-        default=None,
-        help="Per-predicate timeout (seconds) for LLM auxiliary predicates "
-        "(llm_generated_fgs only). Default: library default.",
+        help="LLM rule library the programs were learned with. Default: read from the "
+        "run's config.yml.",
     )
     sp_bipe.add_argument(
         "--computed_facts",

@@ -24,12 +24,19 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from typing import Optional
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 import tqdm
 
-from chebILP.preprocessing.base_dataset import BaseDataset
-from chebILP.protein_processing.dssp import domain_structure
+from chebILP.preprocessing.base_dataset import BaseDataset, PromptSpec
+from chebILP.preprocessing.protein_processing import llm_prompt
+from chebILP.preprocessing.protein_processing.dssp import domain_structure
+from chebILP.preprocessing.protein_processing.protein_to_fol import (
+    build_background_protein,
+    build_computed_facts_protein,
+    topology_string,
+)
 
 SCOPE_URL = "https://scop.berkeley.edu/downloads"
 ASTRAL_SUBSET = 95  # use subset with <= 95% sequence identity
@@ -39,6 +46,7 @@ MIN_POS_PER_SPLIT = 3
 DSSP_BATCH_SIZE = 4096
 # What a fold's split keeps apart, strictest first.
 HOLDOUT_LEVELS = ("superfamily", "family", "domain")
+SCOP_ROOT = "scop"
 
 
 def raw_files(version: str) -> dict[str, str]:
@@ -118,7 +126,7 @@ class ScopeDataset(BaseDataset):
     """SCOPe domains with fold labels.
 
     ``molecules`` is the domain frame (``mol`` holds the secondary-structure dict from
-    :func:`~chebILP.protein_processing.dssp.domain_structure`). ``classes`` holds each fold's
+    :func:`~chebILP.preprocessing.protein_processing.dssp.domain_structure`). ``classes`` holds each fold's
     ``name``, ``sccs`` and ``definition``. Splits keep each fold's superfamilies together where
     the fold allows, else its families (see :meth:`create_splits`).
     """
@@ -152,6 +160,63 @@ class ScopeDataset(BaseDataset):
     def process_data(self) -> None:
         self.molecules = self._load_or_build_domains()
         self.classes = self._load_or_build_classes()
+        self.graph = self._build_graph()
+
+    def _build_graph(self) -> nx.DiGraph:
+        """Domain -> fold ``scop_<cl>_<cf>`` -> class ``scop_<cl>`` -> root ``scop``."""
+        graph = nx.DiGraph()
+        graph.add_node(SCOP_ROOT, name="SCOPe domain", definition=None)
+        for node, row in self.classes.iterrows():
+            graph.add_node(
+                node, name=row["name"], definition=row["definition"], sccs=row["sccs"]
+            )
+        for fold in sorted(set(self.molecules["fold"])):
+            cls = fold.rsplit("_", 1)[0]
+            if cls not in graph:
+                graph.add_node(
+                    cls, name=None, definition=None, sccs=cls[len("scop_") :]
+                )
+            graph.add_edge(fold, cls)
+            graph.add_edge(cls, SCOP_ROOT)
+        for did, fold in self.molecules["fold"].items():
+            graph.add_node(did, name=self.molecules.at[did, "sid"], definition=None)
+            graph.add_edge(did, fold)
+        return graph
+
+    def example_sizes(self) -> pd.Series:
+        """Number of SSEs."""
+        return self.molecules["mol"].map(lambda s: len(s["sses"]))
+
+    def select_train_subset(self, ids: list[str], max_samples: int) -> list[str]:
+        """A seeded random ``max_samples`` of ``ids``: fold correlates with domain size, so the smallest would bias train."""
+        if len(ids) <= max_samples:
+            return list(ids)
+        return sorted(pd.Series(list(ids)).sample(max_samples, random_state=0))
+
+    def build_background(self, rows):
+        return build_background_protein(rows)
+
+    def build_computed_facts(self, rows) -> list[str]:
+        return build_computed_facts_protein(rows)
+
+    def class_label(self, class_id: str) -> str:
+        sccs = self.graph.nodes.get(class_id, {}).get("sccs")
+        return f"SCOP {sccs}" if sccs else class_id
+
+    def describe_example(self, example_id: str) -> str:
+        row = self.molecules.loc[example_id]
+        return f"{row['sid']}: {topology_string(row['mol'])}"
+
+    @property
+    def prompt_spec(self) -> PromptSpec:
+        return PromptSpec(
+            system_prompt=llm_prompt.SYSTEM_PROMPT,
+            existing_predicates=llm_prompt.EXISTING_PREDICATES,
+            computed_predicates=llm_prompt.COMPUTED_PREDICATES,
+            example_noun="domain",
+            example_format="sid: residues, SSEs with lengths | strand pairs",
+            max_siblings=40,
+        )
 
     def _structures(self) -> dict[str, Optional[dict]]:
         """DSSP structure of every domain in the ASTRAL subset archive by sid, read from the archive without extracting it."""
@@ -221,9 +286,10 @@ class ScopeDataset(BaseDataset):
         folds = {
             fold_id(sccs): (description, sccs, "; ".join(com.get(sunid, [])) or None)
             for sunid, (level, sccs, description) in des.items()
-            if level == "cf"
+            if level in ("cl", "cf")
         }
-        nodes = sorted(set(self.molecules["fold"]))
+        fold_nodes = set(self.molecules["fold"])
+        nodes = sorted(fold_nodes | {f.rsplit("_", 1)[0] for f in fold_nodes})
         classes = pd.DataFrame(
             [folds[n] for n in nodes],
             columns=["name", "sccs", "definition"],
@@ -235,7 +301,7 @@ class ScopeDataset(BaseDataset):
     def select_labels(self) -> list[str]:
         """Folds with at least ``min_pos_samples`` domains."""
         counts = self.molecules["fold"].value_counts()
-        labels = sorted(counts.index[counts >= self.min_pos_samples])
+        labels = self.sort_labels(sorted(counts.index[counts >= self.min_pos_samples]))
         self._labeled_df = pd.concat(
             [
                 pd.DataFrame(

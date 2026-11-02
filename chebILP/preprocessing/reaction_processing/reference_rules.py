@@ -5,7 +5,7 @@ They check that the encoding can express a class at all, and give a ceiling to c
 programs with. Each program derives ``ec_<a>_<b>_<c>(R)`` from the atom-level ``bk.pl``.
 
 Example usage:
-    python -m chebILP.reaction_processing.reference_rules --problem_dir data/rhea_v142/ilp_problems
+    python -m chebILP.preprocessing.reaction_processing.reference_rules --problem_dir data/rhea_v142/ilp_problems
 """
 
 import argparse
@@ -13,6 +13,8 @@ import os
 
 import clingo
 
+from chebILP.ilp_path_manager import bk_dirname
+from chebILP.preprocessing.base_problem_builder import read_examples
 from chebILP.utils import add_class_arguments, resolve_classes
 
 _COMMON = """
@@ -51,18 +53,6 @@ ec_4_1_1(R) :- has_product(R,M), co2(M).
 }
 
 
-def read_examples(exs_path: str) -> tuple[set[str], set[str]]:
-    pos, neg = set(), set()
-    with open(exs_path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith(("pos(", "neg(")):
-                (pos if line.startswith("pos(") else neg).add(
-                    line.split("(")[-1].split(")")[0]
-                )
-    return pos, neg
-
-
 def derive(program: str, bk_path: str, head: str) -> set[str]:
     ctl = clingo.Control(["--warn=none"])
     ctl.load(bk_path)
@@ -99,7 +89,6 @@ def main():
         "--problem_dir", default=os.path.join("data", "rhea_v142", "ilp_problems")
     )
     add_class_arguments(parser, required=False)
-    parser.add_argument("--predicate_set", default="atoms")
     parser.add_argument(
         "--show_errors", type=int, default=0, help="List this many FPs/FNs per split"
     )
@@ -113,10 +102,10 @@ def main():
     for cls in classes:
         for split in ("train", "validation", "test"):
             split_dir = os.path.join(args.problem_dir, cls, split)
-            pos, neg = read_examples(os.path.join(split_dir, "exs.pl"))
+            pos, neg = map(set, read_examples(cls, args.problem_dir, split))
             derived = derive(
                 REFERENCE_PROGRAMS[cls],
-                os.path.join(split_dir, args.predicate_set, "bk.pl"),
+                os.path.join(split_dir, bk_dirname(), "bk.pl"),
                 cls,
             )
             s = score(pos, neg, derived)

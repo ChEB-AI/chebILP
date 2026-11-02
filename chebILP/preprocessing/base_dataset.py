@@ -1,13 +1,44 @@
+from dataclasses import dataclass
 from typing import Optional
 
-from abc import ABC
+from abc import ABC, abstractmethod
 import os
+import networkx as nx
 import pandas as pd
 
 from chebi_utils import create_multilabel_splits
 
 
+@dataclass(frozen=True)
+class PromptSpec:
+    """Dataset-specific text of the LLM rule-generation prompt."""
+
+    system_prompt: str
+    existing_predicates: str
+    computed_predicates: str
+    # "molecule", "reaction", "domain": what one example is
+    example_noun: str
+    # how ``describe_example`` renders an example, e.g. "SMILES"
+    example_format: str
+    # siblings listed in the prompt; None lists all
+    max_siblings: Optional[int] = None
+    # show the definitions of parents and siblings, not only their names
+    relative_definitions: bool = False
+    # add "... and N more" when siblings are cut at max_siblings
+    count_hidden_siblings: bool = True
+    # list examples attached directly to a parent among the siblings
+    examples_as_siblings: bool = False
+    sibling_header: str = "Sibling classes (the negatives come from these):"
+
+
 class BaseDataset(ABC):
+    """A labelled dataset whose classes form a hierarchy.
+
+    Subclasses set ``molecules`` (one row per example, index = example id, column ``mol``) and
+    ``graph`` (an ``nx.DiGraph`` with child -> parent edges, examples as leaves, nodes carrying
+    ``name`` and ``definition``) in :meth:`process_data`.
+    """
+
     DATASET_NAME: str = "base_dataset"
 
     def __init__(self, version: str, base_dir: str = "data", min_pos_samples: int = 25):
@@ -19,7 +50,9 @@ class BaseDataset(ABC):
         self.splits_file = os.path.join(self.processed_dir, "splits.csv")
 
         # cached labeled DataFrame after select_labels()
+        # todo this should be loaded from disk if available
         self._labeled_df: Optional[pd.DataFrame] = None
+        self._closure: Optional[nx.DiGraph] = None
 
     def _raw(self, name: str) -> str:
         return os.path.join(self.raw_dir, name)
@@ -43,7 +76,15 @@ class BaseDataset(ABC):
         pass
 
     def select_labels(self) -> list[str]:
+        """
+        Identify the label IDs for the dataset. Criterion is the self.min_pos_samples threshold.
+        ILP problems / LLM predicate generation follows the order of this list, thus
+        it should be sorted (e.g., by hierarchy level for ChEBI)."""
         pass
+
+    def load_labels(self) -> list[str]:
+        with open(self.labels_file, "r") as f:
+            return [line.strip() for line in f if line.strip()]
 
     def create_splits(
         self,
@@ -152,3 +193,135 @@ class BaseDataset(ABC):
             seed=seed,
         )
         return dataset
+
+    # --- hierarchy ---------------------------------------------------------------
+
+    @property
+    def hierarchy_closure(self) -> nx.DiGraph:
+        if self._closure is None:
+            self._closure = nx.transitive_closure_dag(self.graph)
+        return self._closure
+
+    def _examples_below(self, node: str) -> set[str]:
+        """Example ids at or below ``node``."""
+        below = {str(d) for d in self.hierarchy_closure.predecessors(node)} | {
+            str(node)
+        }
+        return below & self._example_ids
+
+    @property
+    def _example_ids(self) -> set[str]:
+        ids = getattr(self, "_example_id_cache", None)
+        if ids is None:
+            ids = self._example_id_cache = {str(i) for i in self.molecules.index}
+        return ids
+
+    def get_positive_examples(self, target_id: str) -> set[str]:
+        """Example ids at or below ``target_id`` (a target that is itself an example counts)."""
+        return self._examples_below(target_id)
+
+    def get_negative_examples(self, target_id: str) -> set[str]:
+        """Direct neighbours: examples below every direct parent of ``target_id``, minus its positives."""
+        parent_spaces = [
+            self._examples_below(p) for p in self.graph.successors(target_id)
+        ]
+        if not parent_spaces:
+            return set()
+        return set.intersection(*parent_spaces) - self.get_positive_examples(target_id)
+
+    def class_label(self, class_id: str) -> str:
+        """Human-readable id of a class, as shown in prompts and logs."""
+        return str(class_id)
+
+    def _node_info(self, node: str) -> dict:
+        data = self.graph.nodes.get(node, {})
+        return {
+            "id": node,
+            "label": self.class_label(node),
+            "name": data.get("name") or self.class_label(node),
+            "definition": data.get("definition"),
+        }
+
+    def class_info(self, class_id: str) -> dict:
+        """Name, definition, parents and siblings (the parents' other child classes) of a class."""
+        skip = set() if self.prompt_spec.examples_as_siblings else self._example_ids
+        parents, siblings = [], {}
+        for pid in self.graph.successors(class_id):
+            parents.append(self._node_info(pid))
+            for sid in self.graph.predecessors(pid):
+                if sid != class_id and sid not in siblings and str(sid) not in skip:
+                    siblings[sid] = self._node_info(sid)
+        return {
+            **self._node_info(class_id),
+            "parents": parents,
+            "siblings": list(siblings.values()),
+        }
+
+    def sort_labels(self, labels: list[str]) -> list[str]:
+        """``labels`` with every superclass before its subclasses, otherwise in their given order."""
+        missing = set(labels) - set(self.graph)
+        if missing:
+            raise ValueError(f"Some labels are not in the class hierarchy: {missing}")
+        label_set = set(labels)
+        order_graph = nx.DiGraph()
+        order_graph.add_nodes_from(labels)
+        for label in labels:
+            for superclass in nx.descendants(self.graph, label) & label_set:
+                order_graph.add_edge(superclass, label)
+        position = {label: i for i, label in enumerate(labels)}
+        return list(
+            nx.lexicographical_topological_sort(order_graph, key=position.__getitem__)
+        )
+
+    # --- examples ----------------------------------------------------------------
+
+    def example_sizes(self) -> pd.Series:
+        """Size of each example (index = example id): atoms of its ``mol``."""
+        sizes = getattr(self, "_sizes", None)
+        if sizes is None:
+            sizes = self._sizes = self.molecules["mol"].map(lambda m: m.GetNumAtoms())
+        return sizes
+
+    def select_train_subset(self, ids: list[str], max_samples: int) -> list[str]:
+        """The ``max_samples`` smallest of ``ids``; ties resolve by the order of ``ids``."""
+        if len(ids) <= max_samples:
+            return list(ids)
+        sizes = self.example_sizes()
+        return list(sizes[list(ids)].nsmallest(max_samples, keep="first").index)
+
+    def get_example_weight(self, example_id: str) -> float:
+        return 1.0
+
+    # --- encoding ----------------------------------------------------------------
+
+    @abstractmethod
+    def build_background(
+        self, rows: pd.DataFrame
+    ) -> tuple[list[str], list[tuple[str, int]]]:
+        """BK fact lines for the examples in ``rows`` and their body predicates ``(name, arity)``."""
+
+    def build_computed_facts(self, rows: pd.DataFrame) -> list[str]:
+        """Numeric facts offered to LLM rules only; never written to ``bk.pl``."""
+        return []
+
+    def seed_fact_lines(self, names: set[str], rows: pd.DataFrame) -> list[str]:
+        """Facts over ``rows`` of library predicates ``names`` that are not ASP rules (see ``is_fg_seed_name``)."""
+        return []
+
+    def load_seed_matches(self, names: set[str]) -> None:
+        """Load the dataset-wide data ``seed_fact_lines`` needs for ``names``, so it survives dropping ``molecules``."""
+
+    # --- prompting ---------------------------------------------------------------
+
+    def candidate_notes(self, names) -> str:
+        """Extra prompt text about the offered reuse candidates ``names``."""
+        return ""
+
+    @abstractmethod
+    def describe_example(self, example_id: str) -> str:
+        """One-line text form of an example for prompts."""
+
+    @property
+    @abstractmethod
+    def prompt_spec(self) -> PromptSpec:
+        """Prompt text for LLM rule generation."""

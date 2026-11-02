@@ -5,7 +5,7 @@ Python programs). Instead of a Python ``extension(mol)`` function, each auxiliar
 here is a small logic program: one head ``aux_<name>(...) :- <body>`` plus any helper clauses
 it needs. During ``build_bk`` the program is grounded against the atom facts (and optional
 computed facts) with Clingo and only the derived ``aux_*`` extension is written to ``bk.pl``
-(see ``ilp_problem_builder.build_bk`` for the ``llm_generated_rules`` branch).
+(see ``base_problem_builder.build_split_backgrounds``).
 
 The head may be of any arity, mirroring the kinds the Python pipeline supports: a molecule
 predicate ``aux_x(M)``, an atom one ``aux_x(A)``, an atom pair ``aux_x(A1,A2)``, or any mix.

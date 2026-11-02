@@ -19,12 +19,8 @@ from chebILP.ilp_path_manager import (
     get_exs_path,
     get_aleph_stem,
 )
-from chebILP.utils import AVAILABLE_PREDICATE_SETS
 from popper.util import MAX_BODY, MAX_VARS
 
-# The subsystem whose auxiliary predicates are ASP rules whose heads can be analysed for
-# seeding and heuristic guidance. Both features only apply here.
-RULE_PREDICATE_SET = "llm_generated_rules"
 # Clingo heuristic level for prefer_body_pred hints. Any non-zero value below the size
 # heuristic's ~1000 works; when every hint shares a level the value only sets relative
 # priority, so a single constant is enough (see popper-sfluegel/search-guidance.md).
@@ -254,10 +250,7 @@ print(json.dumps(result))
 
 def build_bias(
     problem_dir,
-    predicate_set,
     target_ids,
-    selection_mode: Literal["claude", "random", "top_k"] | None = None,
-    selection_k: int | None = None,
     max_vars=MAX_VARS,
     max_body=MAX_BODY,
     heuristic_guidance=False,
@@ -268,37 +261,24 @@ def build_bias(
     base_pred_cost=1,
 ):
     # use bias template generated in build_bk and create settings-specific bias files
-    for target_id in tqdm.tqdm(
-        target_ids, desc="Building bias files for ChEBI classes"
-    ):
+    for target_id in tqdm.tqdm(target_ids, desc="Building bias files"):
         plain_bias_path = get_bias_path(
             target_id,
             split="train",
             base_dir=problem_dir,
-            predicate_set=predicate_set,
-            selection_mode=selection_mode,
-            selection_k=selection_k,
-            predicate_dir=aux_library_dir,
+            aux_library_dir=aux_library_dir,
         )  # template bias file created in build_bk
-        if selection_mode is None:
-            assert os.path.exists(plain_bias_path), (
-                f"Bias template file {plain_bias_path} does not exist. Please run build_bk first to create the bias template before running build_bias."
-            )
-        else:
-            assert os.path.exists(plain_bias_path), (
-                f"Bias template file {plain_bias_path} does not exist. Please run predicate selection with selection_mode={selection_mode} and top_k={selection_k} first."
-            )
+        assert os.path.exists(plain_bias_path), (
+            f"Bias template file {plain_bias_path} does not exist. Please run build_bk first to create the bias template before running build_bias."
+        )
 
         bias_path = get_bias_path(
             target_id,
             split="train",
             base_dir=problem_dir,
-            predicate_set=predicate_set,
-            selection_mode=selection_mode,
-            selection_k=selection_k,
+            aux_library_dir=aux_library_dir,
             max_vars=max_vars,
             max_body=max_body,
-            predicate_dir=aux_library_dir,
         )
         # use bias.pl to generate settings-specific bias file
         with open(plain_bias_path, "r") as f:
@@ -313,7 +293,7 @@ def build_bias(
         # Heuristic guidance: steer Popper's non-recursive generator toward the class's chosen
         # auxiliary predicates by appending prefer_body_pred/2 directives (only those actually
         # declared as body_pred in the template — Popper error-exits on an undeclared one).
-        if heuristic_guidance and predicate_set == RULE_PREDICATE_SET:
+        if heuristic_guidance and aux_library_dir:
             from chebILP.predicate_generation.auxiliary_rules import (
                 load_class_hypothesis,
             )
@@ -356,11 +336,8 @@ def build_bias(
 def learn_chebi_classes(
     classes_list,
     problem_dir: Optional[str],
-    predicate_set: Literal[AVAILABLE_PREDICATE_SETS],
     results_dir,
     timeout=20,
-    selection_mode: Literal["claude", "random", "top_k"] | None = None,
-    selection_k: int | None = None,
     max_vars=MAX_VARS,
     max_body=MAX_BODY,
     mdl_weight_fn=1,
@@ -392,17 +369,11 @@ def learn_chebi_classes(
     with open(os.path.join(results_dir, "config.yml"), "a+") as f:
         f.write(f"tool: {tool}\n")
         f.write(f"problem_dir: {problem_dir}\n")
-        f.write(f"predicate_set: {predicate_set}\n")
-        f.write(f"selection_mode: {selection_mode}\n")
-        if selection_mode is not None:
-            f.write(f"selection_k: {selection_k}\n")
         f.write(f"max_vars: {max_vars}\n")
         f.write(f"max_body: {max_body}\n")
         f.write(f"seed_hypothesis: {seed_hypothesis}\n")
         f.write(f"heuristic_guidance: {heuristic_guidance}\n")
         f.write(f"predicate_dir: {aux_library_dir}\n")
-        if seed_hypothesis or heuristic_guidance:
-            f.write(f"aux_library_dir: {aux_library_dir}\n")
         f.write(
             f"pred_costs: {{aux: {aux_pred_cost}, seed: {seed_pred_cost}, base: {base_pred_cost}}}\n"
         )
@@ -417,10 +388,7 @@ def learn_chebi_classes(
         aux_pred_cost = seed_pred_cost = base_pred_cost = 1
     build_bias(
         problem_dir,
-        predicate_set,
         classes_list,
-        selection_mode=selection_mode,
-        selection_k=selection_k,
         max_vars=max_vars,
         max_body=max_body,
         heuristic_guidance=heuristic_guidance,
@@ -436,9 +404,9 @@ def learn_chebi_classes(
             "Warning: --seed_hypothesis only works with --tool aleph; ignoring it for Popper."
         )
         seed_hypothesis = False
-    if seed_hypothesis and predicate_set != RULE_PREDICATE_SET:
+    if seed_hypothesis and not aux_library_dir:
         print(
-            f"Warning: --seed_hypothesis only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'."
+            "Warning: --seed_hypothesis needs an LLM rule library (--predicate_dir); ignoring it."
         )
     if tool == "popper" and nuwls and shutil.which("NuWLS-c") is None:
         print(
@@ -446,14 +414,9 @@ def learn_chebi_classes(
             "Install it as described in the Popper README (https://github.com/logic-and-learning-lab/Popper), "
             "or pass --no-nuwls."
         )
-    if heuristic_guidance and predicate_set != RULE_PREDICATE_SET:
+    if heuristic_guidance and not aux_library_dir:
         print(
-            f"Warning: --heuristic_guidance only applies to predicate_set='{RULE_PREDICATE_SET}'; ignoring for '{predicate_set}'."
-        )
-    if tool == "aleph" and selection_mode is not None:
-        print(
-            f"Warning: --tool aleph does not apply predicate selection; the Aleph problem uses "
-            f"the full '{predicate_set}' predicate set (selection_mode='{selection_mode}' ignored)."
+            "Warning: --heuristic_guidance needs an LLM rule library (--predicate_dir); ignoring it."
         )
 
     for chebi_id in classes_list:
@@ -465,21 +428,15 @@ def learn_chebi_classes(
             chebi_id,
             split="train",
             base_dir=problem_dir,
-            predicate_set=predicate_set,
-            selection_mode=selection_mode,
-            selection_k=selection_k,
-            predicate_dir=aux_library_dir,
+            aux_library_dir=aux_library_dir,
         )
         bias_path = get_bias_path(
             chebi_id,
             split="train",
             base_dir=problem_dir,
-            predicate_set=predicate_set,
-            selection_mode=selection_mode,
-            selection_k=selection_k,
+            aux_library_dir=aux_library_dir,
             max_vars=max_vars,
             max_body=max_body,
-            predicate_dir=aux_library_dir,
         )
         if (
             not os.path.exists(exs_path)
@@ -493,7 +450,7 @@ def learn_chebi_classes(
 
         # Seed Aleph's search with the LLM's class hypothesis.
         seed_clause = None
-        if seed_hypothesis and predicate_set == RULE_PREDICATE_SET:
+        if seed_hypothesis and aux_library_dir:
             from chebILP.predicate_generation.auxiliary_rules import (
                 load_class_hypothesis,
             )
@@ -536,9 +493,8 @@ def learn_chebi_classes(
 
             aleph_stem = get_aleph_stem(
                 chebi_id,
-                predicate_set=predicate_set,
                 base_dir=problem_dir,
-                predicate_dir=aux_library_dir,
+                aux_library_dir=aux_library_dir,
             )
             missing = [
                 aleph_stem + ext
@@ -592,10 +548,9 @@ def learn_chebi_classes(
                     ),
                     bk_file=get_bk_path(
                         chebi_id,
-                        predicate_set=predicate_set,
                         split="validation",
                         base_dir=problem_dir,
-                        predicate_dir=aux_library_dir,
+                        aux_library_dir=aux_library_dir,
                     ),
                 )
                 f1 = (

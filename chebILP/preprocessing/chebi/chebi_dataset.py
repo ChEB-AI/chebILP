@@ -17,8 +17,20 @@ import pickle
 
 import networkx as nx
 import pandas as pd
+from rdkit import Chem
 
-from chebILP.preprocessing.base_dataset import BaseDataset
+from chebILP.preprocessing.base_dataset import BaseDataset, PromptSpec
+from chebILP.preprocessing.chebi import llm_prompt
+from chebILP.preprocessing.chebi.fg_matching import (
+    FG_SEED_SOURCES,
+    fg_atom_fact_lines,
+    fg_fact_lines,
+    fg_seed_usage,
+)
+from chebILP.preprocessing.chebi.mol_to_fol import (
+    build_background_chemlog,
+    build_computed_facts,
+)
 
 from chebi_utils import (
     build_chebi_graph,
@@ -108,15 +120,18 @@ class ChEBIDataset(BaseDataset):
         Return ChEBI class IDs with at least *min_pos_samples* descendant
         molecules.  Writes ``labels.txt`` if *output_path* is given.
         The resulting labeled DataFrame is cached for :meth:`create_splits`.
+        The returned list is sorted by hierarchy level (superclasses first)
         """
         labeled_df, labels = build_labeled_dataset(
-            chebi_graph=self.chebi_graph,
+            chebi_graph=self.graph,
             molecules=self.molecules,
             min_molecules=self.min_pos_samples,
         )
         self._labeled_df = labeled_df.rename(
             columns={"chebi_id": "id", "mol": "sample"}
         )
+
+        labels = self.sort_labels(labels)
 
         if self.labels_file:
             os.makedirs(
@@ -128,5 +143,72 @@ class ChEBIDataset(BaseDataset):
         return labels
 
     def process_data(self) -> None:
-        self.chebi_graph = self._load_or_build_graph()
+        self.graph = self._load_or_build_graph()
         self.molecules = self._load_or_build_molecules()
+
+    def build_background(self, rows):
+        return build_background_chemlog(rows)
+
+    def build_computed_facts(self, rows) -> list[str]:
+        return build_computed_facts(rows)
+
+    def _fg_matches(self, source_key: str, rows: pd.DataFrame) -> dict:
+        """RDKit matches of a seed source, from the dataset-wide cache when ``rows`` are dataset molecules."""
+        src = FG_SEED_SOURCES[source_key]
+        cache = self.__dict__.setdefault("_fg_match_cache", {})
+        if source_key not in cache:
+            molecules = getattr(self, "molecules", None)
+            if molecules is None or not rows.index.isin(molecules.index).all():
+                return src.matcher(rows)
+            cache[source_key] = src.matcher(
+                molecules, cache_path=os.path.join(self.processed_dir, src.cache)
+            )
+        matches = cache[source_key]
+        if not all(str(i) in matches for i in rows.index):
+            return src.matcher(rows)
+        return matches
+
+    def load_seed_matches(self, names) -> None:
+        for key, src in FG_SEED_SOURCES.items():
+            if any(n.startswith(src.prefix) for n in names):
+                self._fg_matches(key, self.molecules)
+
+    def seed_fact_lines(self, names, rows) -> list[str]:
+        """Facts of the seeded FG predicates ``names`` (``chembl_fg_*``, ``efg_*``, ``efga_*``) over ``rows``."""
+        ids = [str(i) for i in rows.index]
+        lines: list[str] = []
+        for key, src in FG_SEED_SOURCES.items():
+            want = {n for n in names if n.startswith(src.prefix)}
+            if want:
+                emit = fg_atom_fact_lines if src.atom_level else fg_fact_lines
+                lines += emit(self._fg_matches(key, rows), ids, needed=want)
+        return lines
+
+    def candidate_notes(self, names) -> str:
+        usage = fg_seed_usage(names)
+        return (
+            f"Functional-group candidates are called as follows:\n{usage}\n"
+            if usage
+            else ""
+        )
+
+    def class_label(self, class_id: str) -> str:
+        return f"CHEBI:{class_id}"
+
+    def describe_example(self, example_id: str) -> str:
+        return Chem.MolToSmiles(self.molecules.at[example_id, "mol"])
+
+    @property
+    def prompt_spec(self) -> PromptSpec:
+        return PromptSpec(
+            system_prompt=llm_prompt.SYSTEM_PROMPT,
+            existing_predicates=llm_prompt.EXISTING_PREDICATES,
+            computed_predicates=llm_prompt.COMPUTED_PREDICATES,
+            example_noun="molecule",
+            example_format="SMILES",
+            max_siblings=8,
+            relative_definitions=True,
+            count_hidden_siblings=False,
+            examples_as_siblings=True,
+            sibling_header="Sibling classes (look for the contrast, e.g. they may differ only by a count or chain length):",
+        )
