@@ -1,19 +1,29 @@
 """Prompt text for LLM rule generation on SCOPe folds."""
 
 from chebILP.preprocessing.protein_processing.protein_to_fol import (
+    COUNT_BINS,
     LENGTH_BINS,
-    SHORT_LOOP,
+    LOOP_BINS,
+    MAX_POS,
+    RESIDUE_BINS,
+    bin_names,
 )
 
 EXISTING_PREDICATES = f"""\
 - has_sse(D, S): domain D contains secondary-structure element (SSE) S
 - helix(S), strand(S): S is an alpha helix / a beta strand (DSSP H / E; 3-10 helices, turns and
   isolated bridges are not SSEs)
+- helix_pos<k>(S), strand_pos<k>(S) for k = 1..{MAX_POS}: S is about the k-th helix / strand of its
+  domain, counted per type from the N-terminus (exact for k <= 3, else within k // 4)
 - first_sse(S), last_sse(S): S is the first / last SSE of its domain
 - next_sse(S1, S2): S2 is the SSE directly after S1 in sequence
 - short_sse(S), medium_sse(S), long_sse(S): length bin; helices <= {LENGTH_BINS["H"][0]} / <= {LENGTH_BINS["H"][1]} / longer,
   strands <= {LENGTH_BINS["E"][0]} / <= {LENGTH_BINS["E"][1]} / longer residues
-- short_loop(S1, S2): next_sse(S1,S2) with at most {SHORT_LOOP} residues between them
+- {", ".join(bin_names("loop", LOOP_BINS))}(S1, S2): next_sse(S1,S2) with that many residues
+  between them
+- {", ".join(bin_names("helices", COUNT_BINS))}(D), and the same for strands_*: number of
+  helices / strands in D
+- {", ".join(bin_names("residues", RESIDUE_BINS))}(D): number of residues in D
 - parallel(S1, S2), antiparallel(S1, S2): strands S1 and S2 are H-bonded neighbours in a sheet (symmetric)
 - same_sheet(S1, S2): distinct strands in the same sheet (symmetric)
 - edge_strand(S): strand with exactly one paired neighbour (edge of an open sheet)
