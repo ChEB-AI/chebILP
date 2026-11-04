@@ -163,7 +163,9 @@ def load_sdf_mols(sdf_gz_path: str) -> dict[str, Chem.Mol]:
         props, molblock = _parse_sdf_record(record)
         mol = parse_molblock(molblock, props["ACCESSION"])
         if mol is not None:
-            mols[props["ACCESSION"]] = Chem.RemoveHs(mol, sanitize=False)
+            mols[props["ACCESSION"]] = Chem.RemoveHs(
+                mol, updateExplicitCount=True, sanitize=False
+            )
     return mols
 
 
