@@ -1,7 +1,5 @@
 import os
 import re
-import itertools
-import string
 import shutil
 import subprocess
 import sys
@@ -30,6 +28,7 @@ DEFAULT_HEURISTIC_LEVEL = 10
 POPPER_FINAL_COMBINE_GRACE = 300
 
 _BODY_PRED_RE = re.compile(r"body_pred\(\s*([a-z_][A-Za-z0-9_]*)\s*,\s*(\d+)\s*\)")
+_HEAD_PRED_RE = re.compile(r"head_pred\(\s*[a-z_][A-Za-z0-9_]*\s*,\s*(\d+)\s*\)")
 
 
 def _parse_body_preds(bias_text: str) -> set[tuple[str, int]]:
@@ -37,75 +36,27 @@ def _parse_body_preds(bias_text: str) -> set[tuple[str, int]]:
     return {(m.group(1), int(m.group(2))) for m in _BODY_PRED_RE.finditer(bias_text)}
 
 
-def _var_stream():
-    """Fresh variable names for seed atoms: B, C, ... then V1, V2, ... (A is the molecule)."""
-    yield from string.ascii_uppercase[1:]
-    for i in itertools.count(1):
-        yield f"V{i}"
+def _parse_head_arity(bias_text: str) -> int:
+    """Arity of the ``head_pred`` in a bias file's text (1 if none is declared)."""
+    m = _HEAD_PRED_RE.search(bias_text)
+    return int(m.group(1)) if m else 1
 
 
-def build_seed_hypothesis(target_id, programs, body_preds):
-    """A single rule ANDing a class's chosen auxiliary predicates, with its var/body counts.
-
-    ``chebi_<target>(A)`` holds when every chosen predicate holds. A molecule-level predicate
-    is applied to the molecule variable ``A`` directly (``aux_x(A)``); an atom-level one is
-    tied to the molecule with a ``has_atom(A, Atom)`` link, exactly as the task specifies.
-    A predicate with several atom arguments (e.g. a ring's atoms) binds its remaining atoms
-    through the aux literal itself, so one ``has_atom`` per predicate suffices.
-
-    A predicate whose extension was empty for every molecule is not written to ``bk.pl`` and so
-    is not a declared ``body_pred``; it is skipped, since Popper would reject a rule naming it.
-
-    Returns ``(seed_str, n_vars, n_body)``, or ``None`` when no chosen predicate survives. The
-    counts let the caller drop a seed that exceeds the standard ``max_vars`` / ``max_body`` — the
-    conjunction can need more variables than the default bias allows (e.g. a ring predicate
-    contributes one atom variable per ring atom), and widening the bounds to fit it would also
-    widen the baseline's search, making the comparison unfair.
-    """
-    from chebILP.predicate_generation.auxiliary_rules import predicate_arg_sorts
-
-    mol_var = "A"
-    link = "has_sse" if ("has_sse", 2) in body_preds else "has_atom"
-    fresh = _var_stream()
-    literals: list[tuple[str, list[str]]] = []
-    for prog in programs:
-        sorts = predicate_arg_sorts(prog)
-        if not sorts or (prog.name, len(sorts)) not in body_preds:
-            continue
-        args, atom_vars = [], []
-        for sort in sorts:
-            if sort == "mol":
-                args.append(mol_var)
-            else:
-                v = next(fresh)
-                args.append(v)
-                atom_vars.append(v)
-        if atom_vars:
-            literals.append((link, [mol_var, atom_vars[0]]))
-        literals.append((prog.name, args))
-
-    if not literals:
-        return None
-    all_vars = {v for _, args in literals for v in args}
-    body = ", ".join(f"{pred}({','.join(args)})" for pred, args in literals)
-    return f"{class_head(target_id)}(A) :- {body}.", len(all_vars), len(literals)
-
-
-def seed_from_hypothesis(clause, target_id, body_preds):
+def seed_from_hypothesis(clause, target_id, body_preds, head_arity=1):
     """Validate an LLM class hypothesis for use as Aleph's seed clause.
 
     Returns ``(seed_str, n_vars, n_body)`` when the clause is a plain Datalog rule whose head is
-    ``chebi_<target>(A)`` and whose every body predicate is declared as a ``body_pred`` in the
+    the class head with ``head_arity`` arguments and whose every body predicate is declared as a ``body_pred`` in the
     bias, else ``None``. An aggregate/negation/comparison (``datalog_ok`` False) or a predicate
-    that never reached ``bk.pl`` (so is not a declared ``body_pred``) makes it unusable, exactly
-    as for the auto-built conjunction. The caller still checks it against ``max_vars``/``max_body``.
+    that never reached ``bk.pl`` (so is not a declared ``body_pred``) makes it unusable. The
+    caller still checks it against ``max_vars``/``max_body``.
     """
     from chebILP.predicate_generation.auxiliary_rules import analyze_hypothesis
 
     info = analyze_hypothesis(clause)
     if info is None or not info["datalog_ok"] or not info["body_preds"]:
         return None
-    if info["head"] != (class_head(target_id), 1):
+    if info["head"] != (class_head(target_id), head_arity):
         return None
     if not info["body_preds"] <= body_preds:
         return None
@@ -448,6 +399,10 @@ def learn_chebi_classes(
             )
             continue
 
+        with open(bias_path, "r") as f:
+            bias_text = f.read()
+        head_arity = _parse_head_arity(bias_text)
+
         # Seed Aleph's search with the LLM's class hypothesis.
         seed_clause = None
         if seed_hypothesis and aux_library_dir:
@@ -455,8 +410,7 @@ def learn_chebi_classes(
                 load_class_hypothesis,
             )
 
-            with open(bias_path, "r") as f:
-                body_preds = _parse_body_preds(f.read())
+            body_preds = _parse_body_preds(bias_text)
             hypothesis = load_class_hypothesis(chebi_id, library_dir=aux_library_dir)
             seed_info = None
             if (
@@ -465,7 +419,7 @@ def learn_chebi_classes(
                 and hypothesis.get("hypothesis")
             ):
                 seed_info = seed_from_hypothesis(
-                    hypothesis["hypothesis"], chebi_id, body_preds
+                    hypothesis["hypothesis"], chebi_id, body_preds, head_arity
                 )
             if seed_info:
                 seed, n_vars, n_body = seed_info
@@ -515,6 +469,9 @@ def learn_chebi_classes(
                 max_body=max_body,
                 seed_clause=seed_clause,
                 log_dir=results_dir,
+                head_name=class_head(chebi_id),
+                head_arity=head_arity,
+                run_stem_name=str(chebi_id),
             )
         else:
             train_result = run_ilp_training_subprocess(

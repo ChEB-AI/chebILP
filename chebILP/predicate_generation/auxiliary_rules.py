@@ -118,6 +118,8 @@ _PARTICIPANT_RE = re.compile(
     r"^\s*has_(?:reactant|product)\(\s*([^,\s]+)\s*,\s*([^)\s]+)\s*\)\s*\.\s*$"
 )
 _FACT_RE = re.compile(r"^\s*[a-z_][A-Za-z0-9_]*\s*\((.*)\)\s*\.\s*$")
+# Owner key of derived atoms that mention no example.
+SHARED_OWNER = None
 
 
 def atom_to_molecule(facts: list[str]) -> dict[str, str]:
@@ -525,7 +527,8 @@ def derive_rule_extensions(
 
     ``timeout`` is the wall-clock ceiling for the whole call.
 
-    Returns ``{program_name: {mol_id: [arg_tuple, ...]}}``, with one entry per program.
+    Returns ``{program_name: {mol_id: [arg_tuple, ...]}}``, with one entry per program. Atoms
+    mentioning no molecule (a rule over static facts only) are under ``SHARED_OWNER``.
     """
     from chebILP.evaluation.clingo_eval import (
         GROUNDING_BATCH_SIZE,
@@ -557,7 +560,7 @@ def derive_rule_extensions(
             molecules = {atom2mol[a] for a in args if a in atom2mol} | {
                 a for a in args if a in known
             }
-            for mol in molecules & known:
+            for mol in molecules & known if molecules else {SHARED_OWNER}:
                 by_mol.setdefault(mol, []).append(args)
         extensions[name] = by_mol
     return extensions
@@ -789,9 +792,6 @@ def predicate_arg_sorts(prog: RuleProgram) -> list[str]:
     molecule-level rule uses, ``aux_x(M) :- has_atom(M,_), ...``); otherwise it is an atom.
     Across several defining clauses ``"mol"`` wins for a position. Returns ``[]`` when the
     program does not define its own predicate as a clause head.
-
-    This is what tells :func:`~chebILP.ilp_classifier.build_seed_hypothesis` whether a chosen
-    predicate is used as ``aux_x(Molecule)`` or needs a ``has_atom(Molecule, Atom)`` link.
     """
     sorts_by_pos: dict[int, str] = {}
     arity: int | None = None

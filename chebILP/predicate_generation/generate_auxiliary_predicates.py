@@ -212,7 +212,7 @@ Choose up to {self.n_predicates} auxiliary predicates that would help distinguis
 only write NEW programs for properties they do not already cover. Favour a mix of
 shortcut substructures and hard-to-express global concepts grounded in the definition.
 
-{OUTPUT_CONTRACT}
+{OUTPUT_CONTRACT.format(contrast="other molecules")}
   "kind" is one of "atom_unary", "atom_binary", "molecule".
   "program" is the `def extension(mol):` function only.
 """

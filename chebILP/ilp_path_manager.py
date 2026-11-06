@@ -4,12 +4,13 @@ from typing import Literal
 Split = Literal["train", "validation", "test"]
 
 
-# Class ids that are already valid head names: EC classes (``ec_3_1_1``), SCOPe folds (``scop_c_1``).
-PASSTHROUGH_PREFIXES = ("ec_", "scop_")
+# Class ids that are already valid head names: EC classes (``ec_3_1_1``), SCOPe folds (``scop_c_1``),
+# GDL targets (``gdl_tictactoe_goal``).
+PASSTHROUGH_PREFIXES = ("ec_", "scop_", "gdl_")
 
 
 def class_head(class_id) -> str:
-    """Target predicate and problem folder name: ``chebi_<id>``, or the id itself for an EC class or SCOPe node."""
+    """Target predicate and problem folder name: ``chebi_<id>``, or the id itself for an EC class, SCOPe node or GDL target."""
     class_id = str(class_id)
     return (
         class_id if class_id.startswith(PASSTHROUGH_PREFIXES) else f"chebi_{class_id}"

@@ -163,9 +163,10 @@ def load_sdf_mols(sdf_gz_path: str) -> dict[str, Chem.Mol]:
         props, molblock = _parse_sdf_record(record)
         mol = parse_molblock(molblock, props["ACCESSION"])
         if mol is not None:
-            mols[props["ACCESSION"]] = Chem.RemoveHs(
-                mol, updateExplicitCount=True, sanitize=False
-            )
+            mol = Chem.RemoveHs(mol, updateExplicitCount=True, sanitize=False)
+            # RemoveHs without sanitizing drops the ring info that get_rings reads.
+            Chem.GetSymmSSSR(mol)
+            mols[props["ACCESSION"]] = mol
     return mols
 
 

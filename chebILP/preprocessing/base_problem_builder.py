@@ -25,6 +25,7 @@ from chebILP.ilp_path_manager import (
 )
 from chebILP.ilp_problem import ILPProblem
 from chebILP.predicate_generation.auxiliary_rules import (
+    SHARED_OWNER,
     derive_rule_extensions,
     load_class_rules,
     referenced_fact_predicates,
@@ -39,14 +40,19 @@ SPLITS: tuple[Split, ...] = ("train", "validation", "test")
 def read_examples(
     class_id, problem_dir: str, split: Split
 ) -> tuple[list[str], list[str]]:
-    """Positive and negative example ids of a class's ``exs.pl``, in file order."""
+    """Positive and negative example ids of a class's ``exs.pl``, in file order.
+
+    An id is the head's argument list without spaces: ``pos(h(e3, x, 1)).`` gives ``e3,x,1``.
+    """
     pos, neg = [], []
     with open(get_exs_path(class_id, split, base_dir=problem_dir), "r") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("%"):
                 continue
-            example = line.split("(")[-1].split(")")[0]
+            atom = line[len("pos(") :].rstrip(".").removesuffix(")")
+            args = atom[atom.index("(") + 1 : -1]
+            example = ",".join(a.strip() for a in args.split(","))
             (pos if line.startswith("pos(") else neg).append(example)
     return pos, neg
 
@@ -73,7 +79,7 @@ def build_split_backgrounds(
 
     The rule programs are ground once over all splits, with the dataset's computed facts and the
     seeded FG facts they reference (both used for grounding only), and each derived fact goes to
-    the split of its example. Seeded FG predicates among ``programs`` are emitted from their RDKit
+    the split of its example, or to every split if it mentions none. Seeded FG predicates among ``programs`` are emitted from their RDKit
     match. ``dependencies`` defaults to the library programs the rules build on; they are ground
     but emit nothing. Returns ``(lines_by_split, grounding_failed)``.
     """
@@ -117,14 +123,18 @@ def build_split_backgrounds(
         for prog in asp_programs:
             emitted = set()
             for example, arg_tuples in extensions.get(prog.name, {}).items():
-                split = split_of.get(str(example))
-                if split is None:
+                if example is SHARED_OWNER:
+                    splits = list(rows_by_split)
+                elif str(example) in split_of:
+                    splits = [split_of[str(example)]]
+                else:
                     continue
-                for args in arg_tuples:
-                    line = f"{prog.name}({','.join(args)})."
-                    if (split, line) not in emitted:
-                        emitted.add((split, line))
-                        lines_by_split[split].append(line)
+                for split in splits:
+                    for args in arg_tuples:
+                        line = f"{prog.name}({','.join(args)})."
+                        if (split, line) not in emitted:
+                            emitted.add((split, line))
+                            lines_by_split[split].append(line)
 
     if seed_names:
         for split, rows in rows_by_split.items():
@@ -182,44 +192,31 @@ class ILPProblemBuilder:
         target_ids: list[str],
         max_pos_train: int = 200,
         max_neg_train: int = 200,
-        min_pos: int = 25,
-        min_neg: int = 25,
     ):
         """Write ``exs.pl`` per split for the given targets.
 
-        Positives are the examples at or below the target, negatives its direct neighbours in
-        the dataset's hierarchy. Over the cap, the train split keeps the examples the dataset's
-        ``select_train_subset`` picks; validation and test are uncapped.
+        The examples come from the dataset's ``split_examples``: by default positives are the
+        examples at or below the target, negatives its direct neighbours in the hierarchy. Over a
+        cap, a split keeps the examples the dataset picks. Validation and test are capped at the
+        dataset's ``eval_cap`` (uncapped unless it sets one).
         """
+        eval_cap = self.dataset.eval_cap
+        caps = {"train": (max_pos_train, max_neg_train)}
+        caps |= {split: (eval_cap, eval_cap) for split in SPLITS if split != "train"}
         counts = {}
         for target_id in tqdm.tqdm(target_ids, desc="Building ILP examples"):
-            pos_ids = sorted(self.dataset.get_positive_examples(target_id))
-            neg_ids = sorted(self.dataset.get_negative_examples(target_id))
-            label = self.dataset.class_label(target_id)
-            if len(pos_ids) < min_pos:
-                tqdm.tqdm.write(
-                    f"{label} has {len(pos_ids)} positive examples (at least {min_pos} required)"
-                )
-            if len(neg_ids) < min_neg:
-                tqdm.tqdm.write(
-                    f"{label} has {len(neg_ids)} direct-neighbour negatives (at least {min_neg} required)"
-                )
+            examples = self.dataset.split_examples(target_id, self.split_ids, caps)
+            n_pos = sum(len(pos) for pos, _ in examples.values())
+            n_neg = sum(len(neg) for _, neg in examples.values())
 
-            n_pos = n_neg = 0
+            head = class_head(target_id)
             for split in SPLITS:
-                pos = [i for i in pos_ids if i in self.split_ids[split]]
-                neg = [i for i in neg_ids if i in self.split_ids[split]]
-                if split == "train":
-                    pos = self.dataset.select_train_subset(pos, max_pos_train)
-                    neg = self.dataset.select_train_subset(neg, max_neg_train)
-                head = class_head(target_id)
+                pos, neg = examples[split]
                 with open(
                     get_exs_path(target_id, split, base_dir=self.problem_dir), "w"
                 ) as f:
                     f.writelines(f"pos({head}({i})).\n" for i in pos)
                     f.writelines(f"neg({head}({i})).\n" for i in neg)
-                n_pos += len(pos)
-                n_neg += len(neg)
             counts[target_id] = (n_pos, n_neg)
 
         if counts:
@@ -247,7 +244,7 @@ class ILPProblemBuilder:
                 for split in SPLITS
             }
             rows_by_split = {
-                split: self.dataset.molecules.loc[pos + neg]
+                split: self.dataset.molecules.loc[self.dataset.example_rows(pos + neg)]
                 for split, (pos, neg) in examples.items()
             }
             programs = (
@@ -267,7 +264,7 @@ class ILPProblemBuilder:
 
             for split, (pos, neg) in examples.items():
                 problem = ILPProblem(
-                    (class_head(target_id), 1),
+                    (class_head(target_id), self.dataset.head_arity(target_id)),
                     pos,
                     neg,
                     _facts_by_predicate(lines_by_split[split]),

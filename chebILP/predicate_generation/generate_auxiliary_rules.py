@@ -15,7 +15,6 @@ import argparse
 import os
 import re
 
-import pandas as pd
 from dotenv import load_dotenv
 
 from chebILP.predicate_generation.auxiliary_generation import (
@@ -29,6 +28,7 @@ from chebILP.predicate_generation.auxiliary_generation import (
 from chebILP.predicate_generation.auxiliary_predicates import sanitize_predicate_name
 from chebILP.predicate_generation.auxiliary_rules import (
     ERROR_UNBOUNDED_RECURSION,
+    SHARED_OWNER,
     RuleProgram,
     add_rule_to_library,
     analyze_hypothesis,
@@ -135,6 +135,8 @@ class RuleGenerator(AuxiliaryGenerator):
     ):
         super().__init__(library_dir, model, n_predicates, top_k, effort)
         self.dataset = dataset
+        if dataset is not None:
+            self.static_predicates = dataset.static_predicates
         self.problem_dir = problem_dir
         self.computed_facts = computed_facts
         self.prompt_samples = prompt_samples
@@ -147,34 +149,44 @@ class RuleGenerator(AuxiliaryGenerator):
         return HybridPredicateRetriever.from_rule_library(base_dir=self.library_dir)
 
     def class_context(self, class_id) -> dict:
-        """The class's train examples (from its exs.pl) and their BK, for the prompt and validation."""
+        """The class's train examples (from its exs.pl) and their BK, for the prompt and validation.
+
+        ``val_ids`` are the rows the BK is grounded over; ``pos_ids``/``neg_ids`` the example ids.
+        """
         pos, neg = read_examples(class_id, self.problem_dir, "train")
         examples = self.dataset.molecules
-        pos_rows = examples[examples.index.isin(pos)]
-        neg_rows = examples[examples.index.isin(neg)]
-        val_rows = pd.concat([pos_rows, neg_rows])
+        position = {str(r): i for i, r in enumerate(examples.index)}
+        row = self.dataset.example_row
+
+        def present(ids):
+            # In row order, so examples of a unary class keep the order of ``molecules``.
+            return sorted(
+                (i for i in ids if row(i) in position), key=lambda i: position[row(i)]
+            )
+
+        pos, neg = present(pos), present(neg)
+        val_rows = examples.loc[self.dataset.example_rows(pos + neg)]
         val_facts = list(self.dataset.build_background(val_rows)[0])
         if self.computed_facts:
             val_facts += self.dataset.build_computed_facts(val_rows)
         return {
             "pos_examples": [
-                self.dataset.describe_example(i)
-                for i in pos_rows.index[: self.prompt_samples]
+                self.dataset.describe_example(i) for i in pos[: self.prompt_samples]
             ],
             "neg_examples": [
-                self.dataset.describe_example(i)
-                for i in neg_rows.index[: self.prompt_samples]
+                self.dataset.describe_example(i) for i in neg[: self.prompt_samples]
             ],
             "val_facts": val_facts,
             "val_ids": [str(i) for i in val_rows.index],
             "val_rows": val_rows,
-            "pos_ids": {str(i) for i in pos_rows.index},
+            "pos_ids": set(pos),
+            "neg_ids": set(neg),
         }
 
     def build_user_prompt(self, class_id, info, candidates, ctx) -> str:
         spec = self.dataset.prompt_spec
         noun = spec.example_noun
-        head = class_head(class_id)
+        contrast = spec.contrast or f"other {noun}s"
         definition_str = (
             f"Definition: {info['definition']}\n" if info["definition"] else ""
         )
@@ -207,7 +219,7 @@ class RuleGenerator(AuxiliaryGenerator):
 
         computed_str = (
             f"\nExtra facts available in this mode:\n{spec.computed_predicates}\n"
-            if self.computed_facts
+            if self.computed_facts and spec.computed_predicates
             else ""
         )
 
@@ -215,19 +227,19 @@ class RuleGenerator(AuxiliaryGenerator):
 Target class: {info["name"]} ({info["label"]})
 {definition_str}{format_parents(info, spec.relative_definitions)}{sibling_str}
 Background predicates ALREADY available:
-{spec.existing_predicates}
+{self.dataset.existing_predicates(class_id)}
 {computed_str}
 {example_str}
 {format_candidates(candidates)}{self.dataset.candidate_notes(c["name"] for c in candidates)}
 Choose up to {self.n_predicates} auxiliary predicates that would help distinguish
-"{info["name"]}" from other {noun}s. REUSE the candidates above wherever they
+"{info["name"]}" from {contrast}. REUSE the candidates above wherever they
 fit; only write NEW rules for properties they do not already cover.
 
-{OUTPUT_CONTRACT}
+{OUTPUT_CONTRACT.format(contrast=contrast)}
   "program" is the clause text only — one {noun}-level head plus any helper clauses.
-- "hypothesis": one rule `{head}(A) :- ...` that defines the class as a plain
+- "hypothesis": one rule `{self.dataset.hypothesis_head(class_id)} :- ...` that defines the class as a plain
   conjunction of the background and auxiliary predicates you chose (no aggregates, negation or
-  arithmetic here; head variable A is the {noun}).
+  arithmetic here; {spec.hypothesis_note or f"head variable A is the {noun}"}).
 """
 
     def to_source(self, item) -> str:
@@ -359,7 +371,8 @@ fit; only write NEW rules for properties they do not already cover.
         if not ctx.get("val_ids"):
             return "kept (no validation molecules)"
         by_mol = ctx["extensions"].get(prog.name, {})
-        return f"fires on {len(by_mol) / len(ctx['val_ids']):.0%}"
+        owners = len(by_mol.keys() - {SHARED_OWNER})
+        return f"fires on {owners / len(ctx['val_ids']):.0%}"
 
     def _with_seed_facts(self, progs, ctx) -> list[str]:
         """``ctx["val_facts"]`` plus the seeded functional-group facts ``progs`` reference.
@@ -391,8 +404,8 @@ fit; only write NEW rules for properties they do not already cover.
 
         ``None`` means the hypothesis is not a valid clause or did not ground. Grounded alongside
         the class's kept predicates (and their library dependencies) plus any referenced ChEMBL
-        facts, exactly as ``build_bk`` will assemble them; a molecule is a positive prediction
-        when it derives the ``chebi_<id>`` head.
+        facts, exactly as ``build_bk`` will assemble them; an example is a positive prediction
+        when the class head is derived with its arguments (the comma-joined example id).
         """
         head = class_head(class_id)
         if analyze_hypothesis(hypothesis) is None:
@@ -408,9 +421,12 @@ fit; only write NEW rules for properties they do not already cover.
             extensions = self.ground(all_progs, ctx)
         except Exception:
             return None
-        fired = set(extensions.get(head, {}))
-        pos = ctx["pos_ids"]
-        neg = {str(i) for i in ctx["val_ids"]} - pos
+        fired = {
+            ",".join(args)
+            for tuples in extensions.get(head, {}).values()
+            for args in tuples
+        }
+        pos, neg = ctx["pos_ids"], ctx["neg_ids"] - ctx["pos_ids"]
         tp, fp = len(fired & pos), len(fired & neg)
         fn, tn = len(pos - fired), len(neg - fired)
         f1 = (2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn) > 0 else 0.0

@@ -1,16 +1,12 @@
-"""ILP problems from any GDL game, in the IGGP vocabulary (Cropper, Evans & Law 2020).
+"""GDL games of the IGGP repository and their targets, in the IGGP vocabulary (Cropper, Evans & Law 2020).
 
 Games and types come from the IGGP repository (``git clone https://github.com/andrewcropper/iggp
 data/iggp``): ``games/<game>.txt`` (or ``.pl``) holds the GDL, ``types/<game>.typ`` the argument
-types. One problem per target of a game: ``goal``, ``terminal``, ``legal[_<move>]`` and
-``next[_<fluent>]``.
+types. Each game has the targets ``goal``, ``terminal``, ``legal[_<move>]`` and ``next[_<fluent>]``.
 
-Examples are states of random playouts, simulated with :class:`GDLGame`; each state contributes every
-type-correct candidate atom of the target, positive iff the GDL derives it. The ``next`` targets use
-distinct (non-terminal state, joint move) pairs and give the moves as ``does`` facts; the others use
-distinct states, terminal ones included. The background holds the static relations of the game,
-``true_*`` per state and one unary predicate per typed constant (``mark_x``, ``agent_white``).
-The game's state-dependent helper relations (``line``, ``open``) are not given.
+States come from random playouts, simulated with :class:`GDLGame`. :class:`GameTarget` gives a
+target's candidate atoms (every atom it could have in a state), its glossary and its reference
+program.
 """
 
 import functools
@@ -18,9 +14,7 @@ import itertools
 import os
 import random
 
-from chebILP.ilp_problem import ILPProblem
-from chebILP.minted_ilp_problems.base_minter import ILPProblemMinter
-from chebILP.minted_ilp_problems.gdl import (
+from chebILP.preprocessing.gdl.gdl import (
     STATE_GUARD,
     GameTypes,
     GDLGame,
@@ -29,7 +23,6 @@ from chebILP.minted_ilp_problems.gdl import (
     flat_value,
     parse_kif,
     read_game,
-    target_atoms,
 )
 
 IGGP_ROOT = os.path.join("data", "iggp")
@@ -38,11 +31,6 @@ TYPE_RENAMES = {"pos": "mypos"}
 # KIF the repository's game files lost to Prolog edits.
 GAME_PATCHES = {
     "fizzbuzz": "(legal player (say fizz)) (legal player (say buzz)) (legal player (say fizzbuzz))",
-}
-# (max_vars, max_body) where Popper's defaults are too small.
-POPPER_BOUNDS = {
-    ("tictactoe", "goal"): (8, 9),
-    ("tictactoe", "terminal"): (6, 7),
 }
 
 
@@ -95,7 +83,6 @@ def gdl_targets(game: str, root: str = IGGP_ROOT) -> list[str]:
     return ["goal", "terminal"] + list(shapes(g, "legal")) + list(shapes(g, "next"))
 
 
-@functools.cache
 def sample_steps(
     game: str,
     root: str,
@@ -109,7 +96,7 @@ def sample_steps(
     (state, move) pair when ``with_moves``, skipping final states, else the state with move None.
 
     Playouts run in batches that double from 4 to 64. Stops early, with fewer than ``n_states``,
-    once a batch of 64 finds nothing new. Cached, so the targets of a game share one simulation.
+    once a batch of 64 finds nothing new.
     """
     rng, g = random.Random(seed), load_game(game, root)
     seen, out, batch, done = set(), [], 4, 0
@@ -136,65 +123,41 @@ def sample_steps(
     return tuple(out)
 
 
-class GDLMinter(ILPProblemMinter):
-    """One target of one GDL game. Use :func:`gdl_minter` for the per-game class, which fixes
-    ``game`` and the library (``problem_type``)."""
+def typing_predicates(game: str, root: str = IGGP_ROOT) -> dict[str, list]:
+    """``<type>_<constant>(c)`` for every constant the game's type file declares."""
+    types = load_types(game, root)
+    out = {}
+    for type_name, consts in types.constants.items() if types else ():
+        for c in consts:
+            v = int(c) if c.lstrip("-").isdigit() else c
+            out[
+                f"{TYPE_RENAMES.get(type_name, type_name)}_{str(c).replace('-', 'm')}"
+            ] = [v]
+    return out
 
-    game: str
 
-    def __init__(
-        self,
-        out_root=None,
-        target: str = "goal",
-        n_states: int = 500,
-        max_steps: int = 200,
-        max_neg_per_state: int | None = None,
-        library_root=None,
-        iggp_root: str = IGGP_ROOT,
-    ):
-        super().__init__(out_root, library_root)
+class GameTarget:
+    """One target of one GDL game."""
+
+    def __init__(self, game: str, target: str, root: str = IGGP_ROOT):
+        self.game = game
         self.target = target
-        self.n_states = n_states
-        self.max_steps = max_steps
-        self.max_neg_per_state = max_neg_per_state
-        self.iggp_root = iggp_root
+        self.root = root
 
     @property
     def gdl(self) -> GDLGame:
-        return load_game(self.game, self.iggp_root)
+        return load_game(self.game, self.root)
 
     @property
     def types(self) -> GameTypes | None:
-        return load_types(self.game, self.iggp_root)
+        return load_types(self.game, self.root)
 
     @property
     def with_moves(self) -> bool:
+        """Whether the examples are (state, joint move) pairs, as for the ``next`` targets."""
         return self.target.split("_", 1)[0] == "next"
 
-    def max_vars(self):
-        return POPPER_BOUNDS.get((self.game, self.target), (super().max_vars(), None))[
-            0
-        ]
-
-    def max_body(self):
-        return POPPER_BOUNDS.get((self.game, self.target), (None, super().max_body()))[
-            1
-        ]
-
-    def static_predicates(self, ilp_problem):
-        return self.state_free_predicates(ilp_problem)
-
-    # -- examples -------------------------------------------------------------------------------
-
-    def sample_steps(self, seed: int) -> tuple:
-        return sample_steps(
-            self.game,
-            self.iggp_root,
-            seed,
-            self.with_moves,
-            self.n_states,
-            self.max_steps,
-        )
+    # -- candidates -----------------------------------------------------------------------------
 
     def _arg_types(self) -> list[str] | None:
         """The target's argument types from the type file, None if it does not declare them."""
@@ -287,89 +250,21 @@ class GDLMinter(ILPProblemMinter):
             )
         return list(dict.fromkeys(out)) + sorted(extra, key=str)
 
-    def mint(self, seed, *args, **kwargs) -> ILPProblem:
-        """State i is ``e<i>``; each contributes every candidate atom of the target, its negatives
-        sampled down to ``max_neg_per_state`` if set."""
-        steps = self.sample_steps(seed)
-        positives = [target_atoms(info, self.target) for _, _, info in steps]
-        candidates = self.candidates(positives)
-        rng = random.Random(seed)
-        bk = {
-            name: [a[0] if len(a) == 1 else a for a in facts]
-            for name, facts in self.gdl.static_relations().items()
-        }
-        bk.update(self.typing_predicates())
-        pos, neg = [], []
-        for i, ((state, move, _), holds) in enumerate(zip(steps, positives)):
-            e = f"e{i}"
-            for f in sorted(state, key=str):
-                name, a = flat_atom("true", f, (e,))
-                bk.setdefault(name, []).append(a)
-            for r, m in sorted((move or {}).items(), key=str):
-                name, a = flat_atom("does", m, (e, flat_value(r)))
-                bk.setdefault(name, []).append(a)
-            negs = [c for c in candidates if c not in holds]
-            if (
-                self.max_neg_per_state is not None
-                and len(negs) > self.max_neg_per_state
-            ):
-                negs = rng.sample(negs, self.max_neg_per_state)
-            pos += [(e, *c) if c else e for c in candidates if c in holds]
-            neg += [(e, *c) if c else e for c in negs]
-        arity = 1 + (len(candidates[0]) if candidates else 0)
-        return ILPProblem((self.target, arity), pos, neg, bk)
-
-    def typing_predicates(self) -> dict[str, list]:
-        """``<type>_<constant>(c)`` for every constant the type file declares."""
-        out = {}
-        for type_name, consts in self.types.constants.items() if self.types else ():
-            for c in consts:
-                v = int(c) if c.lstrip("-").isdigit() else c
-                out[
-                    f"{TYPE_RENAMES.get(type_name, type_name)}_{str(c).replace('-', 'm')}"
-                ] = [v]
-        return out
-
-    def reference_program(self) -> str | None:
+    def reference_program(self, head: str) -> str | None:
         """The game's dynamic rules in this vocabulary, the IGGP ground truth with its helper
-        relations; None where a rule ranges over a variable fluent or move."""
+        relations, defining ``head`` as the target; None where a rule ranges over a variable
+        fluent or move."""
         prog = self.gdl.flat_program()
         if prog is None:
             return None
-        return (
-            prog
-            + "\n"
-            + "\n".join(
-                f"{STATE_GUARD}(E) :- {name}(E{',_' * n})."
-                for name, n in shapes(self.gdl, "true").items()
-            )
-        )
+        guards = [
+            f"{STATE_GUARD}(E) :- {name}(E{',_' * n})."
+            for name, n in shapes(self.gdl, "true").items()
+        ]
+        args = ",".join(f"V{i}" for i in range(len(self.head_args())))
+        return "\n".join([prog, *guards, f"{head}({args}) :- {self.target}({args})."])
 
-    # -- prompts --------------------------------------------------------------------------------
-
-    def get_task_description(self):
-        moves = (
-            ",\nand the move each player takes in it, does_<move>(State, Agent, ...) or does(State, Agent,\n"
-            "Move) for a constant move"
-            if self.with_moves
-            else ""
-        )
-        return f"""\
-IGGP (Inductive General Game Playing) turns a game written in the Game Description Language (GDL)
-into ILP tasks. This task comes from the game {self.game.replace("_", " ").upper()}. Each example
-is one game STATE, named e0, e1, ...; it is the first argument of every state relation and of the
-target.
-
-The background describes each state by the fluents true in it, true_<fluent>(State, ...) or
-true(State, F) for a constant fluent{moves}. The game's static relations, its roles (role) and
-possible moves (input_*) hold in every state, and unary predicates such as agent_<role>(A) name
-single constants. The game's own helper relations over the state are not given.
-
-As in GDL, goal, terminal and legal are defined in every state, not only in final ones: goal gives
-the value each player would receive in the state as it stands. The next relations describe the
-state that follows the current one, given the moves taken in it.
-
-Learn {self.target} as rules over the background predicates, using one state variable per rule."""
+    # -- prompt text ----------------------------------------------------------------------------
 
     def _arg_names(self, name: str, n: int) -> list[str]:
         """Argument names of a relation, fluent or move from its type signature, else ``A1``..."""
@@ -380,42 +275,54 @@ Learn {self.target} as rules over the background predicates, using one state var
             else [f"A{i + 1}" for i in range(n)]
         )
 
-    def get_glossary(self):
+    def head_args(self) -> list[str]:
+        """Distinct argument names of the target, the state first (``Pos, Pos2``)."""
         t = self.target
         kind, _, name = t.partition("_")
-        lines = []
         if t == "goal":
-            lines.append(
-                _entry(
-                    ["State", *self._arg_names("goal", 2)],
-                    "goal",
-                    "[TARGET] the player's goal value in State.",
-                )
-            )
+            args = ["State", *self._arg_names("goal", 2)]
         elif t == "terminal":
-            lines.append(
-                _entry(["State"], "terminal", "[TARGET] the game is over in State.")
-            )
+            args = ["State"]
         elif kind == "legal":
             n = shapes(self.gdl, "legal").get(t, 2) - 1
-            args = self._arg_names(name, n) if name else ["Move"]
-            lines.append(
-                _entry(
-                    ["State", "Agent", *args],
-                    t,
-                    f"[TARGET] Agent may play {_what(name, 'move Move')} in State.",
-                )
-            )
+            args = ["State", "Agent", *(self._arg_names(name, n) if name else ["Move"])]
         else:
             n = shapes(self.gdl, "next").get(t, 1)
-            args = self._arg_names(name, n) if name else ["F"]
-            lines.append(
-                _entry(
-                    ["State", *args],
-                    t,
-                    f"[TARGET] {_what(name, 'fluent F')} holds in the state that follows State.",
-                )
-            )
+            args = ["State", *(self._arg_names(name, n) if name else ["F"])]
+        out = []
+        for a in args:
+            name, k = a, 1
+            # a renamed duplicate avoids every original name, so none is taken twice
+            while name in out or (k > 1 and name in args):
+                k += 1
+                name = f"{a}{k}"
+            out.append(name)
+        return out
+
+    def target_text(self) -> str:
+        """What the target says, over the names of :meth:`head_args`."""
+        t = self.target
+        kind, _, name = t.partition("_")
+        if t == "goal":
+            return "the player's goal value in State"
+        if t == "terminal":
+            return "the game is over in State"
+        if kind == "legal":
+            return f"Agent may play {_what(name, 'move Move')} in State"
+        return f"{_what(name, 'fluent F')} holds in the state that follows State"
+
+    def description(self, head: str) -> str:
+        """The class definition shown in prompts."""
+        moves = " and the move each player takes in it" if self.with_moves else ""
+        return (
+            f"Target of the game {self.game.replace('_', ' ').upper()}: "
+            f"{head}({', '.join(self.head_args())}) holds when {self.target_text()}. Each example "
+            f"is one state of a random playout, given by the fluents true in it{moves}."
+        )
+
+    def glossary(self, head: str) -> str:
+        """The background predicates of the target's problems, and the target as ``head``."""
+        lines = [_entry(self.head_args(), head, f"[TARGET] {self.target_text()}.")]
         for pred, n in shapes(self.gdl, "true").items():
             f = pred[5:]
             lines.append(
@@ -522,11 +429,3 @@ def _entry(args: list[str], name: str, text: str) -> str:
 
 def _line(head: str, text: str) -> str:
     return head.ljust(32) + text if len(head) < 32 else f"{head}\n{'':32}{text}"
-
-
-@functools.cache
-def gdl_minter(game: str) -> type:
-    """The minter class of one game; its problems share the ``gdl_<game>`` library."""
-    return type(
-        f"GDLMinter_{game}", (GDLMinter,), {"game": game, "problem_type": f"gdl_{game}"}
-    )

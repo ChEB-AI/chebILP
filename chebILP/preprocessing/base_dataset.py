@@ -8,6 +8,8 @@ import pandas as pd
 
 from chebi_utils import create_multilabel_splits
 
+from chebILP.ilp_path_manager import class_head
+
 
 @dataclass(frozen=True)
 class PromptSpec:
@@ -29,6 +31,10 @@ class PromptSpec:
     # list examples attached directly to a parent among the siblings
     examples_as_siblings: bool = False
     sibling_header: str = "Sibling classes (the negatives come from these):"
+    # what the hypothesis head's variables are; None: "head variable A is the <example_noun>"
+    hypothesis_note: Optional[str] = None
+    # what the target is told apart from; None: "other <example_noun>s"
+    contrast: Optional[str] = None
 
 
 class BaseDataset(ABC):
@@ -289,8 +295,58 @@ class BaseDataset(ABC):
         sizes = self.example_sizes()
         return list(sizes[list(ids)].nsmallest(max_samples, keep="first").index)
 
+    def split_examples(
+        self,
+        target_id: str,
+        split_ids: dict[str, set[str]],
+        caps: dict[str, tuple[Optional[int], Optional[int]]],
+    ) -> dict[str, tuple[list[str], list[str]]]:
+        """Positive and negative example ids of ``target_id`` per split.
+
+        ``caps`` maps a split to ``(max_pos, max_neg)``; a capped split keeps the examples
+        :meth:`select_train_subset` picks, ``None`` keeps all.
+        """
+        pos_ids = sorted(self.get_positive_examples(target_id))
+        neg_ids = sorted(self.get_negative_examples(target_id))
+        out = {}
+        for split, ids in split_ids.items():
+            pos = [i for i in pos_ids if i in ids]
+            neg = [i for i in neg_ids if i in ids]
+            max_pos, max_neg = caps.get(split, (None, None))
+            if max_pos is not None:
+                pos = self.select_train_subset(pos, max_pos)
+            if max_neg is not None:
+                neg = self.select_train_subset(neg, max_neg)
+            out[split] = (pos, neg)
+        return out
+
     def get_example_weight(self, example_id: str) -> float:
         return 1.0
+
+    # --- targets -----------------------------------------------------------------
+    # An example is an atom of the class head. Its first argument is a row of ``molecules``,
+    # which owns the BK; the example id is the comma-joined argument list (``"<row>,<arg>,..."``).
+    # For a unary head the example id is the row id.
+
+    # Validation/test cap per class (pos and neg each); None keeps them all.
+    eval_cap: Optional[int] = None
+
+    def head_arity(self, class_id: str) -> int:
+        return 1
+
+    def example_row(self, example_id: str) -> str:
+        """The ``molecules`` row an example belongs to."""
+        return example_id
+
+    def example_rows(self, example_ids) -> list[str]:
+        """The distinct rows of ``example_ids``, in order of first occurrence."""
+        return list(dict.fromkeys(self.example_row(i) for i in example_ids))
+
+    @property
+    def static_predicates(self) -> frozenset:
+        """Background predicates whose facts do not grow with the examples, exempt from the
+        rule pipeline's cross-product check."""
+        return frozenset()
 
     # --- encoding ----------------------------------------------------------------
 
@@ -320,6 +376,14 @@ class BaseDataset(ABC):
     @abstractmethod
     def describe_example(self, example_id: str) -> str:
         """One-line text form of an example for prompts."""
+
+    def existing_predicates(self, class_id: str) -> str:
+        """The prompt's list of background predicates for a class."""
+        return self.prompt_spec.existing_predicates
+
+    def hypothesis_head(self, class_id: str) -> str:
+        """Head of the class hypothesis the prompt asks for."""
+        return f"{class_head(class_id)}(A)"
 
     @property
     @abstractmethod

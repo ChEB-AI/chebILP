@@ -7,7 +7,6 @@ Usage (from repo root):
 import argparse
 import os
 
-from chebILP.minted_ilp_problems.gdl_minter import gdl_minter, gdl_targets, iggp_games
 from chebILP.minted_ilp_problems.iggp import DialMinter, SwitchesMinter
 from chebILP.minted_ilp_problems.tictactoe import TicTacToeMinter
 from chebILP.minted_ilp_problems.trains import (
@@ -53,19 +52,9 @@ MINTERS = {
     "trains_mint3": (ShapeRunMinter, {}),
 }
 
-# GDL games from the IGGP repository (data/iggp), one problem per target, named gdl_<game>_<target>.
-GDL_GAMES = iggp_games()
-MINTERS.update(
-    {
-        f"gdl_{g}_{t}": (gdl_minter(g), {"target": t})
-        for g in GDL_GAMES
-        for t in gdl_targets(g)
-    }
-)
-
 
 def selected(problem_type: str | None, minter_cls) -> bool:
-    """Whether ``--problem_type`` (a prefix, e.g. ``gdl`` or ``gdl_tictactoe``) selects the minter."""
+    """Whether ``--problem_type`` (a prefix, e.g. ``zendo`` or ``iggp``) selects the minter."""
     return problem_type is None or minter_cls.problem_type.startswith(problem_type)
 
 

@@ -79,8 +79,6 @@ def _handle_build_samples(args):
         classes,
         max_pos_train=args.max_pos_samples,
         max_neg_train=args.max_neg_samples,
-        min_pos=args.min_pos_samples,
-        min_neg=args.min_neg_samples,
     )
 
 
@@ -138,7 +136,13 @@ def _handle_build_ilp_preds_for_ensemble(args):
     from chebILP.evaluation.ensemble_eval import load_ilp_results
     from chebILP.preprocessing.registry import dataset_from_args
 
+    dataset = dataset_from_args(args)
     results = load_ilp_results(args.run_dir)
+    if any(dataset.head_arity(cid) != 1 for cid in results):
+        raise SystemExit(
+            f"{args.dataset} has targets with more than one argument; an examples x classes "
+            "tensor does not apply. Score them with `test` instead."
+        )
     programs = {
         cid: entry["program"] for cid, entry in results.items() if entry.get("program")
     }
@@ -169,7 +173,7 @@ def _handle_build_ilp_preds_for_ensemble(args):
 
     build_ilp_preds_tensor(
         programs,
-        dataset_from_args(args),
+        dataset,
         mol_ids,
         output_npy,
         output_meta,
@@ -431,6 +435,8 @@ def _handle_prepare_dataset(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from chebILP.preprocessing.registry import DATASET_NAMES
+
     parser = argparse.ArgumentParser(
         description="ILP classification CLI for ChEBI classes using Popper or Aleph.",
     )
@@ -443,7 +449,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_pd.add_argument(
         "dataset",
-        choices=["chebi", "rhea", "scope"],
+        choices=DATASET_NAMES,
         help="Which dataset to prepare.",
     )
     sp_pd.add_argument(
@@ -451,7 +457,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-v",
         type=str,
         required=True,
-        help="Dataset version (e.g. 251 for ChEBI, 142 for Rhea, 2.08 for SCOPe).",
+        help="Dataset version (e.g. 251 for ChEBI, 142 for Rhea, 2.08 for SCOPe, a free label for GDL).",
     )
     sp_pd.add_argument(
         "--base_dir",
@@ -493,12 +499,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=200,
         help="Maximum positive training samples per class.",
-    )
-    sp_samples.add_argument(
-        "--min_neg_samples",
-        type=int,
-        default=25,
-        help="Minimum negative samples per class.",
     )
     sp_samples.add_argument(
         "--max_neg_samples",
