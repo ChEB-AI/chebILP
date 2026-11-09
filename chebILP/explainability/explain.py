@@ -1,337 +1,226 @@
+"""Explanations of learned ChEBI rules.
+
+- ``explain_rule``: what a rule asks for (a picture of the pattern and one or two sentences).
+- ``explain_molecule``: why a rule does or does not accept one molecule (the molecule with the match,
+  or the closest match, highlighted, and one or two sentences).
+
+Both depend only on the rule, its aux definitions and the class hierarchy, never on training data.
+"""
+
+from __future__ import annotations
+
 import re
-from typing import Optional
+from dataclasses import dataclass
 
 import pandas as pd
+from chebi_utils.read_molecule import parse_molblock, smiles_or_inchi_to_mol
+from PIL import Image
 from rdkit import Chem
-from xclingo import XclingoControl
 
-from chebILP.preprocessing.chebi.mol_to_fol import build_background_chemlog
-from chebILP.utils import split_prolog_literals
-from chebILP.explainability.rule_to_nl import (
-    _ELEMENT_NAMES,
-    _num_word,
-    _sort_clause_literals,
-    _get_a_an,
-    _format_aux_name,
-)
+from chebILP.explainability import mol_draw
+from chebILP.explainability.global_figure import figure_image
+from chebILP.explainability.global_model import figure_model
+from chebILP.explainability.local_model import RuleContext, analyse
+from chebILP.explainability.molecule import MOL_ID
+from chebILP.explainability.pattern_draw import crop_to_content
+from chebILP.explainability.style import MAX_W, WHITE, compose, fit, header, legend
+from chebILP.explainability.text import global_text, local_text, plural
 
-
-def _trace_for_predicate(pred_name: str, arity: int) -> Optional[str]:
-    """Return a %!trace annotation line for a predicate, or None if not applicable."""
-    if arity == 1:
-        A = "A"
-        call = f"{pred_name}({A})"
-        if pred_name.lower() in _ELEMENT_NAMES:
-            name = _ELEMENT_NAMES[pred_name.lower()]
-            article = _get_a_an(name)
-            return f'%!trace {{"% is {article} {name} atom", {A}}} {call}.'
-        if pred_name == "charge0":
-            return f'%!trace {{"% has no formal charge", {A}}} {call}.'
-        if pred_name == "charge_p":
-            return f'%!trace {{"% has a positive formal charge", {A}}} {call}.'
-        if pred_name == "charge_n":
-            return f'%!trace {{"% has a negative formal charge", {A}}} {call}.'
-        m = re.fullmatch(r"charge_m(\d+)", pred_name)
-        if m:
-            return f'%!trace {{"% has formal charge -{m.group(1)}", {A}}} {call}.'
-        m = re.fullmatch(r"charge(\d+)", pred_name)
-        if m:
-            return f'%!trace {{"% has formal charge +{m.group(1)}", {A}}} {call}.'
-        m = re.fullmatch(r"has_(\d+)_hs", pred_name)
-        if m:
-            n = int(m.group(1))
-            noun = "hydrogen atom" if n == 1 else "hydrogen atoms"
-            count = "no" if n == 0 else _num_word(n)
-            return f'%!trace {{"% has {count} {noun}", {A}}} {call}.'
-        m = re.fullmatch(r"has_at_least_(\d+)_hs", pred_name)
-        if m:
-            n = int(m.group(1))
-            noun = "hydrogen atom" if n == 1 else "hydrogen atoms"
-            return f'%!trace {{"% has at least {_num_word(n)} {noun}", {A}}} {call}.'
-        if pred_name.startswith("cip_code_"):
-            code = pred_name.replace("cip_code_", "").upper()
-            return f'%!trace {{"% has CIP code {code}", {A}}} {call}.'
-        if pred_name.startswith("steroid_"):
-            num = pred_name.replace("steroid_", "")
-            return f'%!trace {{"% is at steroid position {num}", {A}}} {call}.'
-        if pred_name == "in_ring":
-            return f'%!trace {{"% is in a ring", {A}}} {call}.'
-        m = re.fullmatch(r"in_ring(\d+)", pred_name)
-        if m:
-            return f'%!trace {{"% is in a {m.group(1)}-membered ring", {A}}} {call}.'
-        if pred_name == "aromatic":
-            return f'%!trace {{"% is aromatic", {A}}} {call}.'
-        if pred_name == "aliphatic":
-            return f'%!trace {{"% is aliphatic", {A}}} {call}.'
-        if pred_name == "net_charge_positive":
-            return f'%!trace {{"% has a positive net charge", {A}}} {call}.'
-        if pred_name == "net_charge_negative":
-            return f'%!trace {{"% has a negative net charge", {A}}} {call}.'
-        if pred_name == "net_charge_neutral":
-            return f'%!trace {{"% has no net charge", {A}}} {call}.'
-        if pred_name.startswith("aux_"):
-            return f"%!trace {{\"% satisfies the property '{_format_aux_name(pred_name)}'\", {A}}} {call}."
-        return f'%!trace {{"% satisfies {pred_name}", {A}}} {call}.'
-
-    if arity == 2:
-        A1, A2 = "A1", "A2"
-        call = f"{pred_name}({A1},{A2})"
-        if pred_name == "has_atom":
-            return f'%!trace {{"% has atom %", {A1}, {A2}}} {call}.'
-        if pred_name == "has_bond_to":
-            return f'%!trace {{"% has a bond to %", {A1}, {A2}}} {call}.'
-        m = re.fullmatch(r"bSTEREO([A-Z]+)", pred_name)
-        if m:
-            return f'%!trace {{"% has a stereo bond to % ({m.group(1)} configuration)", {A1}, {A2}}} {call}.'
-        if re.fullmatch(r"b[A-Z]+", pred_name):
-            bond_type = pred_name[1:].lower()
-            article = _get_a_an(bond_type)
-            return f'%!trace {{"% has {article} {bond_type} bond to %", {A1}, {A2}}} {call}.'
-        if pred_name.startswith("aux_"):
-            return f'%!trace {{"% and % form a {_format_aux_name(pred_name)}", {A1}, {A2}}} {call}.'
-        return f'%!trace {{"% is related to % via {pred_name}", {A1}, {A2}}} {call}.'
-
-    return None
+_AUX_RE = re.compile(r"\b(aux_[A-Za-z0-9_]+)\s*\(")
+_SEED_RE = re.compile(r"\b((?:chembl_fg|efga|efg)_[A-Za-z0-9_]+)\s*\(")
+_HEAD_RE = re.compile(r"^\s*([a-z][A-Za-z0-9_]*)\s*\(", re.M)
 
 
-def _parse_rule(rule: str) -> tuple[Optional[str], set[tuple[str, int]]]:
-    """Parse rule clause(s) and return (head_pred_name, set of (body_pred, arity))."""
-    head_pred = None
-    body_predicates: set[tuple[str, int]] = set()
+@dataclass
+class Explanation:
+    text: str
+    image: Image.Image
+    fires: bool | None = (
+        None  # local explanations: whether the rule accepts the molecule
+    )
 
-    for line in rule.strip().split("\n"):
-        line = line.strip()
-        if not line or line.startswith("%") or ":-" not in line:
+
+# ── inputs ─────────────────────────────────────────────────────────────────
+
+
+def read_molecule(molecule: str | Chem.Mol) -> Chem.Mol:
+    """A molecule from SMILES, InChI or a molblock, parsed as the ChEBI dataset parses molecules."""
+    if isinstance(molecule, Chem.Mol):
+        return molecule
+    mol = (
+        parse_molblock(molecule)
+        if "M  END" in molecule
+        else smiles_or_inchi_to_mol(molecule.strip())
+    )
+    if mol is None:
+        raise ValueError(f"Could not parse molecule: {molecule!r}")
+    return mol
+
+
+def load_aux_programs(rule: str, library_dir: str | None) -> list[dict]:
+    """``{"name", "description", "source"}`` for the aux predicates in ``rule`` and those they build on."""
+    names = sorted(set(_AUX_RE.findall(rule)))
+    if not names:
+        return []
+    if library_dir is None:
+        raise ValueError(
+            f"The rule uses {', '.join(names)}; pass the aux library directory that defines them."
+        )
+    from chebILP.predicate_generation.auxiliary_rules import (
+        aux_rule_path,
+        parse_rule_program,
+        resolve_rule_dependencies,
+    )
+
+    direct = []
+    for name in names:
+        with open(aux_rule_path(name, library_dir), encoding="utf-8") as f:
+            direct.append(parse_rule_program(f.read(), source_file=name))
+    deps = resolve_rule_dependencies(direct, library_dir)
+    return [
+        {"name": p.name, "description": p.description, "source": p.source}
+        for p in direct + deps
+    ]
+
+
+def _seed_names(rule: str, aux_programs: list[dict]) -> set[str]:
+    return set(
+        _SEED_RE.findall(rule + "\n" + "\n".join(p["source"] for p in aux_programs))
+    )
+
+
+def _seed_descriptions(names: set[str]) -> dict:
+    """Descriptions of seeded functional-group predicates, from their vocabularies."""
+    if not names:
+        return {}
+    from chebILP.preprocessing.chebi.fg_matching import FG_SEED_SOURCES
+
+    out = {}
+    for src in FG_SEED_SOURCES.values():
+        want = {n for n in names if n.startswith(src.prefix)}
+        if not want:
             continue
-        line = line.rstrip(".")
-        head_str, body_str = line.split(":-", 1)
-        head_str = head_str.strip()
-        body_str = body_str.strip()
-
-        head_pred = head_str.split("(")[0].strip() if "(" in head_str else head_str
-
-        for lit in split_prolog_literals(body_str):
-            lit = lit.strip()
-            if not lit or "(" not in lit:
-                continue
-            pname = lit.split("(")[0].strip()
-            args_str = lit[lit.index("(") + 1 : lit.rindex(")")]
-            n_args = len(split_prolog_literals(args_str)) if args_str.strip() else 0
-            body_predicates.add((pname, n_args))
-
-    return head_pred, body_predicates
+        try:
+            for name, desc in src.vocabulary():
+                full = name if name.startswith(src.prefix) else src.prefix + name
+                if full in want:
+                    out[full] = desc
+        except Exception:
+            pass
+    return out
 
 
-def _sort_rule_literals(rule: str) -> str:
-    """Sort body literals in each clause using the same BFS order as rule_to_nl."""
-    sorted_clauses = []
-    for line in rule.strip().split("\n"):
-        line = line.strip()
-        if not line or line.startswith("%") or ":-" not in line:
-            sorted_clauses.append(line)
-            continue
-        line = line.rstrip(".")
-        head_str, body_str = line.split(":-", 1)
-        head_str = head_str.strip()
-        mol_var = "V0"
-        if "(" in head_str:
-            args_str = head_str[head_str.index("(") + 1 : head_str.rindex(")")]
-            mol_var = args_str.strip().split(",")[0].strip()
-        literals = split_prolog_literals(body_str.strip())
-        sorted_lits = _sort_clause_literals(literals, mol_var)
-        sorted_clauses.append(f"{head_str} :- {', '.join(sorted_lits)}.")
-    return "\n".join(sorted_clauses)
+def _seed_facts(names: set[str], mol: Chem.Mol) -> list[str]:
+    """Facts of seeded functional-group predicates for one molecule."""
+    if not names:
+        return []
+    from chebILP.preprocessing.chebi.fg_matching import (
+        FG_SEED_SOURCES,
+        fg_atom_fact_lines,
+        fg_fact_lines,
+    )
+
+    rows = pd.DataFrame([{"mol": mol}], index=[MOL_ID])
+    lines = []
+    for src in FG_SEED_SOURCES.values():
+        want = {n for n in names if n.startswith(src.prefix)}
+        if want:
+            emit = fg_atom_fact_lines if src.atom_level else fg_fact_lines
+            lines += emit(src.matcher(rows), [MOL_ID], needed=want)
+    return lines
 
 
-def _build_xclingo_program(
-    bk_lines: list[str],
+def class_info(rule: str, chebi_graph=None) -> tuple[str | None, str | None, list[str]]:
+    """``(class id, class name, parent names)`` of the rule's head ``chebi_<id>``."""
+    m = _HEAD_RE.search(rule)
+    head = m.group(1) if m else ""
+    cid = head.split("_", 1)[1] if head.startswith("chebi_") else None
+    if cid is None or chebi_graph is None or cid not in chebi_graph:
+        return cid, None, []
+    node = chebi_graph.nodes[cid]
+    parents = [
+        chebi_graph.nodes[p].get("name") or f"CHEBI:{p}"
+        for p in chebi_graph.successors(cid)
+    ]
+    return cid, node.get("name"), parents
+
+
+def _rule_context(
+    rule: str, aux_library_dir, aux_programs
+) -> tuple[RuleContext, set[str]]:
+    progs = (
+        aux_programs
+        if aux_programs is not None
+        else load_aux_programs(rule, aux_library_dir)
+    )
+    seeds = _seed_names(rule, progs)
+    rc = RuleContext.build(rule, progs)
+    rc.aux_desc.update(
+        {k: v for k, v in _seed_descriptions(seeds).items() if k not in rc.aux_desc}
+    )
+    return rc, seeds
+
+
+# ── explanations ───────────────────────────────────────────────────────────
+
+
+def explain_rule(
     rule: str,
-    head_pred: str,
-    body_predicates: set[tuple[str, int]],
-) -> str:
-    all_predicates = set(body_predicates) | {("has_atom", 2)}
+    chebi_graph=None,
+    aux_library_dir: str | None = None,
+    aux_programs: list[dict] | None = None,
+) -> Explanation:
+    """Picture and short text describing what ``rule`` asks of a molecule.
 
-    trace_lines = []
-    for pname, arity in sorted(all_predicates):
-        ann = _trace_for_predicate(pname, arity)
-        if ann:
-            trace_lines.append(ann)
-    trace_lines.append(f'%!trace {{"% satisfies {head_pred}", M}} {head_pred}(M).')
-
-    return "\n".join(
-        [
-            "% Background knowledge",
-            *bk_lines,
-            "",
-            "% Rule(s)",
-            *[line for line in _sort_rule_literals(rule).split("\n") if line.strip()],
-            "",
-            "% Trace annotations",
-            *trace_lines,
-            "",
-            f"%!show_trace {head_pred}(M).",
-        ]
-    )
-
-
-def _run_xclingo(program: str) -> list:
-    """Run xclingo (1 solution, 1 explanation) and return the Explanation objects found."""
-    xcontrol = XclingoControl(n_solutions="1", n_explanations="1")
-    xcontrol.add("base", [], program)
-    xcontrol.ground()
-
-    explanations = []
-    for answer_explanations in xcontrol.explain():
-        for expl in answer_explanations:
-            explanations.append(expl)
-    return explanations
-
-
-def _process_explanations(
-    explanations: list, mol_id: str
-) -> tuple[bool, list[str], set[int]]:
+    ``aux_programs`` (``{"name", "description", "source"}``) overrides loading them from
+    ``aux_library_dir``.
     """
-    Extract satisfies flag, readable conditions, and highlighted atom indices.
-
-    Skips 'has atom' and 'satisfies' meta-relations; replaces atom IDs like
-    'amol1_3' with 'atom 3'. Conditions are deduplicated across explanations.
-    """
-    if not explanations:
-        return False, [], set()
-
-    atom_re = re.compile(re.escape("a" + str(mol_id) + "_") + r"(\d+)")
-    highlight_atoms: set[int] = set()
-    conditions: list[str] = []
-    seen: set[str] = set()
-
-    for expl in explanations:
-        for node, _ in expl.preorder_iterator():
-            if not hasattr(node, "labels"):  # ExplanationRoot has no labels
-                continue
-            for label in node.labels:
-                # Collect atom indices for highlighting before any text replacement
-                for m in atom_re.finditer(label):
-                    highlight_atoms.add(int(m.group(1)) - 1)
-
-                if "has atom" in label or "satisfies" in label:
-                    continue
-
-                clean = atom_re.sub(lambda m: f"atom {m.group(1)}", label)
-                clean = clean.replace(mol_id, "the molecule")
-                if clean not in seen:
-                    seen.add(clean)
-                    conditions.append(clean)
-
-    return True, conditions, highlight_atoms
-
-
-def _draw_molecule(
-    mol: Chem.Mol,
-    highlight_atoms: set[int],
-    output_path: Optional[str] = None,
-):
-    """Draw molecule with 1-based atom numbers matching ILP IDs, highlighted atoms in orange."""
-    from rdkit.Chem.Draw import rdMolDraw2D
-    from PIL import Image
-    import io
-
-    mol_labeled = Chem.RWMol(mol)
-    for atom in mol_labeled.GetAtoms():
-        atom.SetAtomMapNum(atom.GetIdx() + 1)
-
-    hl_list = list(highlight_atoms)
-    hl_colors = {idx: (1.0, 0.6, 0.2) for idx in highlight_atoms}
-
-    drawer = rdMolDraw2D.MolDraw2DCairo(700, 450)
-    drawer.drawOptions().addAtomIndices = False
-    drawer.DrawMolecule(
-        mol_labeled,
-        highlightAtoms=hl_list,
-        highlightAtomColors=hl_colors,
-        highlightBonds=[],
-        highlightBondColors={},
+    rc, _ = _rule_context(rule, aux_library_dir, aux_programs)
+    cid, name, parents = class_info(rule, chebi_graph)
+    fm = figure_model(rc.clauses, rc.defs, rc.aux_desc)
+    text = global_text(fm, name, parents)
+    title = name or (f"CHEBI:{cid}" if cid else "Rule")
+    return Explanation(
+        text, figure_image(fm, title, f"CHEBI:{cid}" if cid and name else "", text)
     )
-    drawer.FinishDrawing()
-
-    img = Image.open(io.BytesIO(drawer.GetDrawingText()))
-    if output_path:
-        img.save(output_path)
-        print(f"Image saved to: {output_path}")
-    return img
 
 
 def explain_molecule(
-    smiles: str,
+    molecule: str | Chem.Mol,
     rule: str,
     chebi_graph=None,
-    mol_id: str = "mol1",
-    output_path: Optional[str] = None,
-    verbose: bool = False,
-) -> tuple[bool, str, "PIL.Image.Image"]:  # noqa: F821
+    aux_library_dir: str | None = None,
+    aux_programs: list[dict] | None = None,
+    name: str | None = None,
+) -> Explanation:
+    """Picture and short text on whether and why ``rule`` accepts ``molecule``.
+
+    ``molecule`` is a SMILES, InChI, molblock or RDKit molecule; ``name`` is used in the title.
     """
-    Explain why a molecule satisfies (or fails to satisfy) a learned ILP rule.
-
-    Args:
-        smiles:      SMILES string of the molecule.
-        rule:        One or more ILP rule clauses as a string.
-        chebi_graph: networkx DiGraph loaded from chebi_graph.pkl. Used to look up the
-                     class name and parent classes for the output text. Optional.
-        mol_id:      Identifier for the molecule in the logic program (default: "mol1").
-        output_path: Path to save the visualization image (PNG). Optional.
-        verbose:     If True, print the assembled xclingo program before running.
-
-    Returns:
-        satisfies:   True if the molecule satisfies the rule.
-        conditions:  List of human-readable condition strings (empty if not satisfying).
-                     Atom IDs are replaced with readable labels (e.g. "atom 3").
-        image:       PIL Image with 1-based numbered atoms; atoms in the explanation
-                     are highlighted in orange.
-    """
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ValueError(f"Invalid SMILES: {smiles!r}")
-
-    mol_df = pd.DataFrame([{"mol": mol}], index=[mol_id])
-    bk_lines, _ = build_background_chemlog(mol_df)
-
-    head_pred, body_predicates = _parse_rule(rule)
-    if head_pred is None:
-        raise ValueError("Could not parse rule: no clause with ':-' found.")
-
-    program = _build_xclingo_program(bk_lines, rule, head_pred, body_predicates)
-
-    if verbose:
-        print("=== xclingo program ===")
-        print(program)
-        print("=" * 23)
-
-    explanations = _run_xclingo(program)
-    satisfies, conditions, highlight_atoms = _process_explanations(explanations, mol_id)
-
-    image = _draw_molecule(mol, highlight_atoms, output_path)
-
-    chebi_id = head_pred.split("_", 1)[1] if "_" in head_pred else head_pred
-    class_name = f"CHEBI:{chebi_id}"
-    p_conditions = []
-    if chebi_graph is not None:
-        node_data = dict(chebi_graph.nodes.get(chebi_id, {}))
-        class_name = node_data.get("name", class_name)
-        for pid in chebi_graph.successors(chebi_id):
-            pdata = dict(chebi_graph.nodes.get(pid, {}))
-            pname = pdata.get("name", f"CHEBI:{pid}")
-            article = _get_a_an(pname)
-            p_conditions.append(
-                f"the molecule is {article} {pname} (CHEBI:{pid}, not verified)"
-            )
-
-    conditions = p_conditions + conditions
-
-    article = _get_a_an(class_name)
-    if not satisfies:
-        full_text = f"The molecule is not {article} {class_name} (CHEBI:{chebi_id})"
-    else:
-        full_text = (
-            f"The molecule is {article} {class_name} (CHEBI:{chebi_id}) because it satisfies the following conditions:\n"
-            + "\n".join(f"- {c}" for c in conditions)
+    mol = read_molecule(molecule)
+    rc, seeds = _rule_context(rule, aux_library_dir, aux_programs)
+    rc.programs = rc.programs + _seed_facts(seeds, mol)
+    loc = analyse(mol, rc)
+    cid, cname, parents = class_info(rule, chebi_graph)
+    text = local_text(loc, cname, parents)
+    who = name or "this molecule"
+    if cname or cid:
+        members = f"the {plural(cname)}" if cname else f"CHEBI:{cid}"
+        verdict = (
+            f"belongs to {members}" if loc.fires else f"does not belong to {members}"
         )
-    return satisfies, full_text, image
+    else:
+        verdict = "satisfies the rule" if loc.fires else "does not satisfy the rule"
+    title = f"Why {who} {verdict}"
+    title = title[0].upper() + title[1:]
+    pic = crop_to_content(
+        mol_draw.draw_molecule(mol, loc.atom_cols, loc.bond_cols, loc.notes), WHITE, 16
+    )
+    width = max(min(MAX_W - 32, pic.width), 560)
+    image = compose(
+        header(title, f"CHEBI:{cid}" if cid and cname else "", text, width),
+        fit(pic, width),
+        legend(loc.legend, width),
+        width,
+    )
+    return Explanation(text, image, loc.fires)

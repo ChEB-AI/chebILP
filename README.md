@@ -19,7 +19,7 @@ Then install chebILP from the repository root:
 pip install -e .            # core
 pip install -e ".[llm]"     # + LLM predicate invention
 pip install -e ".[dense]"   # + dense retrieval for predicate reuse (sentence-transformers, pulls in torch; BM25-only without it)
-pip install -e ".[explain]" # + the explain command (xclingo, Pillow)
+pip install -e ".[explain]" # + the explain / rule_to_nl commands (xclingo, Pillow, matplotlib fonts)
 ```
 
 Aleph ships with the package. List all commands with `python -m chebILP -h`, and options with `python -m chebILP <command> -h`.
@@ -108,6 +108,7 @@ python -m chebILP test --run_to_evaluate data/results/run_<timestamp> --test_on 
 ## Further commands
 
 - `predict` — apply a rule file to new SMILES.
-- `rule_to_nl` / `explain` — translate a rule into natural language, or show why a molecule satisfies it (needs `[explain]`).
+- `rule_to_nl` / `explain` — a picture and one or two sentences on what a ChEBI rule asks for, or on why it
+  accepts or rejects a molecule (needs `[explain]`; pass `--predicate_dir` for rules with `aux_*` predicates).
 - `build_ilp_preds_for_ensemble`, `ensemble_construct`, `ensemble_aggregate` — combine ILP rules with a deep-learning
   model: per leaf class, the better of ILP and DL on the validation set is used, and ILP predictions are gated by the class hierarchy.

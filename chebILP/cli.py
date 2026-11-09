@@ -876,81 +876,66 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_ea.set_defaults(func=_handle_ensemble_aggregate)
 
-    # ── explain ──────────────────────────────────────────────────────────────
+    # ── explain / rule_to_nl ─────────────────────────────────────────────────
+    def add_explain_inputs(sp):
+        rule_group = sp.add_mutually_exclusive_group(required=True)
+        rule_group.add_argument(
+            "--rule", type=str, help="Learned rule (one or more clauses) as a string."
+        )
+        rule_group.add_argument(
+            "--rule_file", type=str, help="File containing the learned rule."
+        )
+        sp.add_argument(
+            "--chebi_graph_path",
+            type=str,
+            default=None,
+            help="Path to chebi_graph.pkl, for the class name and its parent classes (optional).",
+        )
+        sp.add_argument(
+            "--aux_library_dir",
+            "--predicate_dir",
+            dest="aux_library_dir",
+            type=str,
+            default=None,
+            help="Aux rule library defining the rule's aux_* predicates; required if the rule uses any.",
+        )
+        sp.add_argument(
+            "--output", type=str, default=None, help="Where to save the picture (PNG)."
+        )
+
     sp_explain = subparsers.add_parser(
         "explain",
-        help="Explain why a molecule satisfies a learned ILP rule using xclingo.",
+        help="Explain why a learned rule does or does not accept a molecule (picture + short text).",
     )
-    smiles_group = sp_explain.add_mutually_exclusive_group(required=True)
-    smiles_group.add_argument(
-        "--smiles", type=str, help="SMILES string of the molecule to explain."
+    mol_group = sp_explain.add_mutually_exclusive_group(required=True)
+    mol_group.add_argument(
+        "--smiles", type=str, help="SMILES or InChI of the molecule."
     )
-    smiles_group.add_argument(
-        "--smiles_file", type=str, help="File containing a single SMILES string."
-    )
-    rule_group = sp_explain.add_mutually_exclusive_group(required=True)
-    rule_group.add_argument("--rule", type=str, help="ILP rule clause(s) as a string.")
-    rule_group.add_argument(
-        "--rule_file", type=str, help="File containing ILP rule clause(s)."
+    mol_group.add_argument(
+        "--smiles_file", type=str, help="File with a SMILES, InChI or molblock."
     )
     sp_explain.add_argument(
-        "--chebi_graph_path",
-        type=str,
-        default=None,
-        help="Path to chebi_graph.pkl for class name and parent lookup (optional).",
+        "--name", type=str, default=None, help="Molecule name for the picture title."
     )
-    sp_explain.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Path to save the molecule visualization image (PNG).",
-    )
-    sp_explain.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Print the assembled xclingo program before running.",
-    )
+    add_explain_inputs(sp_explain)
     sp_explain.set_defaults(func=_handle_explain)
 
-    # ── rule_to_nl ───────────────────────────────────────────────────────────
     sp_rtnl = subparsers.add_parser(
         "rule_to_nl",
-        help="Translate a learned ILP rule to a natural language description.",
+        help="Explain what a learned rule asks of a molecule (picture + short text).",
     )
-    rule_group_rtnl = sp_rtnl.add_mutually_exclusive_group(required=True)
-    rule_group_rtnl.add_argument(
-        "--rule", type=str, help="ILP rule clause(s) as a string."
-    )
-    rule_group_rtnl.add_argument(
-        "--rule_file", type=str, help="File containing ILP rule clause(s)."
-    )
-    sp_rtnl.add_argument(
-        "--chebi_graph_path",
-        type=str,
-        default=None,
-        help="Path to chebi_graph.pkl for class name and parent lookup (optional).",
-    )
-    sp_rtnl.add_argument(
-        "--aux_library_dir",
-        type=str,
-        default=None,
-        help="Auxiliary library directory (llm_generated_rules/... ) whose aux_* predicate "
-        "descriptions annotate the LLM-generated predicates in the rule (optional).",
-    )
+    add_explain_inputs(sp_rtnl)
     sp_rtnl.set_defaults(func=_handle_rule_to_nl)
 
     return parser
 
 
-def _handle_rule_to_nl(args):
-    from chebILP.explainability.rule_to_nl import translate_rule
-
+def _explain_common(args):
+    """(rule text, ChEBI graph or None) for the explain / rule_to_nl commands."""
     rule = args.rule
     if rule is None:
         with open(args.rule_file, "r") as f:
             rule = f.read()
-
     chebi_graph = None
     if args.chebi_graph_path and os.path.exists(args.chebi_graph_path):
         import pickle as _pickle
@@ -961,47 +946,41 @@ def _handle_rule_to_nl(args):
         print(
             f"Warning: chebi_graph_path '{args.chebi_graph_path}' does not exist. Proceeding without ChEBI graph."
         )
+    return rule, chebi_graph
 
-    print(
-        translate_rule(
-            rule, chebi_graph=chebi_graph, aux_library_dir=args.aux_library_dir
-        )
+
+def _handle_rule_to_nl(args):
+    from chebILP.explainability.explain import explain_rule
+
+    rule, chebi_graph = _explain_common(args)
+    expl = explain_rule(
+        rule, chebi_graph=chebi_graph, aux_library_dir=args.aux_library_dir
     )
+    print(expl.text)
+    if args.output:
+        expl.image.save(args.output)
+        print(f"Picture saved to {args.output}")
 
 
 def _handle_explain(args):
     from chebILP.explainability.explain import explain_molecule
 
-    smiles = args.smiles
-    if smiles is None:
+    molecule = args.smiles
+    if molecule is None:
         with open(args.smiles_file, "r") as f:
-            smiles = f.read().strip()
-
-    rule = args.rule
-    if rule is None:
-        with open(args.rule_file, "r") as f:
-            rule = f.read()
-
-    chebi_graph = None
-    if args.chebi_graph_path and os.path.exists(args.chebi_graph_path):
-        import pickle as _pickle
-
-        with open(args.chebi_graph_path, "rb") as f:
-            chebi_graph = _pickle.load(f)
-    elif args.chebi_graph_path:
-        print(
-            f"Warning: chebi_graph_path '{args.chebi_graph_path}' does not exist. Proceeding without ChEBI graph."
-        )
-
-    satisfies, explanation_text, _ = explain_molecule(
-        smiles=smiles,
-        rule=rule,
+            molecule = f.read()
+    rule, chebi_graph = _explain_common(args)
+    expl = explain_molecule(
+        molecule,
+        rule,
         chebi_graph=chebi_graph,
-        output_path=args.output,
-        verbose=args.verbose,
+        aux_library_dir=args.aux_library_dir,
+        name=args.name,
     )
-
-    print(explanation_text)
+    print(expl.text)
+    if args.output:
+        expl.image.save(args.output)
+        print(f"Picture saved to {args.output}")
 
 
 def main():

@@ -16,8 +16,9 @@ dependencies = [
 
 [project.optional-dependencies]
 explain = [
-    "xclingo>=2.0b14",
+    "xclingo>=2.0b24",
     "Pillow>=12.1.1",
+    "matplotlib>=3.8",  # only for its bundled DejaVu fonts
 ]
 llm = [
     "anthropic>=0.104.1",
