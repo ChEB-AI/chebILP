@@ -315,6 +315,9 @@ class GDLGame:
             for s in self.static_model
             if s.name == "init" and len(s.arguments) == 1
         )
+        if not self.roles:
+            # Some games declare no role: the players are those with a legal move at the start.
+            self.roles = sorted(self.query([self.init_state])[0].legal, key=str)
 
     @classmethod
     def from_file(cls, path: str) -> "GDLGame":
