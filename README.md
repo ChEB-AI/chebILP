@@ -9,7 +9,8 @@ and evaluated with [Clingo](https://potassco.org/clingo/). Optionally, an LLM in
 Requirements:
 - Python ≥ 3.14 (required by current Popper)
 - [SWI-Prolog](https://www.swi-prolog.org/Download.html) on `PATH` (used by Popper and Aleph)
-- Popper: `pip install git+https://github.com/logic-and-learning-lab/Popper`
+- Popper: `pip install git+https://github.com/sfluegel05/Popper@feature/preprocessing-speedup`. `learn` needs
+  this fork: it skips the exact combine solve after the search (`final_combine_solve`) and loads precompiled BKs.
 - NuWLS: `learn` runs Popper with the NuWLS anytime solver by default, which needs the `NuWLS-c` binary on `PATH`.
   Install it as described in the [Popper README](https://github.com/logic-and-learning-lab/Popper), or pass `--no-nuwls`.
 

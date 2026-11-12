@@ -24,12 +24,10 @@ from popper.util import MAX_BODY, MAX_VARS
 # heuristic's ~1000 works; when every hint shares a level the value only sets relative
 # priority, so a single constant is enough (see popper-sfluegel/search-guidance.md).
 DEFAULT_HEURISTIC_LEVEL = 10
-# Popper's timeout covers only the search. Its final exact MaxSAT combine gets
-# POPPER_FINAL_COMBINE_TIMEOUT, after which Popper keeps the best hypothesis of the search
-# (needs popper-sfluegel's final_combine_timeout; other Popper versions ignore it). A run still
-# going POPPER_FINAL_COMBINE_GRACE after the timeout is killed and counts as no solution.
-POPPER_FINAL_COMBINE_TIMEOUT = 200
-POPPER_FINAL_COMBINE_GRACE = 300
+# Popper skips the exact combine solve after the search (popper-sfluegel's final_combine_solve), so a
+# run ends shortly after its timeout. One still going POPPER_KILL_GRACE s after it is killed and
+# counts as no solution.
+POPPER_KILL_GRACE = 60
 
 _BODY_PRED_RE = re.compile(r"body_pred\(\s*([a-z_][A-Za-z0-9_]*)\s*,\s*(\d+)\s*\)")
 _HEAD_PRED_RE = re.compile(r"head_pred\(\s*[a-z_][A-Za-z0-9_]*\s*,\s*(\d+)\s*\)")
@@ -155,7 +153,7 @@ prog_str = format_prog(prog) if prog else None
 result = {{"prog_str": prog_str, "score": list(score) if score else None, "num_programs": popper_stats.stats.total_programs}}
 print(json.dumps(result))
 '''
-    hard_limit = settings_parameters.get("timeout", 0) + POPPER_FINAL_COMBINE_GRACE
+    hard_limit = settings_parameters.get("timeout", 0) + POPPER_KILL_GRACE
     try:
         result = subprocess.run(
             [sys.executable, "-c", script],
@@ -174,9 +172,7 @@ print(json.dumps(result))
         log_subprocess_output(
             log_dir, f"Training: {bias_file} (killed after {hard_limit} s)", stderr
         )
-        print(
-            f"    Popper did not finish within {hard_limit} s (final combine stage); no solution."
-        )
+        print(f"    Popper did not finish within {hard_limit} s; no solution.")
         return {
             "prog_str": None,
             "score": None,
@@ -315,7 +311,7 @@ def learn_chebi_classes(
         "noisy": True,
         "nuwls": nuwls,
         "timeout": timeout,
-        "final_combine_timeout": POPPER_FINAL_COMBINE_TIMEOUT,
+        "final_combine_solve": False,
     }
     if mdl_weight_fn != 1 or mdl_weight_fp != 1 or mdl_weight_size != 1:
         settings_parameters["fn_weight"] = mdl_weight_fn
@@ -374,6 +370,16 @@ def learn_chebi_classes(
         print(
             "Warning: --heuristic_guidance needs an LLM rule library (--predicate_dir); ignoring it."
         )
+
+    # Popper's Settings swallows unknown kwargs, so an older Popper would run the unbounded final solve
+    if tool == "popper":
+        import inspect
+        from popper.util import Settings
+
+        if "final_combine_solve" not in inspect.signature(Settings.__init__).parameters:
+            raise RuntimeError(
+                "The installed Popper has no final_combine_solve setting; install popper-sfluegel (see README)."
+            )
 
     # fail before the first run rather than hours into it
     first_files = None
