@@ -85,7 +85,18 @@ def _handle_build_samples(args):
 def _handle_build_bk(args):
     classes = resolve_classes(args)
     ilp_builder = _make_ilp_builder(args)
-    ilp_builder.build_bk(classes)
+    ilp_builder.build_bk(classes, compile_workers=args.compile_workers)
+
+
+def _handle_compile_bk(args):
+    from chebILP.prolog_bk import prepare_prolog_bks
+
+    prepare_prolog_bks(
+        resolve_classes(args),
+        args.problem_dir,
+        args.predicate_dir,
+        args.compile_workers,
+    )
 
 
 def _handle_learn(args):
@@ -529,7 +540,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compute the dataset's numeric facts (e.g. mol_weight/ring_size) to ground "
         "the rules against (kept out of bk.pl; only aux_* extensions are saved).",
     )
+    _compile_help = (
+        "swipl processes compiling train atoms BKs to bk.qlf (default: 4; each needs about 1.4 GB per "
+        "9M facts). With --predicate_dir, the library facts also go to bk_aux.pl."
+    )
+    sp_bk.add_argument("--compile_workers", type=int, default=4, help=_compile_help)
     sp_bk.set_defaults(func=_handle_build_bk)
+
+    # ── compile_bk ───────────────────────────────────────────────────────
+    sp_compile = subparsers.add_parser(
+        "compile_bk",
+        help="Prepare existing train BKs for learn: compile the atoms bk.pl to bk.qlf, or write a "
+        "library's bk_aux.pl (build_bk does this itself). Only missing or outdated files are written.",
+    )
+    add_class_arguments(sp_compile)
+    sp_compile.add_argument("--problem_dir", type=str, required=True)
+    sp_compile.add_argument(
+        "--predicate_dir",
+        type=str,
+        default=None,
+        help="LLM rule library the BK was built with (default: none, i.e. the atoms BK).",
+    )
+    sp_compile.add_argument(
+        "--compile_workers", type=int, default=4, help=_compile_help
+    )
+    sp_compile.set_defaults(func=_handle_compile_bk)
 
     # ── learn ────────────────────────────────────────────────────────────
     sp_learn = subparsers.add_parser(

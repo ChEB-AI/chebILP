@@ -24,6 +24,10 @@ def _aleph_mode_str(name, arity, is_head):
     return f":- {kind}(*, {name}({', '.join(args)}))."
 
 
+# separates the header of an Aleph .b (modes, determinations) from its BK facts
+ALEPH_BK_MARKER = "%% ===== background knowledge ====="
+
+
 def build_aleph_background(head_name, body_predicates, train_bk_lines, head_arity=1):
     """Assemble the structural Aleph ``.b`` for a class from its Popper-format inputs.
 
@@ -41,7 +45,7 @@ def build_aleph_background(head_name, body_predicates, train_bk_lines, head_arit
         f":- determination({head_name}/{head_arity}, {name}/{arity})."
         for name, arity in body
     ]
-    lines += ["", "%% ===== background knowledge ====="]
+    lines += ["", ALEPH_BK_MARKER]
     return "\n".join(lines) + "\n" + "\n".join(train_bk_lines) + "\n"
 
 
@@ -118,13 +122,15 @@ class ILPProblem(ABC):
         write(os.path.join(folder, "bias.pl"), bias_lines)
         write(os.path.join(folder, "bk.pl"), self._bk_lines())
 
-    def write_aleph(self, folder: str, stem: str | None = None):
+    def write_aleph(self, folder: str, stem: str | None = None, with_bk: bool = True):
         """
         Write the ILP problem to .b/.f/.n files in Aleph format.
 
         Args:
             folder: The folder where the problem files will be saved.
             stem: File name stem (defaults to the head predicate's name).
+            with_bk: Write the BK facts into the .b. Without them the .b holds only modes and
+                determinations, and the run loads the BK from elsewhere (``chebILP.prolog_bk``).
         """
         head, arity = self.head_predicate
         path = os.path.join(folder, stem or head)
@@ -134,6 +140,9 @@ class ILPProblem(ABC):
         with open(path + ".b", "w+", newline="\n") as f:
             f.write(
                 build_aleph_background(
-                    head, self.body_predicates(), self._bk_lines(), head_arity=arity
+                    head,
+                    self.body_predicates(),
+                    self._bk_lines() if with_bk else [],
+                    head_arity=arity,
                 )
             )

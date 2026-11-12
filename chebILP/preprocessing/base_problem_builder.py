@@ -21,9 +21,11 @@ from chebILP.ilp_path_manager import (
     class_head,
     get_aleph_stem,
     get_bk_dir,
+    get_bk_path,
     get_exs_path,
 )
 from chebILP.ilp_problem import ILPProblem
+from chebILP.prolog_bk import QlfCompiler, write_aux
 from chebILP.predicate_generation.auxiliary_rules import (
     SHARED_OWNER,
     derive_rule_extensions,
@@ -74,21 +76,23 @@ def build_split_backgrounds(
     dependencies=None,
     aux_library_dir: Optional[str] = None,
     computed_facts: bool = True,
-) -> tuple[dict[str, list[str]], bool]:
+) -> tuple[dict[str, list[str]], bool, dict[str, int]]:
     """BK fact lines per split, with the extensions of ``programs`` if given.
 
     The rule programs are ground once over all splits, with the dataset's computed facts and the
     seeded FG facts they reference (both used for grounding only), and each derived fact goes to
     the split of its example, or to every split if it mentions none. Seeded FG predicates among ``programs`` are emitted from their RDKit
     match. ``dependencies`` defaults to the library programs the rules build on; they are ground
-    but emit nothing. Returns ``(lines_by_split, grounding_failed)``.
+    but emit nothing. Returns ``(lines_by_split, grounding_failed, n_base)``: each split's lines start
+    with its ``n_base[split]`` base-encoding facts, followed by the library facts.
     """
     lines_by_split = {
         split: list(dataset.build_background(rows)[0])
         for split, rows in rows_by_split.items()
     }
+    n_base = {split: len(lines) for split, lines in lines_by_split.items()}
     if not programs:
-        return lines_by_split, False
+        return lines_by_split, False, n_base
 
     seed_names = {p.name for p in programs if is_fg_seed_name(p.name)}
     asp_programs = [p for p in programs if not is_fg_seed_name(p.name)]
@@ -139,7 +143,7 @@ def build_split_backgrounds(
     if seed_names:
         for split, rows in rows_by_split.items():
             lines_by_split[split] += dataset.seed_fact_lines(seed_names, rows)
-    return lines_by_split, failed
+    return lines_by_split, failed, n_base
 
 
 def background_with_rules(
@@ -151,7 +155,7 @@ def background_with_rules(
     computed_facts: bool = True,
 ) -> list[str]:
     """One flat BK fact list for ``rows``, exactly as :meth:`ILPProblemBuilder.build_bk` builds it."""
-    lines_by_split, _ = build_split_backgrounds(
+    lines_by_split, _, _ = build_split_backgrounds(
         dataset,
         {"all": rows},
         programs,
@@ -231,9 +235,26 @@ class ILPProblemBuilder:
                 f"{counts[min_neg_id][1]} across all splits"
             )
 
-    def build_bk(self, target_ids: list[str]):
-        """Write ``bk.pl``/``bias.pl`` per split (and Aleph files for train) for the given targets."""
+    def build_bk(self, target_ids: list[str], compile_workers: int = 4):
+        """Write ``bk.pl``/``bias.pl`` per split (and Aleph files for train) for the given targets, and
+        the train BK for Prolog (``chebILP.prolog_bk``): ``bk.qlf`` for atoms, compiled by
+        ``compile_workers`` swipl processes alongside, and with a library its ``bk_aux.pl``. The library
+        BK needs the class's atoms BK to be built already."""
+        if self.aux_library_dir:
+            missing = [
+                t
+                for t in target_ids
+                if not os.path.exists(
+                    get_bk_path(t, "train", base_dir=self.problem_dir)
+                )
+            ]
+            if missing:
+                raise FileNotFoundError(
+                    f"Build the atoms BK first: no train atoms bk.pl for {len(missing)} class(es) "
+                    f"({', '.join(map(str, missing[:10]))})."
+                )
         failed_classes = []
+        compiler = QlfCompiler(compile_workers)
         pbar = tqdm.tqdm(target_ids, desc="Building background knowledge")
         for target_id in pbar:
             pbar.set_description(
@@ -252,7 +273,7 @@ class ILPProblemBuilder:
                 if self.aux_library_dir
                 else None
             )
-            lines_by_split, failed = build_split_backgrounds(
+            lines_by_split, failed, n_base = build_split_backgrounds(
                 self.dataset,
                 rows_by_split,
                 programs,
@@ -287,11 +308,30 @@ class ILPProblemBuilder:
                         aux_library_dir=self.aux_library_dir,
                     )
                     problem.write_aleph(
-                        os.path.dirname(stem), stem=os.path.basename(stem)
+                        os.path.dirname(stem),
+                        stem=os.path.basename(stem),
+                        with_bk=False,
                     )
+            if self.aux_library_dir:
+                train_lines = lines_by_split["train"]
+                write_aux(
+                    target_id,
+                    self.problem_dir,
+                    self.aux_library_dir,
+                    train_lines[n_base["train"] :],
+                )
+                compiler.submit(target_id, self.problem_dir)
+            else:
+                compiler.submit(target_id, self.problem_dir, force=True)
 
+        failed_compiles = compiler.finish()
         if failed_classes:
             print(
                 f"\n{len(failed_classes)} class(es) built without their auxiliary rule "
                 f"extensions because grounding failed: {', '.join(failed_classes)}"
+            )
+        if failed_compiles:
+            raise RuntimeError(
+                f"qcompile failed for {len(failed_compiles)} class(es); learn cannot run them "
+                f"until compile_bk succeeds: {failed_compiles[:3]}"
             )

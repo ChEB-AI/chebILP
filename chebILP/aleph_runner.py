@@ -21,6 +21,8 @@ import subprocess
 from popper.util import MAX_BODY
 
 from chebILP.ilp_path_manager import class_head
+from chebILP.ilp_problem import ALEPH_BK_MARKER
+from chebILP.prolog_bk import probe_goals
 
 ALEPH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aleph")
 RUN_ALEPH_PL = os.path.join(ALEPH_DIR, "run_aleph.pl")
@@ -33,6 +35,7 @@ _DEFAULT_SETTINGS = {"i": 3, "noise": 200, "minpos": 2, "nodes": 50000, "verbosi
 _SUBPROCESS_TIMEOUT_BUFFER = (
     30  # headroom over the internal wall budget for swipl startup + IO
 )
+_BK_LOAD_FAILED = 3  # exit status of an Aleph run whose BK files do not load
 _MAX_SEED_UNITS = (
     6  # above this, seed with the full hypothesis only (avoid 2^n start nodes)
 )
@@ -289,12 +292,15 @@ def run_ilp_training_aleph(
     head_name=None,
     head_arity=1,
     run_stem_name=None,
+    prolog_bk_files=None,
 ):
     """Learn one class with Aleph. Mirrors run_ilp_training_subprocess's return contract.
 
     ``aleph_stem`` is the build-time stem (``get_aleph_stem``); ``<stem>.b/.f/.n`` must exist.
     The runnable .b (settings + optional seed graph injected) and the copied .f/.n are written
-    under ``log_dir/aleph/`` so a run is reproducible and inspectable.
+    under ``log_dir/aleph/`` so a run is reproducible and inspectable. With ``prolog_bk_files``
+    (see ``chebILP.prolog_bk``), the runnable .b keeps only the header of ``<stem>.b`` and loads
+    those files in place of its facts.
 
     The target defaults to the class's ``class_head`` (``chebi_<id>`` or ``ec_*``, unary), so the CLI
     caller need not change. For another problem (e.g. a minted Zendo/IGGP task), pass the target
@@ -311,7 +317,28 @@ def run_ilp_training_aleph(
             (m.group(1), int(m.group(2))) for m in _BODY_PRED_RE.finditer(f.read())
         }
     with open(aleph_stem + ".b") as f:
-        structural_b = f.read()
+        if prolog_bk_files:
+            header = []
+            for line in f:
+                header.append(line)
+                if line.strip() == ALEPH_BK_MARKER:
+                    break
+            else:
+                raise ValueError(f"{aleph_stem}.b has no '{ALEPH_BK_MARKER}' line")
+            # a failed load (e.g. a .qlf of another SWI version) can leave the BK empty with only a
+            # warning, so a fact of each file must hold afterwards
+            loads = "".join(
+                f":- catch(load_files('{p}', []), E, (print_message(error, E), "
+                f"halt({_BK_LOAD_FAILED}))).\n"
+                for p in prolog_bk_files
+            )
+            probes = "".join(
+                f":- ( catch({g}, _, fail) -> true ; halt({_BK_LOAD_FAILED}) ).\n"
+                for g in probe_goals(prolog_bk_files)
+            )
+            structural_b = "".join(header) + loads + probes
+        else:
+            structural_b = f.read()
 
     settings = dict(_DEFAULT_SETTINGS)
     settings["clauselength"] = max_body + 1
@@ -350,6 +377,11 @@ def run_ilp_training_aleph(
             timeout=hard_timeout,
         )
         out = (result.stdout or "") + "\n" + (result.stderr or "")
+        if result.returncode == _BK_LOAD_FAILED:
+            raise RuntimeError(
+                f"Aleph could not load the BK of {run_stem}.b (a .qlf loads only in the "
+                f"SWI-Prolog version that wrote it; rerun compile_bk): {out.strip()[-500:]}"
+            )
     except FileNotFoundError:
         raise RuntimeError(
             "SWI-Prolog ('swipl') was not found on PATH; Aleph needs it. "

@@ -17,14 +17,18 @@ from chebILP.ilp_path_manager import (
     get_exs_path,
     get_aleph_stem,
 )
+from chebILP.prolog_bk import check_loadable, prolog_bk_files
 from popper.util import MAX_BODY, MAX_VARS
 
 # Clingo heuristic level for prefer_body_pred hints. Any non-zero value below the size
 # heuristic's ~1000 works; when every hint shares a level the value only sets relative
 # priority, so a single constant is enough (see popper-sfluegel/search-guidance.md).
 DEFAULT_HEURISTIC_LEVEL = 10
-# Popper's timeout covers only the search; its final exact MaxSAT combine has no limit.
-# A run still going this long after the timeout is killed and counts as no solution.
+# Popper's timeout covers only the search. Its final exact MaxSAT combine gets
+# POPPER_FINAL_COMBINE_TIMEOUT, after which Popper keeps the best hypothesis of the search
+# (needs popper-sfluegel's final_combine_timeout; other Popper versions ignore it). A run still
+# going POPPER_FINAL_COMBINE_GRACE after the timeout is killed and counts as no solution.
+POPPER_FINAL_COMBINE_TIMEOUT = 200
 POPPER_FINAL_COMBINE_GRACE = 300
 
 _BODY_PRED_RE = re.compile(r"body_pred\(\s*([a-z_][A-Za-z0-9_]*)\s*,\s*(\d+)\s*\)")
@@ -311,6 +315,7 @@ def learn_chebi_classes(
         "noisy": True,
         "nuwls": nuwls,
         "timeout": timeout,
+        "final_combine_timeout": POPPER_FINAL_COMBINE_TIMEOUT,
     }
     if mdl_weight_fn != 1 or mdl_weight_fp != 1 or mdl_weight_size != 1:
         settings_parameters["fn_weight"] = mdl_weight_fn
@@ -370,7 +375,23 @@ def learn_chebi_classes(
             "Warning: --heuristic_guidance needs an LLM rule library (--predicate_dir); ignoring it."
         )
 
+    # fail before the first run rather than hours into it
+    first_files = None
     for chebi_id in classes_list:
+        if os.path.exists(get_bk_path(chebi_id, "train", problem_dir, aux_library_dir)):
+            files = prolog_bk_files(
+                chebi_id, problem_dir, aux_library_dir, verify=False
+            )
+            first_files = first_files or files
+    if first_files:
+        check_loadable(first_files, tool)
+
+    for chebi_id in classes_list:
+        try:
+            prolog_bk = prolog_bk_files(chebi_id, problem_dir, aux_library_dir)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"ChEBI:{chebi_id}: {e} - skipping.")
+            continue
         start_time = time.perf_counter()
         # Run training in subprocess (isolated Prolog session)
         print(f"Training ChEBI:{chebi_id}")
@@ -472,10 +493,12 @@ def learn_chebi_classes(
                 head_name=class_head(chebi_id),
                 head_arity=head_arity,
                 run_stem_name=str(chebi_id),
+                prolog_bk_files=prolog_bk,
             )
         else:
+            class_parameters = {**settings_parameters, "prolog_bk_files": prolog_bk}
             train_result = run_ilp_training_subprocess(
-                exs_path, bk_path, bias_path, settings_parameters, log_dir=results_dir
+                exs_path, bk_path, bias_path, class_parameters, log_dir=results_dir
             )
         prog_str = train_result["prog_str"]  # string representation for display/storage
         score = train_result["score"]
