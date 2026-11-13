@@ -126,14 +126,19 @@ GROUNDING_MEMORY_BUDGET_BYTES = 4 * 1024**3
 GROUNDING_BATCH_SIZE = 25
 
 
-def _address_space_limit(budget: int) -> int | None:
-    """``RLIMIT_AS`` value leaving ``budget`` bytes of headroom above what is mapped now."""
+def _mapped_bytes() -> int | None:
+    """Address space this process has mapped, or ``None`` where ``/proc`` is unavailable."""
     try:
         with open("/proc/self/statm") as f:
-            mapped_pages = int(f.read().split()[0])
+            return int(f.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
     except (OSError, ValueError, IndexError):
         return None
-    return mapped_pages * os.sysconf("SC_PAGE_SIZE") + budget
+
+
+def _address_space_limit(budget: int) -> int | None:
+    """``RLIMIT_AS`` value leaving ``budget`` bytes of headroom above what is mapped now."""
+    mapped = _mapped_bytes()
+    return None if mapped is None else mapped + budget
 
 
 # "atom does not occur in any rule head" spans two lines, the atom on the second.
@@ -199,10 +204,16 @@ def _summarize_clingo_messages(per_group: list[list[str]]) -> None:
         tqdm.write(f"  clingo: {message}")
 
 
-def _ground_groups(rules, fact_groups, target_labels, timeout):
-    """Ground ``rules`` over each group of facts separately, merging the derived tuples."""
+def _ground_groups(rules, fact_groups, target_labels, timeout, stop_after_bytes=None):
+    """Ground ``rules`` over each group of facts separately, merging the derived tuples.
+
+    Returns ``(merged, per_group_messages, n_done)``. With ``stop_after_bytes``, stops after the
+    first group that leaves the process that much larger than at the start, since clingo never
+    frees the symbols a grounding created.
+    """
     merged: dict[str, list[tuple[str, ...]]] = {}
     per_group: list[list[str]] = []
+    start = _mapped_bytes() if stop_after_bytes is not None else None
     for group in fact_groups:
         messages: list = []
         per_group.append(messages)
@@ -211,14 +222,19 @@ def _ground_groups(rules, fact_groups, target_labels, timeout):
         )
         for name, tuples in derived.items():
             merged.setdefault(name, []).extend(tuples)
-    _summarize_clingo_messages(per_group)
-    return merged
+        if start is not None and _mapped_bytes() - start > stop_after_bytes:
+            break
+    return merged, per_group, len(per_group)
 
 
 def _ground_extensions_child(
     queue, rules, fact_groups, target_labels, timeout, memory_budget
 ):
-    """Child-process body: cap address space, then ground and return the result via ``queue``."""
+    """Child-process body: cap address space, then ground and return the result via ``queue``.
+
+    Grounds groups until the child has grown by half the budget, so that the parent can go on
+    in a fresh child.
+    """
     try:
         import resource
 
@@ -228,7 +244,18 @@ def _ground_extensions_child(
     except (ImportError, ValueError, OSError):
         pass  # cap unavailable: the parent's wall-clock ceiling is then the only backstop
     try:
-        queue.put(("ok", _ground_groups(rules, fact_groups, target_labels, timeout)))
+        queue.put(
+            (
+                "ok",
+                _ground_groups(
+                    rules,
+                    fact_groups,
+                    target_labels,
+                    timeout,
+                    stop_after_bytes=memory_budget // 2,
+                ),
+            )
+        )
     except MemoryError as e:
         # Reporting the failure allocates, and under an exhausted RLIMIT_AS that raises a
         # second MemoryError which kills the child before it can say why — leaving only its
@@ -262,9 +289,13 @@ def ground_extensions_isolated(
     memory cap hit, killing signal, timeout, or grounding error — this raises
     ``RuntimeError`` so the caller can reject the offending programs and continue.
 
+    clingo never frees a symbol, so a child grows with every group it grounds. A child stops
+    once it has grown by half of ``memory_budget`` and the remaining groups go to a fresh one;
+    the budget therefore bounds a single group, not the whole call.
+
     ``timeout`` is the per-group solve budget; ``total_timeout`` is the wall-clock ceiling
-    for the whole child, and defaults to ``timeout + 60`` for a single group. Pass one of
-    them: without any ceiling a child that wedges rather than dying leaves the parent
+    for all children together, and defaults to ``timeout + 60`` for a single group. Pass one
+    of them: without any ceiling a child that wedges rather than dying leaves the parent
     polling for ever.
 
     Falls back to an in-process call where forking is unavailable (e.g. Windows).
@@ -276,43 +307,68 @@ def ground_extensions_isolated(
     try:
         ctx = multiprocessing.get_context("fork")
     except ValueError:
-        return _ground_groups(rules, fact_groups, target_labels, timeout)
+        merged, per_group, _ = _ground_groups(
+            rules, fact_groups, target_labels, timeout
+        )
+        _summarize_clingo_messages(per_group)
+        return merged
 
-    result_queue = ctx.Queue()
-    proc = ctx.Process(
-        target=_ground_extensions_child,
-        args=(result_queue, rules, fact_groups, target_labels, timeout, memory_budget),
-    )
-    proc.start()
-
-    # Wall-clock ceiling for the whole child, distinct from the per-group ``timeout``.
+    # Wall-clock ceiling for all children, distinct from the per-group ``timeout``.
     join_timeout = total_timeout
     if join_timeout is None and timeout is not None:
         join_timeout = timeout * max(len(fact_groups), 1) + 60
     deadline = None if join_timeout is None else time.monotonic() + join_timeout
 
-    # Drain the queue while the child runs: a large result can exceed the pipe buffer, so
-    # the child blocks on flush until we read — joining first would deadlock. Polling also
-    # lets us notice a child that was killed (OOM/SIGKILL) without producing a result.
+    merged: dict[str, list[tuple[str, ...]]] = {}
+    per_group: list[list[str]] = []
+    done = 0
     while True:
-        try:
-            status, payload = result_queue.get(timeout=0.5)
-            break
-        except queue_mod.Empty:
-            if not proc.is_alive():
-                proc.join()
-                raise RuntimeError(
-                    f"grounding died before returning (exit code {proc.exitcode})"
-                )
-            if deadline is not None and time.monotonic() > deadline:
-                proc.terminate()
-                proc.join()
-                raise RuntimeError(f"grounding exceeded the {join_timeout}s time limit")
+        result_queue = ctx.Queue()
+        proc = ctx.Process(
+            target=_ground_extensions_child,
+            args=(
+                result_queue,
+                rules,
+                fact_groups[done:],
+                target_labels,
+                timeout,
+                memory_budget,
+            ),
+        )
+        proc.start()
 
-    proc.join()
-    if status == "ok":
-        return payload
-    raise RuntimeError(payload)
+        # Drain the queue while the child runs: a large result can exceed the pipe buffer, so
+        # the child blocks on flush until we read — joining first would deadlock. Polling also
+        # lets us notice a child that was killed (OOM/SIGKILL) without producing a result.
+        while True:
+            try:
+                status, payload = result_queue.get(timeout=0.5)
+                break
+            except queue_mod.Empty:
+                if not proc.is_alive():
+                    proc.join()
+                    raise RuntimeError(
+                        f"grounding died before returning (exit code {proc.exitcode})"
+                    )
+                if deadline is not None and time.monotonic() > deadline:
+                    proc.terminate()
+                    proc.join()
+                    raise RuntimeError(
+                        f"grounding exceeded the {join_timeout}s time limit"
+                    )
+
+        proc.join()
+        if status != "ok":
+            raise RuntimeError(payload)
+        derived, messages, n_done = payload
+        for name, tuples in derived.items():
+            merged.setdefault(name, []).extend(tuples)
+        per_group += messages
+        done += n_done
+        if done >= len(fact_groups):
+            break
+    _summarize_clingo_messages(per_group)
+    return merged
 
 
 def evaluate_with_clingo(
